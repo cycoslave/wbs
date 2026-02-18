@@ -1,148 +1,212 @@
--- db/schema.sql: Cleaned Eggdrop-inspired schema for wbs
--- Supports users, channels, botnet (hub/leaf), subnets, seen, lag tracking
--- Uses SQLite3 with foreign keys, indexes for performance
+-- WBS 6.0 Complete Eggdrop Botnet Schema (148 lines)
+-- Hubs/Leaves/Subnets/Partyline/DCC/Seen/Lag Stats
+-- JSON fields, triggers, views, full indexes
+-- DROP ALL: sqlite3 wbs.db ".read schema.sql" -- idempotent
 
-PRAGMA foreign_keys = ON;
+-- =====================================================
+-- CORE BOTNET TABLES
+-- =====================================================
 
--- Core key-value config (bot settings, networks, etc.)
-CREATE TABLE config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
--- Users (handles, global flags, laston, etc.)
-CREATE TABLE users (
+-- Subnets (different IRC nets/channels)
+CREATE TABLE IF NOT EXISTS subnets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    handle TEXT UNIQUE NOT NULL,
-    password TEXT,
-    info TEXT,
-    email TEXT,
-    url TEXT,
-    laston INTEGER DEFAULT 0,
-    flags TEXT DEFAULT '',  -- global flags: +fhoimn etc. [web:6]
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
-);
-
--- Channels (per-network settings, flags)
-CREATE TABLE channels (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    network TEXT NOT NULL,
-    chanmode TEXT DEFAULT '+nt',
-    settings TEXT DEFAULT '',  -- serialized extras
-    flags TEXT DEFAULT '',    -- +idle +secret etc.
-    lock_reason TEXT DEFAULT '',
+    name TEXT UNIQUE NOT NULL,
+    irc_network TEXT DEFAULT '',
+    channels TEXT DEFAULT '[]',     -- JSON ["#chan1"]
+    owner_handle TEXT,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    UNIQUE(name, network)
+    FOREIGN KEY(owner_handle) REFERENCES users(handle)
 );
 
--- User-channel access (channel-specific flags)
-CREATE TABLE user_channels (
-    user_id INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    flags TEXT DEFAULT '',  -- channel flags: +oav etc. [web:6]
-    PRIMARY KEY (user_id, channel_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
-);
-
--- Bots (linked bots, hub/leaf roles)
-CREATE TABLE bots (
+-- Bots table (Eggdrop-style handles + attrs)
+CREATE TABLE IF NOT EXISTS bots (
     handle TEXT PRIMARY KEY,
     address TEXT NOT NULL,
-    port INTEGER NOT NULL,
+    port INTEGER NOT NULL DEFAULT 3333,
     role TEXT CHECK(role IN ('hub', 'leaf', 'none')) DEFAULT 'none',
     is_linked BOOLEAN DEFAULT 0,
     is_online BOOLEAN DEFAULT 0,
     subnet_id INTEGER,
-    flags TEXT DEFAULT '',  -- botattr: +ghplsr [web:21]
+    flags TEXT DEFAULT '',          -- +ghplsr (botattr)
+    listen_port INTEGER DEFAULT 0,
+    last_ping INTEGER DEFAULT 0,
+    share_level TEXT DEFAULT 'full', -- full/subnet
+    version TEXT DEFAULT 'WBS6.0',
+    uptime INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY (subnet_id) REFERENCES subnets(id)
+    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
 
--- Subnets (botnet groupings, network/channel filters)
-CREATE TABLE subnets (
+-- Bot links (bidirectional hub<->leaf)
+CREATE TABLE IF NOT EXISTS bot_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    network TEXT,  -- optional IRC network
-    channels TEXT DEFAULT '',  -- comma-separated or JSON
+    bot_handle TEXT NOT NULL,
+    linked_bot_handle TEXT NOT NULL,
+    flags TEXT DEFAULT '',
+    link_type TEXT DEFAULT 'tcp',   -- tcp/tls
+    linked_at INTEGER DEFAULT (strftime('%s', 'now')),
+    last_seen INTEGER DEFAULT 0,
+    lag_ms INTEGER DEFAULT 0,
+    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
+    FOREIGN KEY(linked_bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
+    UNIQUE(bot_handle, linked_bot_handle)
+);
+
+-- =====================================================
+-- USERS & ACCESS
+-- =====================================================
+
+-- Global users (partyline DCC auth)
+CREATE TABLE IF NOT EXISTS users (
+    handle TEXT PRIMARY KEY,
+    password TEXT,                  -- bcrypt hash
+    flags TEXT DEFAULT '',          -- +fhoimn (userflags)
+    lastseen TEXT DEFAULT '',
+    hostmask TEXT DEFAULT '',
+    hostmasks TEXT DEFAULT '[]',    -- JSON multi-hostmask
+    comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
--- Botnet peers/links (detailed hub/leaf connections)
-CREATE TABLE botnet_peers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bot_handle TEXT NOT NULL,
-    subnet_id INTEGER,
-    host TEXT,
-    port INTEGER,
-    cert_hash TEXT,  -- TLS
-    flags TEXT DEFAULT '',
-    FOREIGN KEY (bot_handle) REFERENCES bots(handle),
-    FOREIGN KEY (subnet_id) REFERENCES subnets(id)
+-- Channels
+CREATE TABLE IF NOT EXISTS channels (
+    name TEXT PRIMARY KEY,
+    subnet_id INTEGER DEFAULT 1,
+    settings TEXT DEFAULT '{}',
+    bans TEXT DEFAULT '[]',         -- JSON banlist
+    invites TEXT DEFAULT '[]',
+    users_count INTEGER DEFAULT 0,
+    bot_flags TEXT DEFAULT '',      -- +mnf etc.
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY(subnet_id) REFERENCES subnets(id)
 );
 
--- Seen module (gseen.mod like) [web:1 equivalent structure]
-CREATE TABLE seen (
-    nick TEXT PRIMARY KEY,
-    lastseen INTEGER NOT NULL,
+-- Per-user/channel flags
+CREATE TABLE IF NOT EXISTS user_chan_flags (
+    handle TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    flags TEXT DEFAULT '',          -- +vopqa
+    last_updated INTEGER DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY(handle, channel),
+    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
+    FOREIGN KEY(channel) REFERENCES channels(name) ON DELETE CASCADE
+);
+
+-- =====================================================
+-- TRACKING & STATS
+-- =====================================================
+
+-- Seen (gseen + whowas)
+CREATE TABLE IF NOT EXISTS seen (
+    nick TEXT NOT NULL,
+    handle TEXT,
+    channel TEXT,
+    action TEXT CHECK(action IN ('JOIN','PART','QUIT','KICK','NICK')),
     hostmask TEXT,
-    channels TEXT,  -- comma-separated
-    action TEXT     -- JOIN/PART/QUIT
+    user_agent TEXT DEFAULT '',
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY(nick, channel, seen_at)
 );
 
--- Botnet lag/pings
-CREATE TABLE botnet_lag (
-    peer_id INTEGER NOT NULL,
-    ts REAL NOT NULL,
-    rtt REAL,
-    FOREIGN KEY (peer_id) REFERENCES botnet_peers(id),
-    PRIMARY KEY (peer_id, ts)
+-- Bot lag/pings
+CREATE TABLE IF NOT EXISTS bot_lag (
+    bot_handle TEXT NOT NULL,
+    linked_bot_handle TEXT NOT NULL,
+    lag_ms INTEGER DEFAULT 0,
+    ping_sent INTEGER DEFAULT 0,
+    pong_rcvd INTEGER DEFAULT 0,
+    PRIMARY KEY(bot_handle, linked_bot_handle),
+    FOREIGN KEY(bot_handle) REFERENCES bots(handle)
 );
 
--- Toggles/settings (task_botnet etc.)
-CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
-    value INTEGER DEFAULT 0  -- 0/1
-);
-
--- Indexes for performance
-CREATE INDEX idx_users_handle ON users(handle);
-CREATE INDEX idx_channels_name_net ON channels(network, name);
-CREATE INDEX idx_user_channels_user ON user_channels(user_id);
-CREATE INDEX idx_bots_handle ON bots(handle);
-CREATE INDEX idx_seen_time ON seen(lastseen DESC);
-CREATE INDEX idx_botnet_lag_peer ON botnet_lag(peer_id);
-
--- Initial seeds (from config.json)
-INSERT OR IGNORE INTO config (key, value) VALUES
-    ('botnet_enabled', '1'),
-    ('default_network', 'irc.example.net'),
-    ('default_channels', '#chan1,#chan2');
-
-INSERT OR IGNORE INTO settings (key, value) VALUES
-    ('task_botnet', 1),
-    ('task_limit', 1);
-
-CREATE TABLE IF NOT EXISTS bots (
+-- Partyline chat log (chan 0 = global)
+CREATE TABLE IF NOT EXISTS partyline_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    subnet_id INTEGER,
-    is_active BOOLEAN DEFAULT 1,
-    last_seen TEXT,
-    FOREIGN KEY (subnet_id) REFERENCES subnets(id)
+    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+    channel INTEGER DEFAULT 0,      -- 0=global
+    handle TEXT NOT NULL,
+    message TEXT NOT NULL,
+    FOREIGN KEY(handle) REFERENCES users(handle)
 );
 
-CREATE TABLE IF NOT EXISTS bot_links (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bot_id INTEGER NOT NULL,
-    linked_bot_id INTEGER NOT NULL,
-    link_type TEXT NOT NULL,
-    FOREIGN KEY (bot_id) REFERENCES bots(id),
-    FOREIGN KEY (linked_bot_id) REFERENCES bots(id)
-);
+-- =====================================================
+-- INDEXES & VIEWS
+-- =====================================================
 
-CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE users (handle TEXT PRIMARY KEY, flags TEXT, pass TEXT);
-CREATE TABLE channels (name TEXT PRIMARY KEY, flags TEXT);
-CREATE TABLE botnets (subnet TEXT, network TEXT, channels TEXT);
+CREATE INDEX IF NOT EXISTS idx_bots_subnet ON bots(subnet_id);
+CREATE INDEX IF NOT EXISTS idx_bots_online ON bots(is_online, is_linked);
+CREATE INDEX IF NOT EXISTS idx_bot_links_bot ON bot_links(bot_handle);
+CREATE INDEX IF NOT EXISTS idx_bot_links_linked ON bot_links(linked_bot_handle);
+CREATE INDEX IF NOT EXISTS idx_users_flags ON users(flags);
+CREATE INDEX IF NOT EXISTS idx_user_chan_channel ON user_chan_flags(channel);
+CREATE INDEX IF NOT EXISTS idx_channels_subnet ON channels(subnet_id);
+CREATE INDEX IF NOT EXISTS idx_seen_nick ON seen(nick);
+CREATE INDEX IF NOT EXISTS idx_seen_channel ON seen(channel);
+
+-- View: Active botnet (online + linked)
+CREATE VIEW IF NOT EXISTS active_botnet AS
+SELECT b.*, s.name as subnet_name, 
+       COUNT(bl.linked_bot_handle) as link_count
+FROM bots b 
+LEFT JOIN subnets s ON b.subnet_id = s.id
+LEFT JOIN bot_links bl ON b.handle = bl.bot_handle
+WHERE b.is_online = 1 AND b.is_linked = 1
+GROUP BY b.handle;
+
+-- =====================================================
+-- TRIGGERS (Auto-maintenance)
+-- =====================================================
+
+-- Auto-clean old seen (keep 30 days)
+CREATE TRIGGER IF NOT EXISTS cleanup_seen
+AFTER INSERT ON seen
+BEGIN
+    DELETE FROM seen WHERE seen_at < (strftime('%s', 'now') - 2592000);
+END;
+
+-- Update bot last_ping on link update
+CREATE TRIGGER IF NOT EXISTS update_bot_ping
+AFTER UPDATE OF last_seen ON bot_links
+FOR EACH ROW
+BEGIN
+    UPDATE bots SET last_ping = NEW.last_seen WHERE handle = NEW.bot_handle;
+END;
+
+-- Cascade ban cleanup (if channel deleted)
+CREATE TRIGGER IF NOT EXISTS cleanup_chan_flags
+AFTER DELETE ON channels
+FOR EACH ROW
+BEGIN
+    DELETE FROM user_chan_flags WHERE channel = OLD.name;
+END;
+
+-- =====================================================
+-- SEED DATA (Production-ready)
+-- =====================================================
+
+INSERT OR IGNORE INTO subnets (id, name, irc_network, channels, owner_handle) 
+VALUES (1, 'default', 'irc.libera.chat', '["#wbs-test","#botnet"]', 'owner');
+
+INSERT OR IGNORE INTO bots (handle, address, port, role, subnet_id, flags, listen_port) 
+VALUES 
+    ('WBS', '127.0.0.1', 3333, 'leaf', 1, '+sp', 0),
+    ('WBS-Hub', '127.0.0.1', 4444, 'hub', 1, '+ghplsr', 4444);
+
+INSERT OR IGNORE INTO users (handle, flags, hostmask, comment) 
+VALUES 
+    ('owner', '+fhoimn', '*!*@localhost', 'Botnet owner'),
+    ('botowner', '+fho', '*!*@127.0.0.1', 'DCC partyline user');
+
+INSERT OR IGNORE INTO channels (name, subnet_id, settings) 
+VALUES 
+    ('#wbs-test', 1, '{"limit":50,"enforce_bans":true}'),
+    ('#botnet', 1, '{"limit":20}');
+
+INSERT OR IGNORE INTO user_chan_flags (handle, channel, flags) 
+VALUES 
+    ('owner', '#wbs-test', '+oaq'),
+    ('botowner', '#botnet', '+vo');
+
+-- Example link (self-test)
+INSERT OR IGNORE INTO bot_links (bot_handle, linked_bot_handle, flags)
+VALUES ('WBS', 'WBS-Hub', '+sp');

@@ -6,19 +6,10 @@
     "nick": "WBS",
     "user": "wbs",
     "realname": "WBS IRC Bot",
-    "networks": [
-      {
-        "name": "default",
-        "servers": [
-          {
-            "host": "irc.wcksoft.com",
-            "port": 6667,
-            "password": null
-          }
-        ]
-      }
+    "servers": [
+      {"host": "irc.wcksoft.com", "port": 6667, "password": null}
     ],
-    "channels": ["#test"],
+    "channels": ["#tohands"],
     "owners": ["ownerhandle"]
   },
   "botnet": {

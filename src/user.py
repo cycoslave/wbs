@@ -11,7 +11,6 @@ import time
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 from .db import get_db  # async context manager -> aiosqlite.Connection
-from .db import get_db_connection  # Assume async conn func exists
 
 async def sync_user(nick: str, host: str, channel: str = None, bot_id: int = None):
     """Sync user data to DB for botnet sharing."""

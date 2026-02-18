@@ -170,9 +170,34 @@ def get_channel_info(channel_name: str):
     """Retrieve channel information from DB or cache."""
     # Example: from wbs.db import get_channel_by_name
     # return get_channel_by_name(channel_name)
-    from .db import get_db_connection  # Use relative import
-    conn = get_db_connection()
+    from .db import get_db  # Use relative import
+    conn = get_db()
     # Query logic here, e.g.:
     # cursor = conn.execute("SELECT * FROM channels WHERE name=?", (channel_name,))
     # return cursor.fetchone()
     pass  # Replace with real implementation
+
+async def sync_channel(db, channel_data: Dict) -> None:
+    """Sync channel settings/bans/flags from botnet peer."""
+    channel = channel_data.get('channel')
+    if not channel:
+        return
+    
+    async with get_db() as conn:
+        # Upsert channel settings
+        await conn.execute(
+            """INSERT OR REPLACE INTO channelsettings (channel, settings)
+               VALUES (?, ?)""",
+            (channel.lower(), json.dumps(channel_data.get('settings', {})))
+        )
+        
+        # Sync user flags
+        for user_flags in channel_data.get('userflags', []):
+            await conn.execute(
+                """INSERT OR REPLACE INTO userchanflags (handle, channel, flags)
+                   VALUES (?, ?, ?)""",
+                (user_flags['handle'], channel.lower(), user_flags['flags'])
+            )
+        
+        await conn.commit()
+    logger.info(f"Synced channel {channel}")

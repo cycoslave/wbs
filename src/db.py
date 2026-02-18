@@ -1,94 +1,37 @@
+#!/usr/bin/env python3
+"""
+src/db.py - Unified async SQLite for WBS: bots/users/channels/seen.
+Supports multi-process (WAL mode).
+"""
 import aiosqlite
 import asyncio
+import json
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, List
 from dataclasses import dataclass
-from typing import Optional
 
-DB_PATH = Path("wbs.db")
-SCHEMA_PATH = Path(__file__).parent.parent.parent / "db" / "schema.sql"
+SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
+
+@dataclass
+class BotConfig:
+    server: str
+    port: int
+    nickname: str
+    realname: str
+    channels: List[str]
 
 @dataclass
 class BotRecord:
     id: int
-    name: str
-    subnet_id: Optional[int]  # NULL if standalone
-    is_active: bool
-    last_seen: Optional[str]  # ISO timestamp
-
-@dataclass
-class BotLinkRecord:
-    id: int
-    bot_id: int
-    linked_bot_id: int  # Self-links for botnet
-    link_type: str  # 'subnet', 'full', etc.
-
-async def get_schema_sql() -> str:
-    """Load schema SQL from file."""
-    schema = SCHEMA_PATH.read_text(encoding="utf-8")
-    return schema
-
-
-async def get_db(force_recreate: bool = False) -> AsyncGenerator[aiosqlite.Connection, None]:
-    """
-    Get DB connection context manager.
-    
-    Ensures directory exists, sets row_factory, and initializes schema idempotently
-    unless force_recreate=True (drops all user tables first).
-    """
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    
-    try:
-        if force_recreate:
-            await recreate_tables(db)
-        else:
-            await ensure_schema(db)
-        yield db
-    finally:
-        await db.close()
-
-
-async def recreate_tables(db: aiosqlite.Connection) -> None:
-    """Drop all user tables (preserve sqlite_master/sqlite_sequence) and apply full schema."""
-    async with db.execute("SELECT name FROM sqlite_master WHERE type='table';") as cur:
-        tables = await cur.fetchall()
-    
-    for (table,) in tables:
-        if table not in {'sqlite_sequence', 'sqlite_master'}:
-            await db.execute(f"DROP TABLE IF EXISTS {table}")
-    
-    await db.commit()
-    
-    schema = await get_schema_sql()
-    await db.executescript(schema)
-    await db.commit()
-
-
-async def ensure_schema(db: aiosqlite.Connection) -> None:
-    """
-    Apply schema idempotently: executes even if tables exist (CREATE TABLE IF NOT EXISTS).
-    
-    Safe to call multiple times. Assumes schema.sql uses IF NOT EXISTS for tables/indexes.
-    """
-    schema = await get_schema_sql()
-    await db.executescript(schema)
-    await db.commit()
-
-
-async def init_db(force: bool = False) -> None:
-    """Initialize DB (fresh recreate if force=True)."""
-    status = "(fresh recreate)" if force else "(existing or created)"
-    async with get_db(force_recreate=force) as db:
-        print(f"DB initialized at {DB_PATH} {status}")
-        # Future: await seed_initial_config(db)
+    handle: str  # Changed from 'name'
+    subnetid: Optional[int] = None
+    isactive: bool = False
+    lastseen: Optional[str] = None
 
 @dataclass
 class ChannelSettingsRow:
     channel: str
-    settings: str  # e.g., "+enforcebans +dynamicbans"
+    settings: str  # e.g., "enforce-bans,dynamic-bans"
 
 @dataclass
 class UserChanFlagsRow:
@@ -96,32 +39,107 @@ class UserChanFlagsRow:
     channel: str
     flags: str  # e.g., "voipf"
 
-async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
-    db = await aiosqlite.connect("wbs.db")
+@dataclass
+class BotLinkRecord:
+    id: int
+    bot_handle: str
+    linked_bot_handle: str
+    flags: str = ''
+    link_type: str = 'tcp'
+    linked_at: int = 0
+    last_seen: int = 0
+    lag_ms: int = 0
+
+async def get_bot_config(bot_handle: str) -> BotConfig:  # handle not ID
+    """Load IRC config for bot handle from bots table."""
+    async with get_db() as db:
+        row = await db.fetchone("""
+            SELECT address AS server, port, handle AS nickname, 
+                   'WBS Bot' AS realname, '[]' AS channels  -- Static or config.json
+            FROM bots WHERE handle = ?
+        """, (bot_handle,))
+        
+        if not row:
+            raise ValueError(f"No bot config for handle '{bot_handle}'")
+            
+        channels = ['#tohands']  # From your config['bot']['channels']
+        return BotConfig(
+            server=row['server'] or 'irc.wcksoft.com',
+            port=row['port'] or 6667,
+            nickname=row['nickname'],
+            realname=row['realname'],
+            channels=channels
+        )
+
+async def get_schema_sql() -> str:
+    """Load schema.sql."""
+    return SCHEMA_PATH.read_text(encoding="utf-8")
+
+async def ensure_schema(db: aiosqlite.Connection) -> None:
+    """Idempotent schema apply."""
+    schema = await get_schema_sql()
+    await db.executescript(schema)
+    await db.commit()
+
+async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool = False) -> None:
+    """Unified init: config path, schema file, WAL multi-process."""
+    db_path_obj = Path(db_path)
+    db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    
+    async with aiosqlite.connect(db_path_obj) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")  # Multi-process safe
+        await db.execute("PRAGMA synchronous=NORMAL")  # Perf
+        await db.commit()
+        
+        if force:
+            # Drop user tables
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
+                tables = await cur.fetchall()
+            for (table,) in tables:
+                if table not in {'sqlite_master', 'sqlite_sequence'}:
+                    await db.execute(f"DROP TABLE IF EXISTS {table}")
+            await db.commit()
+        
+        await ensure_schema(db)
+        print(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
+
+async def seed_db(db_path: str, config: dict):
+    """Seed from config.json: bot record, channels, users."""
+    bot_config = config.get('bot', {})
+    nick = bot_config['nick']
+    
+    async with aiosqlite.connect(db_path) as db:
+        # Self-bot record (handle-based)
+        await db.execute("""
+            INSERT OR IGNORE INTO bots (handle, address, port, subnet_id, is_online)
+            VALUES (?, '127.0.0.1', 3333, 1, 1)
+        """, (nick,))
+        
+        # Channels
+        for ch in bot_config.get('channels', []):
+            await db.execute("""
+                INSERT OR IGNORE INTO channels (name, subnet_id, settings)
+                VALUES (?, 1, '{}')
+            """, (ch,))
+        
+        # Owner user
+        owner = bot_config.get('owners', ['owner'])[0]
+        await db.execute("""
+            INSERT OR IGNORE INTO users (handle, flags, password)
+            VALUES (?, '+fhoimn', '')
+        """, (owner,))
+        
+        await db.commit()
+        print(f"DB seeded: bot={nick}, owner={owner}")
+
+async def get_db(db_path: str) -> AsyncGenerator[aiosqlite.Connection, None]:
+    """Context manager."""
+    db = await aiosqlite.connect(db_path)
+    db.row_factory = aiosqlite.Row
+    db.execute("PRAGMA journal_mode=WAL")
     try:
         yield db
         await db.commit()
     finally:
         await db.close()
-
-# Init DB (call once)
-async def init_db():
-    async with aiosqlite.connect("wbs.db") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS channels (
-                channel TEXT PRIMARY KEY,
-                settings TEXT DEFAULT '+statuslog +userbans'
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS userchanflags (
-                handle TEXT,
-                channel TEXT,
-                flags TEXT,
-                PRIMARY KEY (handle, channel)
-            )
-        """)
-        await db.commit()
-
-# Run init
-asyncio.run(init_db())
