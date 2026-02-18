@@ -7,9 +7,9 @@
     "user": "wbs",
     "realname": "WBS IRC Bot",
     "servers": [
-      {"host": "irc.wcksoft.com", "port": 6667, "password": null}
+      {"host": "irc.example.com", "port": 6667, "password": null}
     ],
-    "channels": ["#tohands"],
+    "channels": ["#channel"],
     "owners": ["ownerhandle"]
   },
   "botnet": {
@@ -31,7 +31,7 @@
     {
       "id": "default",
       "networks": ["default"],
-      "channels": ["#tohands"]
+      "channels": ["#channel"]
     }
   ],
   "logging": {
@@ -39,7 +39,7 @@
     "file": "logs/wbs.log"
   },
   "gseen": {
-    "file": "gseen.dat",
+    "file": "seen.db",
     "cmdchar": "!",
     "save_interval": 60,
     "expire_days": 60,
