@@ -10,7 +10,7 @@ import json
 import logging
 import multiprocessing as mp
 import ssl
-from typing import Dict, List, Optional, Tuple, AsyncGenerator
+from typing import Dict, List, Optional, Tuple, AsyncGenerator, Any
 
 import aiosqlite
 from dataclasses import dataclass, asdict
@@ -49,6 +49,7 @@ class BotnetManager:
         self.subnet_id: str = "default"
         self.my_name: str = "WBS"
         self.my_port: Optional[int] = None  # Loaded from DB/config
+        self.partyline_users: Dict[int, List[str]] = {0: []}  # Global partyline users
 
     async def load_config(self) -> None:
         """Load bot record, links, subnet from DB."""
@@ -191,6 +192,16 @@ class BotnetManager:
         log.info("Incoming botnet link")
         asyncio.create_task(self.read_loop(reader, writer, "incoming"))
 
+    async def relay_partyline_chat(self, channel: int, user: str, msg: str):
+        """Partyline chat → botnet broadcast (chan 0 = global)."""
+        line = f"<{user}> {msg}\n"  # Eggdrop-style
+        await self.broadcast_chat(line, channel)
+
+    async def relay_partyline_cmd(self, user: str, cmd: str):
+        """Partyline .cmd → route_command."""
+        parsed = self.parse_command(f".{cmd}")
+        await self.route_command(parsed, "partyline")
+
     async def listen(self) -> None:
         """Listen for incoming links."""
         if not self.my_port:
@@ -201,13 +212,23 @@ class BotnetManager:
             await server.serve_forever()
 
     async def run(self) -> None:
-        """Main botnet loop."""
         await self.load_config()
-        # Outgoing links
         tasks = [self.handle_peer(name) for name in self.peers]
-        # Incoming server
-        if self.is_hub or True:  # Hubs/leaves can listen?
+        if self.is_hub or self.my_port:
             tasks.append(self.listen())
+        # Partyline queue poller
+        async def poll_core_queue():
+            while True:
+                try:
+                    msg = self.queue_from_core.get_nowait()
+                    if msg['type'] == 'chat':
+                        await self.relay_partyline_chat(msg['channel'], msg['user'], msg['text'])
+                    elif msg['type'] == 'cmd':
+                        await self.relay_partyline_cmd(msg['user'], msg['cmd'])
+                except:
+                    pass
+                await asyncio.sleep(0.05)
+        tasks.append(poll_core_queue())
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def stop(self) -> None:

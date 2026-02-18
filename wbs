@@ -9,16 +9,16 @@ import os
 import signal
 import sys
 from pathlib import Path
-
-# FIXED: 'fork' ONCE at top
 mp.set_start_method('fork', force=True)
 
-from src.irc import start_irc_process
-from src.core import start_core_process  
+import janus  # Add at top
+
+from src.irc import startircprocess
+from src.core import start_core_process, run_foreground_partyline
 from src.botnet import botnet_process
 from src.db import init_db, seed_db
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
 def parse_args():
@@ -104,33 +104,19 @@ def setup_db_once(config):
     asyncio.run(seed_db(db_path, config))
     logger.info("DB seeded successfully")
 
-# FIXED Wrappers:
-def run_irc_process(config_path, channels, db_path, event_q, cmd_q):
-    """Reload full config, await async DB."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+def runircprocess(config_path, channels, dbpath, eventq, cmdq):
     config = json.load(open(config_path))
-    asyncio.run(init_db(db_path, schema_path="db/schema.sql"))  # AWAIT ASYNC
-    start_irc_process(config, channels, event_q.sync_q, cmd_q.sync_q)  # Pass .sync_q
+    asyncio.run(init_db(dbpath))
+    startircprocess(config, channels, eventq.sync_q, cmdq.sync_q) 
 
-def run_core_process(config_path, db_path, event_q, cmd_q):
-    """Core: re-init + call existing start_core_process."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-    asyncio.run(init_db(db_path, schema_path="db/schema.sql"))
+def runcoreprocess(config_path, dbpath, eventq, cmdq):
     config = json.load(open(config_path))
-    from src.core import start_core_process  # FIXED: Import function directly
-    start_core_process(config, event_q.async_q, cmd_q.async_q)  # Uses your existing wrapper
+    asyncio.run(init_db(dbpath, schemapath='db/schema.sql'))
+    start_core_process(config, eventq.sync_q, cmdq.sync_q) 
 
-def run_botnet_process(botnet_config, db_path):
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-    asyncio.run(init_db(db_path, schema_path="db/schema.sql"))
-    from src.botnet import botnet_process
-    botnet_process(botnet_config)
-
-# ... [daemonize unchanged] ...
-
-def shutdown(signum=None, frame=None):
-    logger.info("Shutdown initiated...")
-    sys.exit(0)
+def runbotnetprocess(botnetconfig, dbpath, queuetocore, queuefromcore):  
+    asyncio.run(init_db(dbpath, schemapath='db/schema.sql'))
+    botnet_process(queuetocore.sync_q, queuefromcore.sync_q, dbpath)  
 
 def main():
     global args
@@ -148,34 +134,45 @@ def main():
     
     setup_db_once(config)
     
-    if not args.foreground:
-        daemonize(config)
-    
     import janus
-    event_q = janus.Queue()
-    cmd_q = janus.Queue()
-    processes = []
     
-    try:
-        # FIXED ARGS: config_path + primitives
-        irc_p = mp.Process(
-            target=run_irc_process,
-            args=(args.config, config['bot']['channels'], config['db']['path'], event_q, cmd_q),
-            name="irc", daemon=True
-        )
-        irc_p.start()
-        processes.append(irc_p)
+    if args.foreground:
+        logger.info("FOREGROUND PARTYLINE MODE")
+        eventq = janus.Queue()
+        cmdq = janus.Queue()
+        ircp = mp.Process(target=runircprocess, args=(args.config, config['bot']['channels'], config['db']['path'], eventq, cmdq), name='irc', daemon=True)
+        ircp.start()
+        if config['botnet']['enabled']:
+            botnet_p = mp.Process(
+                target=run_botnet_process,
+                args=(config['botnet'], config['db']['path']),
+                name="botnet", daemon=True
+            )
+            botnet_p.start()
+            logger.info("Botnet process started")
+        else:
+            botnet_p = None
+        try:
+            asyncio.run(run_foreground_partyline(config, eventq.async_q, cmdq.async_q, ircp, botnet_p))
+        finally:
+            print("Shutting down processes...")
+            ircp.terminate() 
+            ircp.join(timeout=10)
+            if botnet_p:
+                botnet_p.terminate()
+                botnet_p.join(timeout=10)
+        return
+    else:
+        # Background mode
+        eventq = janus.Queue()
+        cmdq = janus.Queue()
+        processes = []
+        ircp = mp.Process(target=runircprocess, args=(args.config, config['bot']['channels'], config['db']['path'], eventq, cmdq), name='irc', daemon=True)
+        ircp.start(); processes.append(ircp)
         logger.info("IRC process started")
-        
-        core_p = mp.Process(
-            target=run_core_process,
-            args=(args.config, config['db']['path'], event_q, cmd_q),
-            name="core", daemon=True
-        )
-        core_p.start()
-        processes.append(core_p)
+        corep = mp.Process(target=runcoreprocess, args=(args.config, config['db']['path'], eventq, cmdq), name='core', daemon=True)
+        corep.start(); processes.append(corep)
         logger.info("Core process started")
-        
         if config['botnet']['enabled']:
             botnet_p = mp.Process(
                 target=run_botnet_process,
@@ -185,20 +182,16 @@ def main():
             botnet_p.start()
             processes.append(botnet_p)
             logger.info("Botnet process started")
-            
-    except Exception as e:
-        logger.error(f"Process startup failed: {e}")
-        return
-    
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-    
-    logger.info("All processes started, waiting...")
-    try:
-        for p in processes:
-            p.join()
-    except KeyboardInterrupt:
-        shutdown()
+        
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+        
+        logger.info("All processes started, waiting...")
+        try:
+            for p in processes:
+                p.join()
+        except KeyboardInterrupt:
+            shutdown()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

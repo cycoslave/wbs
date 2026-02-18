@@ -11,8 +11,8 @@ requires-python = ">=3.8"
 dependencies = [
   "irc",
   "aiosqlite",
-  "pytest",
-  "janus", 
+  "janus",
+  "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -23,12 +23,12 @@ dev = [
     "ruff",
 ]
 
+[project.scripts]
+wbs = "main:main"         # ./wbs entrypoint
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = "test_*.py"
-python_classes = "Test*"
-python_functions = "test_*"
-addopts = "--cov=wbs --cov-report=html --cov-report=term-missing"
+addopts = "--cov=src --cov-report=term-missing"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

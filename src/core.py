@@ -5,18 +5,23 @@ No IRC reactor; pure queue processor.
 """
 import asyncio
 import multiprocessing as mp
+import janus
+import threading
 import queue
 import time
 import logging
 import os
 from pathlib import Path
 from typing import Dict, Any
+from prompt_toolkit import PromptSession
+from prompt_toolkit.styles import Style
+from prompt_toolkit.patch_stdout import patch_stdout
 
 import aiosqlite  # For inline DB if needed
 
 # Local modules
 from .db import get_db, init_db  # Async DB conn
-from .user import get_user_info, get_user_flags, SeenDB
+from .user import get_user_info, get_user_flags, SeenDB, UserManager
 from .channel import get_channel_info
 from .botnet import BotnetManager
 
@@ -34,28 +39,36 @@ class CoreEventLoop:
         self.botnet_mgr = None
         self.db_path = config.get('db_path', config['db']['path'])
         self.channels = config.get('channels', config['bot'].get('channels', []))
+        self.pending_events = []
 
-    async def run(self):
-        """Async main loop: poll event_q, process events."""
-        await self._async_init()  # Async init
-        logger.info("Core event loop started")
-        
+    def event_poller(self):
+        """Threaded poller like IRC/botnet – non-blocking get_nowait()."""
         while True:
             try:
-                try:
-                    msg_type, data = await asyncio.wait_for(self.event_q.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    await self._periodic_tasks_async()  # Make periodic async too
-                    await asyncio.sleep(0.05)  # Non-blocking
-                    continue
-                    
-                if msg_type == 'event':
-                    await self.handle_event(data)  # Await it
-                # Handle other msg_types...
-                    
-            except Exception as e:
-                logger.error(f"Core loop error: {e}")
-                await asyncio.sleep(0.1)
+                msg = self.event_q.get_nowait()
+                logger.info(f"Core event: {msg.get('type')}, qsize={self.event_q.qsize()}")
+                # Buffer for async loop (thread-safe list or queue)
+                self.pending_events.append(msg)
+            except queue.Empty:
+                pass
+            threading.Event().wait(0.05)  # Low CPU
+
+    async def run(self):
+        """Async main loop: drain buffer, process, periodic."""
+        await self._async_init()
+        logger.info("Core event loop started")
+        
+        poller_thread = threading.Thread(target=self.event_poller, daemon=True)
+        poller_thread.start()
+        
+        while True:
+            # Drain buffered events
+            while self.pending_events:
+                event = self.pending_events.pop(0)
+                await self.handle_event(event)
+            
+            await self._periodic_tasks_async()
+            await asyncio.sleep(0.1)
 
     async def _async_init(self):
         """One-time async setup: DB schema, managers."""
@@ -169,10 +182,10 @@ class CoreEventLoop:
         await self.seen.update_seen(nick, '', event['channel'], 'PART')
 
     def send_cmd(self, cmd_type: str, target: str, text: str = ""):
-        """Send to irc.py via cmd_q."""
+        """Sync put to IRC."""
         cmd_data = {'cmd': cmd_type, 'target': target}
-        if text:
-            cmd_data['text'] = text
+        if text: cmd_data['text'] = text
+        logger.info(f"Cmd put: {cmd_data}, qsize={self.cmd_q.qsize()}")
         self.cmd_q.put(cmd_data)
 
     def _periodic_tasks(self):
@@ -183,6 +196,145 @@ class CoreEventLoop:
     async def _periodic_tasks_async(self):
         """Async wrapper for sync _periodic_tasks."""
         await asyncio.to_thread(self._periodic_tasks)
+
+class Partyline:
+    def __init__(self, config, event_q, cmd_q, irc_p, botnet_p): 
+        self.config = config
+        self.event_q = event_q
+        self.cmd_q = cmd_q
+        self.irc_p = irc_p
+        self.botnet_p = botnet_p
+        self.current_chan = 0
+        self.user = "console"
+        self.db_path = self.config['db']['path']
+        self.db = get_db(self.db_path)
+        self.users = UserManager()
+        self.channels = {0: set()}
+        self.sessions = {}
+        self.event_q = event_q
+
+    async def poll_botnet_events(self):  # <- HERE: async def in Partyline
+        """Background: Print botnet/IRC events to partyline console."""
+        while True:
+            try:
+                event = self.event_q.get_nowait()  # Fixed: sync get_nowait()
+                logger.info(f"Partyline event: {event}")  # Debug
+                if event.get('type') == 'chat':
+                    print(f"[{event.get('channel', 0)}] <{event.get('user', '?')}> {event.get('text', '')}")
+                elif event.get('type') == 'irc_join':
+                    print(f"IRC: {event['nick']} joined {event['chan']}")
+                # Add more: PRIVMSG → print, botnet cmds
+            except queue.Empty:  # Fixed: catches mp.Queue exception
+                pass
+            await asyncio.sleep(0.05)  # Non-blocking
+
+    async def handle_input(self, line):
+        """Parse stdin → cmd_q for IRC/botnet."""
+        line = line.strip()
+        if not line:
+            return
+        
+        if line.startswith('.'):
+            cmd = line[1:].split(maxsplit=1)
+            cmd_name = cmd[0]
+            cmd_args = cmd[1] if len(cmd) > 1 else ''
+            
+            if cmd_name == 'help':
+                print(".help .chans .status .sendnet <cmd> | chat freely")
+            elif cmd_name == 'version':
+                print("WBS 6.0.0")
+            elif cmd_name == 'chans':
+                print(f"Current: {self.current_chan} (0=global)")
+            elif cmd_name == 'join':
+                if len(cmd_args) >= 1:
+                    cmd_data = {'cmd': cmd_name, 'channel': cmd_args if cmd_args else None}
+                    await self.cmd_q.put(cmd_data)
+                    print(f"→ JOIN: {cmd_args}")
+                else:
+                    print("Usage: .join #channel")
+            elif cmd_name == 'part':
+                if len(cmd_args) >= 1:
+                    cmd_data = {'cmd': cmd_name, 'channel': cmd_args if cmd_args else None}
+                    await self.cmd_q.put(cmd_data)
+                    print(f"→ PART: {cmd_args}")
+                else:
+                    print("Usage: .part #channel")
+            elif cmd_name == 'say':
+                if len(cmd_args) >= 2:
+                    chan = cmd_args[0]
+                    msg = ' '.join(cmd_args[1:])
+                    await self.cmd_q.privmsg(chan, msg)
+                    print(f"→ SAY {chan}: {msg}")
+                else:
+                    print("Usage: .say #chan message")
+            elif cmd_name == 'msg':
+                if len(cmd_args) >= 2:
+                    nick = cmd_args[0]
+                    msg = ' '.join(cmd_args[1:])
+                    await self.cmd_q.privmsg(nick, msg)
+                    print(f"→ MSG {nick}: {msg}")
+                else:
+                    print("Usage: .msg nick message")                
+            elif cmd_name == 'quit' or cmd_name == 'die':
+                quit_msg = cmd_args or "WBS 6.0.0"
+                await self.cmd_q.put(('cmd', 'quit', quit_msg))
+                await asyncio.sleep(0.1)
+                raise KeyboardInterrupt('Quit')
+            elif cmd_name == 'chan':
+                try:
+                    self.current_chan = int(cmd_args) or 0
+                    print(f"Switched to channel {self.current_chan}")
+                except ValueError:
+                    print("Usage: .chan <number>")
+            #elif cmd_name == 'sendnet':
+            #    self.cmd_q.put({'type': 'botnet_cmd', 'cmd': cmd_args, 'target': 'all'})
+            #    print(f"→ Botnet: {cmd_args}")
+            else:
+                print("Invalid command!")
+        else:
+            # Chat → botnet
+            await self.cmd_q.put({
+                'type': 'chat', 'user': self.user,
+                'text': line, 'channel': self.current_chan
+            })
+            print(f"[{self.current_chan}] <{self.user}> {line}")
+
+    async def dispatch_cmd(self, cmd: str):
+        parts = cmd.split()
+        if parts[0] == 'help':
+            # send help text
+            pass
+        elif parts[0] == 'chat':
+            self.current_chan = int(parts[1]) if len(parts) > 1 else 0
+        # Add .bots, .chans, .status, botnet cmds (.subnet, .sendnet)
+        elif parts[0] == 'adduser':
+            self.users.add_user(parts[1], hostmask=parts[2] if len(parts)>2 else None)
+
+    def broadcast(self, msg: str, prefix='', local=False):
+        chan_users = self.channels[self.current_chan]
+        for handle in chan_users:
+            # Send via session or botnet relay
+            if local or not self.botnet.is_remote(handle):
+                self.sessions[handle].output.write(f"{prefix}{msg}\n")
+
+    async def run(self):
+        """Partyline main loop + event poller."""
+        poller_task = asyncio.create_task(self.poll_botnet_events())  # <- Starts it here
+        
+        session = PromptSession(message=f"WBS[{self.current_chan}] ")
+        try:
+            while True:
+                line = await session.prompt_async()
+                await self.handle_input(line)
+        except KeyboardInterrupt:
+            print("\nPartyline shutdown...")
+        finally:
+            poller_task.cancel()  # Clean shutdown
+
+async def run_foreground_partyline(config, event_q, cmd_q, irc_p, botnet_p):
+    """Entrypoint for main.py."""
+    partyline = Partyline(config, event_q, cmd_q, irc_p, botnet_p)
+    await partyline.run()
 
 def start_core_process(config, event_q, cmd_q):
     loop = CoreEventLoop(config, event_q, cmd_q)

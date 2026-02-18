@@ -6,13 +6,17 @@ Pure dispatcher; no DB/commands here.
 import multiprocessing as mp
 import queue
 import threading
+import janus
 import irc.bot
 import irc.strings
 import time
+import logging
 from irc.client import ServerConnectionError
 
 # Local imports (add to __init__.py or define inline)
 from .db import get_bot_config  # DB func to load server/nick/channels
+
+logger = logging.getLogger(__name__)
 
 request_trackers = {}  # {req_id: {'type': 'whois', 'nick': 'foo'}}
 
@@ -146,6 +150,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
     def do_cmd(self, cmd_data: dict):
         """Execute cmd from cmd_queue."""
+        print(f"[IRC-Poller] CMD: {cmd_data}")  # Confirm receipt
+        if not self.connection:
+            print("[IRC] No connection")
+            return
+        if not self.connection.is_connected():
+            print("[IRC] Not connected")
+            return
+        print(f"[IRC] {cmd_data['cmd'].upper()} {cmd_data.get('channel', '')}")
         cmd = cmd_data.get('cmd')
         if cmd == 'msg':
             self.send_msg(cmd_data['target'], cmd_data['text'])
@@ -171,24 +183,23 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             ts = event.arguments[1] if len(event.arguments) > 1 else ''
             conn.ctcp_reply(nick, f"PING {ts}")
 
-def start_irc_process(config: dict, channels: list, event_q: mp.Queue, cmd_q: mp.Queue):
-    """
-    mp.Process target: config from main.py, queues for IPC.
-    Polls cmd_q in daemon thread (reactor blocks).
-    """
-    channels = config.get('bot', {}).get('channels', [])
-    bot = WbsIrcBot(config, channels, event_q, cmd_q)
+def startircprocess(config: dict, channels: list, eventq: mp.Queue, cmdq: mp.Queue):
+    """mp.Process target: config from main.py, queues for IPC. Polls cmdq in daemon thread; reactor blocks."""
+    bot = WbsIrcBot(config, channels, eventq, cmdq)  # Your bot init
     
-    def cmd_poller():
+    def cmdpoller():  # <- Add HERE: nested def (captures bot, cmdq)
+        """Daemon thread: poll cmdq, execute bot.docmd()."""
         while True:
             try:
-                cmd_data = cmd_q.get_nowait()
-                bot.do_cmd(cmd_data)
+                cmddata = cmdq.get_nowait()
+                logger.info(f"IRC cmd: {cmddata}, qsize={cmdq.qsize()}")
+                bot.docmd(cmddata)  # Execute msg/join/etc.
             except queue.Empty:
                 pass
-            threading.Event().wait(0.1)  # Low CPU poll
+            threading.Event().wait(0.1)  # Low CPU (~10Hz)
     
-    poller_thread = threading.Thread(target=cmd_poller, daemon=True)
+    poller_thread = threading.Thread(target=cmdpoller, daemon=True)
     poller_thread.start()
     
-    bot.start()  # Blocks; auto-reconnect via base class
+    logger.info("IRC process ready")
+    bot.start()  # Blocks: reactor + auto-reconnect
