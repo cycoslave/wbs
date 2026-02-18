@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/home/loco/Code/eggdrop/wbs6.0.0/./wbs", line 114, in <module>
+    main()
+  File "/home/loco/Code/eggdrop/wbs6.0.0/./wbs", line 96, in main
+    mp.Process(target=IRCProcess().run, name="IRC", daemon=True),
+                      ^^^^^^^^^^
+NameError: name 'IRCProcess' is not defined

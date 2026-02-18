@@ -35,19 +35,27 @@ class CoreEventLoop:
         self.db_path = config.get('db_path', config['db']['path'])
         self.channels = config.get('channels', config['bot'].get('channels', []))
 
-    def run(self):
-        """Sync main loop: poll event_q, process events."""
-        asyncio.run(self._async_init())
+    async def run(self):
+        """Async main loop: poll event_q, process events."""
+        await self._async_init()  # Async init
         logger.info("Core event loop started")
         
         while True:
             try:
-                msg_type, data = self.event_q.get(timeout=1.0)
+                try:
+                    msg_type, data = await asyncio.wait_for(self.event_q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    await self._periodic_tasks_async()  # Make periodic async too
+                    await asyncio.sleep(0.05)  # Non-blocking
+                    continue
+                    
                 if msg_type == 'event':
-                    asyncio.run(self.handle_event(data))
-            except queue.Empty:
-                self._periodic_tasks()
-                time.sleep(0.05)  # 20Hz poll, low CPU
+                    await self.handle_event(data)  # Await it
+                # Handle other msg_types...
+                    
+            except Exception as e:
+                logger.error(f"Core loop error: {e}")
+                await asyncio.sleep(0.1)
 
     async def _async_init(self):
         """One-time async setup: DB schema, managers."""
@@ -169,10 +177,13 @@ class CoreEventLoop:
 
     def _periodic_tasks(self):
         """Botnet poll, lag check (every ~5s)."""
-        if self.botnet_mgr:
+        if hasattr(self, 'botnet_mgr') and self.botnet_mgr:
             self.botnet_mgr.poll_links()
+    
+    async def _periodic_tasks_async(self):
+        """Async wrapper for sync _periodic_tasks."""
+        await asyncio.to_thread(self._periodic_tasks)
 
-def start_core_process(config: dict, event_q: mp.Queue, cmd_q: mp.Queue):
-    """mp.Process target for main.py."""
+def start_core_process(config, event_q, cmd_q):
     loop = CoreEventLoop(config, event_q, cmd_q)
-    loop.run()
+    asyncio.run(loop.run())  # Ensures async run()

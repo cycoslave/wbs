@@ -8,6 +8,7 @@ import queue
 import threading
 import irc.bot
 import irc.strings
+import time
 from irc.client import ServerConnectionError
 
 # Local imports (add to __init__.py or define inline)
@@ -22,6 +23,10 @@ EventType = {
 }
 
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
+    @staticmethod
+    def get_version():
+        return "WBS 6.0.0"
+    
     def __init__(self, config: dict, channels: list, event_queue: mp.Queue, cmd_queue: mp.Queue):
         self.config = config
         self.channels = channels
@@ -36,8 +41,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         except (KeyError, TypeError):
             servers = [(config.get('server', 'irc.wcksoft.com'), 
                        config.get('port', 6667))]
-        
-        print(f"[IRC] Configured for channels: {self.channels}")  # Debug
         super().__init__(servers, config['bot']['nick'], config['bot']['realname'])
 
     def _connect(self):
@@ -47,9 +50,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             self.event_queue.put(('event', {'type': EventType['ERROR'], 'data': 'connect_fail', 'config_id': self.config_id}))
 
     def on_welcome(self, conn, event):
+        print(f"[IRC] *** WELCOME: Registered as {conn.nickname}")
+        print(f"[IRC] Configured for channels: {self.channels}")  # Debug
+        conn.join("#tohands")
+        time.sleep(1)
         for ch in self.channels:
+            print(f"[IRC] Joining: {ch}")
             conn.join(ch)
-        print(f"[IRC] Joined: {self.channels}")
+            time.sleep(1)
         self.event_queue.put(('event', {'type': EventType['READY'], 'config_id': self.config_id}))
 
     def on_pubmsg(self, conn, event):
@@ -154,6 +162,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             req_id = hash(nick)
             request_trackers[req_id] = {'type': 'whois', 'nick': nick}
             self.connection.whois(nick)
+
+    def on_ctcp(self, conn, event):
+        super().on_ctcp(conn, event)
+        nick = event.source.nick
+        ctcp_cmd = event.arguments[0]
+        if ctcp_cmd == 'PING':
+            ts = event.arguments[1] if len(event.arguments) > 1 else ''
+            conn.ctcp_reply(nick, f"PING {ts}")
 
 def start_irc_process(config: dict, channels: list, event_q: mp.Queue, cmd_q: mp.Queue):
     """

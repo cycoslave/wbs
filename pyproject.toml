@@ -9,9 +9,10 @@ description = "Python-based IRC bot with multiprocessing and botnet support (WBS
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-  "jaraco-irc",
+  "irc",
   "aiosqlite",
   "pytest",
+  "janus", 
 ]
 
 [project.optional-dependencies]
