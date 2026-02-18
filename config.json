@@ -1,0 +1,72 @@
+{
+  "db": {
+    "path": "wbs.db"
+  },
+  "bot": {
+    "nick": "WBS",
+    "user": "wbs",
+    "realname": "WBS IRC Bot",
+    "networks": [
+      {
+        "name": "default",
+        "servers": [
+          {
+            "host": "irc.wcksoft.com",
+            "port": 6667,
+            "password": null
+          }
+        ]
+      }
+    ],
+    "channels": ["#test"],
+    "owners": ["ownerhandle"]
+  },
+  "botnet": {
+    "enabled": false,
+    "hub_host": "botnet-hub.example.com",
+    "hub_port": 3333,
+    "hub_password": "secret",
+    "subnet_id": "default"
+  },
+  "users": [
+    {
+      "handle": "owner",
+      "password": "changeme",
+      "flags": "mno",
+      "hosts": ["owner!user@host.example.com"]
+    }
+  ],
+  "subnets": [
+    {
+      "id": "default",
+      "networks": ["default"],
+      "channels": ["#tohands"]
+    }
+  ],
+  "logging": {
+    "level": "INFO",
+    "file": "wbs.log"
+  },
+  "gseen": {
+    "file": "gseen.dat",
+    "cmdchar": "!",
+    "save_interval": 60,
+    "expire_days": 60,
+    "max_seens": {"count": 7, "seconds": 60},
+    "tell_seens": true,
+    "botnet_seens": true,
+    "no_pub_seens": [],
+    "quiet_seens": [],
+    "ai_ignore": ["$nick", "${botnet-nick}", "seen"]
+  },
+  "update": {
+    "auhost": "https://yourhost.com",
+    "auremotefile": "/UPDATE",
+    "useragent": "wbs/6.0.0",
+    "updatetimeout": 10,
+    "wbsver": 6,
+    "wbsversub": 0,
+    "wbsverpatch": 0,
+    "task": {"auget": true}
+  }
+}

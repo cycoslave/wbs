@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wbs"
+version = "6.0.0"
+description = "Python-based IRC bot with multiprocessing and botnet support (WBS)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "irc",
+    "aiosqlite",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "--cov=wbs --cov-report=html --cov-report=term-missing"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
