@@ -97,7 +97,7 @@ class UserChanFlagsRow:
     flags: str  # e.g., "voipf"
 
 async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
-    db = await aiosqlite.connect("pydrop.db")
+    db = await aiosqlite.connect("wbs.db")
     try:
         yield db
         await db.commit()
@@ -106,7 +106,7 @@ async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
 
 # Init DB (call once)
 async def init_db():
-    async with aiosqlite.connect("pydrop.db") as db:
+    async with aiosqlite.connect("wbs.db") as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel TEXT PRIMARY KEY,

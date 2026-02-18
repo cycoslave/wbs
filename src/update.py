@@ -17,7 +17,7 @@ class UpdateManager:
         self.auhost = config.get('auhost', 'https://example.com')
         self.auremotefile = config.get('auremotefile', '/UPDATE')
         self.aulocalfile = Path('.tmp/UPDATE')
-        self.useragent = config.get('useragent', 'pydrop/1.0')
+        self.useragent = config.get('useragent', 'wbs/6.0.0')
         self.updatetimeout = config.get('updatetimeout', 10)
         ver_str = f"{config['wbsver']}.{config['wbsversub']}.{config['wbsverpatch']}"
         self.current_ver = version.parse(ver_str)
@@ -168,7 +168,7 @@ class UpdateManager:
             logger.info("Updated core/update.tcl")
 
     async def _install_full(self, au_data: List):
-        """Perform full installation (adapt for pydrop, e.g., pip install or pyproject.toml)."""
+        """Perform full installation (adapt for WBS, e.g., pip install or pyproject.toml)."""
         logger.info(f"Performing full install for {au_data[0]}.{au_data[1]}.{au_data[2]}")
         wbs_root = next(self.update_dir.glob('wbs*'), None)
         if wbs_root:
@@ -180,4 +180,4 @@ class UpdateManager:
             # stdout, stderr = await proc.communicate()
             # if proc.returncode != 0:
             #     raise RuntimeError(f"Full install failed: {stderr.decode()}")
-            logger.info("Full install placeholder executed (customize for pydrop).")
+            logger.info("Full install placeholder executed (customize for WBS).")

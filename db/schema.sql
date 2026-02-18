@@ -1,4 +1,4 @@
--- db/schema.sql: Cleaned Eggdrop-inspired schema for pydrop
+-- db/schema.sql: Cleaned Eggdrop-inspired schema for wbs
 -- Supports users, channels, botnet (hub/leaf), subnets, seen, lag tracking
 -- Uses SQLite3 with foreign keys, indexes for performance
 
@@ -141,3 +141,8 @@ CREATE TABLE IF NOT EXISTS bot_links (
     FOREIGN KEY (bot_id) REFERENCES bots(id),
     FOREIGN KEY (linked_bot_id) REFERENCES bots(id)
 );
+
+CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE users (handle TEXT PRIMARY KEY, flags TEXT, pass TEXT);
+CREATE TABLE channels (name TEXT PRIMARY KEY, flags TEXT);
+CREATE TABLE botnets (subnet TEXT, network TEXT, channels TEXT);

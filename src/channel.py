@@ -1,5 +1,5 @@
 """
-src/pydrop/channel.py - Handles IRC channel management for pydrop bot.
+src/channel.py - Handles IRC channel management for WBS.
 
 Manages channel state, settings, bans, user flags on channels, and DB interactions.
 Inspired by Eggdrop channels module [web:1].
@@ -168,7 +168,7 @@ def get_channel_mgr() -> ChannelManager:
 
 def get_channel_info(channel_name: str):
     """Retrieve channel information from DB or cache."""
-    # Example: from pydrop.db import get_channel_by_name
+    # Example: from wbs.db import get_channel_by_name
     # return get_channel_by_name(channel_name)
     from .db import get_db_connection  # Use relative import
     conn = get_db_connection()

@@ -1,5 +1,5 @@
 """
-pydrop/botnet.py - Botnet manager for pydrop IRC bot.
+src/botnet.py - Botnet manager for WBS.
 Handles hub/leaf linking, partyline communication, command routing (bot/subnet/botnet),
 user/channel sharing. Supports multiprocessing IPC with core/IRC processes.
 Mimics Eggdrop: aggressive/passive sharing via flags (s/p), partyline cmds (./,/,'), TLS [web:1][web:2].
@@ -47,7 +47,7 @@ class BotnetManager:
         self.partyline_channels: Dict[int, List[str]] = {0: []}  # 0=global partyline [web:2]
         self.is_hub: bool = False
         self.subnet_id: str = "default"
-        self.my_name: str = "pydrop"
+        self.my_name: str = "WBS"
         self.my_port: Optional[int] = None  # Loaded from DB/config
 
     async def load_config(self) -> None:
@@ -76,7 +76,7 @@ class BotnetManager:
 
     async def send_handshake(self, writer: asyncio.StreamWriter, target: str) -> None:
         """Send Eggdrop-style link handshake."""
-        msg = f"PASS :randompw\nSERVER {target} 1 :Pydrop Botnet Link\n"
+        msg = f"PASS :randompw\nSERVER {target} 1 :WBS Botnet Link\n"
         writer.write(msg.encode())
         await writer.drain()
 
