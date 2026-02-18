@@ -36,7 +36,7 @@
   ],
   "logging": {
     "level": "INFO",
-    "file": "wbs.log"
+    "file": "logs/wbs.log"
   },
   "gseen": {
     "file": "gseen.dat",

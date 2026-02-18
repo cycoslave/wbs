@@ -1,3 +1,4 @@
 *.db
 *.pid
+!logs/README.md
 logs/*
