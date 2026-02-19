@@ -1,167 +1,356 @@
-# src/commands.py - DCC chat commands for WBS (Eggdrop partyline port)
+# src/commands.py - Partyline commands for WBS
 
 import asyncio
 import secrets
 import socket
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from wbs.irc import IRCBot
-from wbs.core import BotCore
-from wbs.user import matchattr, get_attributes_str, set_pass, set_comment, nick2hand, has_attr
-from wbs.channel import get_channel_modes, bot_is_op, chanlist
-from wbs.db import get_db
-from wbs.botnet import send_note
+#from src.core import CoreEventLoop
+from .user import UserManager
+#from .channel import get_channel_modes, bot_is_op, chanlist
+from .db import get_db
+from .botnet import BotnetManager
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .core import CoreEventLoop
 
-
-async def send_dcc(bot: BotCore, idx: int, msg: str):
-    """Send to DCC session idx."""
-    if hasattr(bot, 'dcc_sessions') and idx in bot.dcc_sessions:
-        await bot.dcc_sessions[idx].send(msg)
-
+async def send_partyline(config, core_q, irc_q, botnet_q, party_q, idx: int, msg: str):
+    """Send message to partyline session."""
+    try:
+        await party_q.put({'type': 'partyline_msg', 'idx': idx, 'text': msg})
+    except Exception as e:
+        print(f"SEND ERROR: {e}")
 
 # Universal (-|-)
-async def cmd_uptime(bot: BotCore, hand: str, idx: int, arg: str):
-    uptime = str(datetime.timedelta(seconds=int(time.time() - getattr(bot, 'start_time', 0))))
-    await send_dcc(bot, idx, f"Bot uptime: {uptime}")
-    if not getattr(bot, 'is_limbo_hub', False) and hasattr(bot, 'server_online_time'):
-        sup = str(datetime.timedelta(seconds=int(time.time() - bot.server_online_time)))
-        await send_dcc(bot, idx, f"Server uptime: {sup}")
-    if await has_attr(bot.db, hand, 'A'):
-        try:
-            out = subprocess.check_output(['uptime']).decode().split()[:5]
-            await send_dcc(bot, idx, f"System uptime: {' '.join(out)}")
-        except: pass
+async def cmd_uptime(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Show bot/server/system uptime."""
+    #start_time = getattr(core, 'start_time', time.time())
+    start_time = 0
+    uptime = str(timedelta(seconds=int(time.time() - start_time)))
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Bot uptime: {uptime}")
+    
+    # Server uptime if connected
+    #if not core.config.get('limbo_hub') and hasattr(core, 'server_online_time'):
+    #    server_up = str(timedelta(seconds=int(time.time() - core.server_online_time)))
+    #    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Server uptime: {server_up}")
+    
+    # System uptime for admins
+    #user_mgr = UserManager()
+    #if await user_mgr.matchattr(hand, '+A'):
+    #    try:
+    #        out = subprocess.check_output(['uptime'], timeout=2).decode().strip()
+    #        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"System: {out}")
+    #    except:
+    #        pass
     return 1
-
-
-async def cmd_version(bot: BotCore, hand: str, idx: int, arg: str):
-    await send_dcc(bot, idx, f"WBS v0.1 on {socket.gethostname()}")
-    return 1
-
-
-async def cmd_time(bot: BotCore, hand: str, idx: int, arg: str):
-    await send_dcc(bot, idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    return 1
-
 
 # Ops (o|o)
-async def cmd_mode(bot: BotCore, hand: str, idx: int, arg: str):
-    if getattr(bot, 'is_limbo_hub', False):
-        return await send_dcc(bot, idx, "No as limbo hub.")
+async def cmd_mode(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Change channel modes (.mode #chan +o nick)."""
+    if core.config.get('limbo_hub'):
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Cannot use MODE as limbo hub.")
+    
     parts = arg.split(maxsplit=1)
-    if len(parts) < 2: return await send_dcc(bot, idx, ".mode <#chan> <modes>")
+    if len(parts) < 2:
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .mode <#channel> <modes>")
+    
     chan, modes = parts
-    if await matchattr(bot.db, hand, 'o|o', chan):
-        await bot.send_raw(f"MODE {chan} {modes}")
+    user_mgr = UserManager()
+    
+    if await user_mgr.matchattr(hand, 'o|o', chan):
+        # Queue IRC command
+        core.send_cmd('raw', '', f"MODE {chan} {modes}")
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Mode set: {chan} {modes}")
     else:
-        await send_dcc(bot, idx, "Access denied.")
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Access denied (need +o)")
     return 1
 
 
-# Masters (m|m)  
-async def cmd_mnote(bot: BotCore, hand: str, idx: int, arg: str):
+# Masters (m|m)
+async def cmd_mnote(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Send note to users matching flags (.mnote m #chan message)."""
     parts = arg.split(maxsplit=2)
-    if len(parts) < 2: return await send_dcc(bot, idx, ".mnote <flag> [chan] <text>")
-    flag, rest = parts[0], ' '.join(parts[1:])
-    chan = rest.split()[0] if rest.startswith('#') else None
-    text = rest.split(maxsplit=1)[1] if len(rest.split()) > 1 else rest
+    if len(parts) < 2:
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .mnote <flags> [#chan] <message>")
     
-    async with get_db() as conn:
-        for u in await bot.db.userlist(conn, flag, chan):
-            ok = await send_note(u, text)
-            await send_dcc(bot, idx, f"Note {u}: {'OK' if ok else 'FAIL'}")
+    flag = parts[0]
+    rest = ' '.join(parts[1:])
+    
+    # Parse optional channel
+    chan = None
+    if rest.startswith('#'):
+        chan, text = rest.split(maxsplit=1)
+    else:
+        text = rest
+    
+    user_mgr = UserManager()
+    sent, failed = 0, 0
+    
+    async with get_db() as db:
+        users = await user_mgr.list_users(flag)
+        for user in users:
+            # Check if user matches flag in channel context
+            if await user_mgr.matchattr(user.handle, f"+{flag}", chan):
+                # Send via botnet note system
+                if core.botnet_mgr:
+                    ok = await core.botnet_mgr.send_note(user.handle, text)
+                    if ok:
+                        sent += 1
+                    else:
+                        failed += 1
+                    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, 
+                        f"Note {user.handle}: {'OK' if ok else 'FAIL'}")
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Sent: {sent}, Failed: {failed}")
     return 1
 
 
 # Owners/Admins (n|A)
-async def cmd_nopass(bot: BotCore, hand: str, idx: int, arg: str):
-    async with get_db() as conn:
-        nopass = await bot.db.users_no_pass(conn)
-    if not nopass:
-        return await send_dcc(bot, idx, "No users w/o pass.")
-    msg = "\n".join(f"{i}. {h} (+{a})" for i, (h, a) in enumerate(nopass, 1))
-    await send_dcc(bot, idx, msg + "\n.fixpass to fix.")
-    return 1
-
-
-async def cmd_fixpass(bot: BotCore, hand: str, idx: int, arg: str):
-    fixed = 0
-    async with get_db() as conn:
-        for handle, _ in await bot.db.users_no_pass(conn):
-            pw = secrets.token_urlsafe(24)
-            await set_pass(conn, handle, pw)
-            await set_comment(conn, handle, f"{hand} .fixpass {int(time.time())}")
-            fixed += 1
-            await send_dcc(bot, idx, f"{fixed}. {handle} fixed!")
-    await send_dcc(bot, idx, f"Fixed {fixed} passes.")
-    return 1
-
-
-async def cmd_mass(bot: BotCore, hand: str, idx: int, arg: str):
-    parts = arg.split()
-    if len(parts) < 2: return await send_dcc(bot, idx, ".mass <op|dop> <#chan>")
-    act, chan = parts[0].lower(), parts[1]
-    if not await bot_is_op(bot, chan):
-        return await send_dcc(bot, idx, f"Not opped: {chan}")
+async def cmd_nopass(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """List users without passwords."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT handle, flags FROM users WHERE password IS NULL OR password = ''"
+        )
+        rows = await cursor.fetchall()
     
-    targets, skip = [], {'d','fob'} if act=='op' else {'o'}
-    for nick in await chanlist(bot, chan):
-        if nick.lower() != bot.nick.lower():
-            hnick = await nick2hand(bot.db, nick, chan)
-            if hnick and not any(await matchattr(bot.db, hnick, a, chan) for a in skip):
-                if act=='op' or await bot_is_op(bot, chan, nick):
+    if not rows:
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "No users without password.")
+    
+    msg_lines = ["Users without password:"]
+    for i, (handle, flags) in enumerate(rows, 1):
+        msg_lines.append(f"  {i}. {handle} (+{flags})")
+    msg_lines.append("Use .fixpass to generate passwords.")
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, '\n'.join(msg_lines))
+    return 1
+
+
+async def cmd_fixpass(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Generate random passwords for users without one."""
+    fixed = 0
+    user_mgr = UserManager()
+    
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT handle FROM users WHERE password IS NULL OR password = ''"
+        )
+        rows = await cursor.fetchall()
+        
+        for (handle,) in rows:
+            password = secrets.token_urlsafe(24)
+            await user_mgr.set_password(handle, password)
+            
+            # Update comment field
+            comment = f"{hand} .fixpass {int(time.time())}"
+            await db.execute(
+                "UPDATE users SET info = ? WHERE handle = ?",
+                (comment, handle)
+            )
+            fixed += 1
+            await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"  {fixed}. {handle}: {password}")
+        
+        await db.commit()
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Fixed {fixed} passwords.")
+    return 1
+
+
+async def cmd_mass(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Mass op/deop channel (.mass op #chan)."""
+    parts = arg.split()
+    if len(parts) < 2:
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .mass <op|deop> <#channel>")
+    
+    action, chan = parts[0].lower(), parts[1]
+    
+    # Check if bot has ops
+    if not await bot_is_op(core, chan):
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Not opped on {chan}")
+    
+    user_mgr = UserManager()
+    targets = []
+    skip_flags = {'d', 'f', 'o', 'b'} if action == 'op' else {'o'}
+    
+    # Get channel user list
+    users = await chanlist(core, chan)
+    
+    for nick in users:
+        if nick.lower() == core.config['bot']['nick'].lower():
+            continue  # Skip self
+        
+        # Match nick to handle
+        handle = await user_mgr.match_user(f"*!*@{nick}")
+        if handle:
+            # Check flags
+            has_skip = any(await user_mgr.matchattr(handle, f"+{f}", chan) 
+                          for f in skip_flags)
+            if not has_skip:
+                if action == 'op' or await bot_is_op(core, chan, nick):
                     targets.append(nick)
     
-    mode = '+oooo' if act=='op' else '-oooo'
+    # Send MODE commands in batches of 4
+    mode_char = '+' if action == 'op' else '-'
     for i in range(0, len(targets), 4):
         batch = targets[i:i+4]
-        await bot.send_raw(f"MODE {chan} {mode[:len(batch)]} {' '.join(batch)}", quick=True)
-    await send_dcc(bot, idx, f"Mass-{act}: {len(targets)}")
+        modes = mode_char + ('o' * len(batch))
+        core.send_cmd('raw', '', f"MODE {chan} {modes} {' '.join(batch)}")
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Mass {action}: {len(targets)} users")
     return 1
 
 
-async def cmd_channels(bot: BotCore, hand: str, idx: int, arg: str):
-    if getattr(bot, 'is_limbo_hub', False):
-        return await send_dcc(bot, idx, "Limbo: no chans.")
-    lines = [f"{c} [{await get_channel_modes(bot,c)}] [{'op' if await bot_is_op(bot,c) else 'no'}]" 
-             for c in bot.channels]
-    await send_dcc(bot, idx, f"=== Channels ({len(lines)}) ===\n" + '\n'.join(lines))
+async def cmd_channels(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """List active channels."""
+    if core.config.get('limbo_hub'):
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Limbo hub: no channels.")
+    
+    lines = ["=== Active Channels ==="]
+    for chan in core.channels:
+        modes = await get_channel_modes(core, chan)
+        op_status = "op" if await bot_is_op(core, chan) else "no-op"
+        lines.append(f"{chan} [{modes}] [{op_status}]")
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, '\n'.join(lines))
     return 1
 
 
-async def cmd_dns(bot: BotCore, hand: str, idx: int, arg: str):
+async def cmd_dns(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Resolve hostname (.dns example.com)."""
     host = arg.strip()
-    if not host: return await send_dcc(bot, idx, ".dns <host>")
-    await send_dcc(bot, idx, f"Resolving {host}...")
+    if not host:
+        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .dns <hostname>")
+    
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Resolving {host}...")
     try:
-        addr = await asyncio.get_running_loop().getaddrinfo(host, None)
-        await send_dcc(bot, idx, f"{host} -> {addr[0][4][0]}")
+        loop = asyncio.get_running_loop()
+        addrs = await loop.getaddrinfo(host, None)
+        ip = addrs[0][4][0]
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"{host} → {ip}")
     except Exception as e:
-        await send_dcc(bot, idx, f"DNS fail: {e}")
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"DNS failed: {e}")
     return 1
 
+async def cmd_join(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Join IRC channel."""
+    if not arg:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .join #channel [key]")
+        return
+    parts = arg.split()
+    irc_q.put_nowait({'cmd': 'join', 'channel': parts[0], 
+              'key': parts[1] if len(parts) > 1 else None})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ JOIN {arg}")
 
-# Registry
+
+async def cmd_part(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Leave IRC channel."""
+    if not arg:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .part #channel [reason]")
+        return
+    parts = arg.split(maxsplit=1)
+    irc_q.put_nowait({'cmd': 'part', 'channel': parts[0],
+              'reason': parts[1] if len(parts) > 1 else ''})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ PART {parts[0]}")
+
+
+async def cmd_say(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Send message to channel."""
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .say #channel message")
+        return
+    irc_q.put_nowait({'cmd': 'msg', 'target': parts[0], 'text': parts[1]})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ SAY {parts[0]}: {parts[1]}")
+
+
+async def cmd_msg(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Send private message."""
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .msg nick message")
+        return
+    irc_q.put_nowait({'cmd': 'msg', 'target': parts[0], 'text': parts[1]})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ MSG {parts[0]}: {parts[1]}")
+
+
+async def cmd_act(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Send CTCP ACTION."""
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Usage: .act #channel action")
+        return
+    action_text = f"\x01ACTION {parts[1]}\x01"
+    irc_q.put_nowait({'cmd': 'msg', 'target': parts[0], 'text': action_text})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ ACTION {parts[0]}: {parts[1]}")
+
+
+async def cmd_bots(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """List botnet status."""
+    # Check botnet config/status via core or simple check
+    irc_q.put_nowait({'cmd': 'botnet_list'})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "→ Requesting botnet list...")
+
+
+async def cmd_quit(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
+    """Shutdown bot."""
+    quit_msg = arg or "WBS 6.0.0"
+    irc_q.put_nowait({'cmd': 'quit', 'message': quit_msg})
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "→ Shutdown initiated...")
+    # Note: self.running=False happens in partyline.py after delay
+
+
+# Command registry
 COMMANDS = {
-    'uptime': cmd_uptime, 'version': cmd_version, 'time': cmd_time,
-    'mode': cmd_mode, 'mnote': cmd_mnote, 'nopass': cmd_nopass, 
-    'fixpass': cmd_fixpass, 'mass': cmd_mass, 'channels': cmd_channels,
+    'uptime': cmd_uptime,
+    'mode': cmd_mode,
+    'mnote': cmd_mnote,
+    'nopass': cmd_nopass,
+    'fixpass': cmd_fixpass,
+    'mass': cmd_mass,
     'dns': cmd_dns,
-    # TODO: whowas, timers, join/part/nick, lock, chattr, etc.
+    'join': cmd_join,
+    'part': cmd_part,
+    'say': cmd_say,
+    'msg': cmd_msg,
+    'act': cmd_act,
+    'bots': cmd_bots,
+    'quit': cmd_quit,
+    'die': cmd_quit
+
 }
 
 
-async def handle_dcc_chat(bot: BotCore, idx: int, text: str):
-    """Dispatch .commands from DCC chat."""
-    if not text.startswith('.'): return  # relay elsewhere?
-    parts = text[1:].split(maxsplit=1)
-    cmd, arg = parts[0].lower(), parts[1] if len(parts)>1 else ''
-    hand = bot.dcc_sessions[idx]['hand']
+async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):
+    """
+    Dispatch partyline commands (dot-commands).
+    Called from Partyline.handle_input() in core.py
+    """
+    if not text.startswith('.'):
+        return  # Not a command, relay to chat
     
-    if cmd in COMMANDS:
-        await COMMANDS[cmd](bot, hand, idx, arg)
+    parts = text[1:].split(maxsplit=1)
+    cmd_name = parts[0].lower()
+    cmd_arg = parts[1] if len(parts) > 1 else ''
+    
+    # Get user handle from session
+    #hand = core.partyline_sessions.get(idx, {}).get('handle', 'console')
+    hand = 'console'
+    
+    if cmd_name in COMMANDS:
+        await COMMANDS[cmd_name](config, core_q, irc_q, botnet_q, party_q, hand, idx, cmd_arg)
     else:
-        await send_dcc(bot, idx, f"Unknown .{cmd}")
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Unknown command: .{cmd_name} (try .help)")
+
+async def handle_dcc_chat(config, core_q, irc_q, botnet_q, party_q, nick: str, text: str):
+    """Handle DCC CHAT input from IRC users (dispatched from core.py oncommand)."""
+    # Pseudo-session for IRC privmsg/DCC relay
+    idx = hash(nick) % 10000  # Consistent session ID
+    hand = nick  # Use nick as handle (extend with user lookup)
+    
+    if text.startswith('.'):
+        await handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx, text)  # Dot-command
+    else:
+        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"<{nick}> {text}")  # Relay chat

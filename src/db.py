@@ -4,13 +4,15 @@ src/db.py - Unified async SQLite for WBS: bots/users/channels/seen.
 Supports multi-process (WAL mode).
 """
 import aiosqlite
-import asyncio
-import json
+import time
+import logging
 from pathlib import Path
 from typing import AsyncGenerator, Optional, List
 from dataclasses import dataclass
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
 
 @dataclass
 class BotConfig:
@@ -143,3 +145,36 @@ async def get_db(db_path: str) -> AsyncGenerator[aiosqlite.Connection, None]:
         await db.commit()
     finally:
         await db.close()
+
+async def init_runtime_state(db_path: str):
+    """
+    Initialize runtime state table on bot startup.
+    Sets bot_start_time and other ephemeral counters.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        # Create runtime table if missing
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runtime (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+        
+        # Set bot start time
+        start_time = int(time.time())
+        await db.execute(
+            "INSERT OR REPLACE INTO runtime (key, value) VALUES (?, ?)",
+            ('bot_start_time', str(start_time))
+        )
+        
+        await db.commit()
+        logger.info(f"Runtime state initialized: start_time={start_time}")
+
+async def get_runtime(key: str, db_path: str = None) -> Optional[float]:
+    """Get typed runtime value from DB."""
+    db_path = db_path or DEFAULT_DB_PATH
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT value FROM runtime WHERE key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else None

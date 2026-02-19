@@ -11,8 +11,8 @@ requires-python = ">=3.8"
 dependencies = [
   "irc",
   "aiosqlite",
-  "janus",
   "prompt_toolkit>=3.0",
+  "bcrypt",
 ]
 
 [project.optional-dependencies]

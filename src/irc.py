@@ -1,205 +1,339 @@
 #!/usr/bin/env python3
 """
-src/irc.py - IRC process: jaraco/irc events -> event_queue; cmd_queue -> actions/msg/join/etc.
-Pure dispatcher; no DB/commands here.
+src/irc.py - IRC client process
+Responsibilities:
+  - Connect to IRC server(s) using jaraco.irc
+  - Execute commands from cmd_queue (msg/join/mode/etc)
+  - NO database access, NO command logic
 """
 import multiprocessing as mp
 import queue
 import threading
-import janus
-import irc.bot
-import irc.strings
 import time
 import logging
-from irc.client import ServerConnectionError
+from typing import Optional
 
-# Local imports (add to __init__.py or define inline)
-from .db import get_bot_config  # DB func to load server/nick/channels
+import irc.bot
+import irc.client
+from irc.client import ServerConnectionError
 
 logger = logging.getLogger(__name__)
 
-request_trackers = {}  # {req_id: {'type': 'whois', 'nick': 'foo'}}
+# Event type constants
+class EventType:
+    PUBMSG = 'PUBMSG'
+    PRIVMSG = 'PRIVMSG'
+    JOIN = 'JOIN'
+    PART = 'PART'
+    NICK = 'NICK'
+    MODE = 'MODE'
+    KICK = 'KICK'
+    QUIT = 'QUIT'
+    COMMAND = 'COMMAND'
+    READY = 'READY'
+    ERROR = 'ERROR'
+    WHOIS_USER = 'WHOIS_USER'
+    WHOIS_END = 'WHOIS_END'
 
-# Event types as strings (no external types.py needed)
-EventType = {
-    'PUBMSG': 'PUBMSG', 'PRIVMSG': 'PRIVMSG', 'JOIN': 'JOIN', 'PART': 'PART',
-    'NICK': 'NICK', 'MODE': 'MODE', 'COMMAND': 'COMMAND', 'READY': 'READY', 'ERROR': 'ERROR'
-}
 
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
-    @staticmethod
-    def get_version():
-        return "WBS 6.0.0"
+    """IRC bot instance - pure dispatcher, no business logic"""
     
-    def __init__(self, config: dict, channels: list, event_queue: mp.Queue, cmd_queue: mp.Queue):
+    VERSION = "WBS 6.0.0"
+    
+    def __init__(self, config, core_q, irc_q, botnet_q, party_q):
         self.config = config
-        self.channels = channels
-        self.event_queue = event_queue
-        self.cmd_queue = cmd_queue
+        #self.join_channels = channels
+        self.core_q = core_q
+        self.irc_q = irc_q
+        self.botnet_q = botnet_q
+        self.party_q = party_q
         self.config_id = config.get('id', 1)
+        self.whois_trackers = {}  # Track pending WHOIS requests
         
-        # Multi-server from bot.servers or legacy fallback
+        # Parse server list
+        servers = self._parse_servers(config)
+        bot_config = config.get('bot', {})
+        
+        super().__init__(
+            servers,
+            bot_config.get('nick', 'wbs'),
+            bot_config.get('realname', 'WBS Bot')
+        )
+        
+    def _parse_servers(self, config: dict) -> list[tuple[str, int]]:
+        """Extract server list from config (supports multiple formats)"""
         try:
-            bot_servers = config['bot']['servers']
-            servers = [[s['host'], s['port']] for s in bot_servers]
+            # New format: config['bot']['servers'] = [{'host': ..., 'port': ...}]
+            servers_list = config['bot']['servers']
+            return [(s['host'], s['port']) for s in servers_list]
         except (KeyError, TypeError):
-            servers = [(config.get('server', 'irc.wcksoft.com'), 
-                       config.get('port', 6667))]
-        super().__init__(servers, config['bot']['nick'], config['bot']['realname'])
-
+            # Legacy format: config['server'], config['port']
+            host = config.get('server', 'irc.wcksoft.com')
+            port = config.get('port', 6667)
+            return [(host, port)]
+    
+    def _emit_event(self, event_data: dict):
+        """Send event to core.py via queue"""
+        event_data['config_id'] = self.config_id
+        try:
+            self.core_q.put(('event', event_data), block=False)
+        except queue.Full:
+            logger.error(f"Event queue full, dropping: {event_data['type']}")
+    
+    # === Connection Lifecycle ===
+    
     def _connect(self):
+        """Override to handle connection errors gracefully"""
         try:
             super()._connect()
-        except ServerConnectionError:
-            self.event_queue.put(('event', {'type': EventType['ERROR'], 'data': 'connect_fail', 'config_id': self.config_id}))
-
+        except ServerConnectionError as e:
+            logger.error(f"Connection failed: {e}")
+            self._emit_event({
+                'type': EventType.ERROR,
+                'data': 'connect_fail',
+                'error': str(e)
+            })
+    
     def on_welcome(self, conn, event):
-        print(f"[IRC] *** WELCOME: Registered as {conn.nickname}")
-        print(f"[IRC] Configured for channels: {self.channels}")  # Debug
+        """Connected and registered - join channels"""
+        logger.info(f"Connected as {conn.get_nickname()}")
         conn.join("#tohands")
-        time.sleep(1)
-        for ch in self.channels:
-            print(f"[IRC] Joining: {ch}")
-            conn.join(ch)
-            time.sleep(1)
-        self.event_queue.put(('event', {'type': EventType['READY'], 'config_id': self.config_id}))
-
+        # Join configured channels with delay to avoid flood
+        #for ch in self.join_channels:
+        #    logger.info(f"Joining {ch}")
+        #    conn.join(ch)
+        #    time.sleep(0.5)  # Anti-flood delay
+        
+        self._emit_event({'type': EventType.READY})
+    
+    def on_disconnect(self, conn, event):
+        """Connection lost"""
+        logger.warning("Disconnected from server")
+        self._emit_event({
+            'type': EventType.ERROR,
+            'data': 'disconnect'
+        })
+    
+    # === IRC Event Handlers ===
+    
     def on_pubmsg(self, conn, event):
-        msg = {
-            'type': EventType['PUBMSG'],
+        """Public channel message"""
+        text = event.arguments[0]
+        self._emit_event({
+            'type': EventType.PUBMSG,
             'channel': event.target,
             'nick': event.source.nick,
             'host': str(event.source),
-            'text': event.arguments[0],
-            'config_id': self.config_id
-        }
-        self.event_queue.put(('event', msg))
-        # Bot-addressed commands
+            'text': text
+        })
+        
+        # Detect bot-addressed commands (e.g., "wbs: .help")
         prefix = f"{conn.get_nickname()}:"
-        if msg['text'].startswith(prefix):
-            cmd_msg = msg.copy()
-            cmd_msg['text'] = msg['text'][len(prefix):].strip()
-            cmd_msg['type'] = EventType['COMMAND']
-            self.event_queue.put(('event', cmd_msg))
-
+        if text.startswith(prefix):
+            cmd_text = text[len(prefix):].strip()
+            self._emit_event({
+                'type': EventType.COMMAND,
+                'channel': event.target,
+                'nick': event.source.nick,
+                'host': str(event.source),
+                'text': cmd_text
+            })
+    
     def on_privmsg(self, conn, event):
-        msg = {
-            'type': EventType['PRIVMSG'],
+        """Private message"""
+        self._emit_event({
+            'type': EventType.PRIVMSG,
             'target': event.target,
             'nick': event.source.nick,
             'host': str(event.source),
-            'text': event.arguments[0],
-            'config_id': self.config_id
-        }
-        self.event_queue.put(('event', msg))
-
+            'text': event.arguments[0]
+        })
+    
     def on_join(self, conn, event):
-        self.event_queue.put(('event', {
-            'type': EventType['JOIN'],
+        self._emit_event({
+            'type': EventType.JOIN,
             'channel': event.target,
             'nick': event.source.nick,
-            'config_id': self.config_id
-        }))
-
+            'host': str(event.source)
+        })
+    
     def on_part(self, conn, event):
-        self.event_queue.put(('event', {
-            'type': EventType['PART'],
+        reason = event.arguments[0] if event.arguments else ''
+        self._emit_event({
+            'type': EventType.PART,
             'channel': event.target,
             'nick': event.source.nick,
-            'config_id': self.config_id
-        }))
-
+            'reason': reason
+        })
+    
+    def on_kick(self, conn, event):
+        kicked_nick = event.arguments[0]
+        reason = event.arguments[1] if len(event.arguments) > 1 else ''
+        self._emit_event({
+            'type': EventType.KICK,
+            'channel': event.target,
+            'nick': event.source.nick,
+            'kicked': kicked_nick,
+            'reason': reason
+        })
+    
+    def on_quit(self, conn, event):
+        reason = event.arguments[0] if event.arguments else ''
+        self._emit_event({
+            'type': EventType.QUIT,
+            'nick': event.source.nick,
+            'reason': reason
+        })
+    
     def on_nick(self, conn, event):
-        self.event_queue.put(('event', {
-            'type': EventType['NICK'],
+        self._emit_event({
+            'type': EventType.NICK,
             'old_nick': event.source.nick,
-            'new_nick': event.target,
-            'config_id': self.config_id
-        }))
-
+            'new_nick': event.target
+        })
+    
     def on_mode(self, conn, event):
-        self.event_queue.put(('event', {
-            'type': EventType['MODE'],
+        modes = event.arguments[0] if event.arguments else ''
+        args = event.arguments[1:] if len(event.arguments) > 1 else []
+        self._emit_event({
+            'type': EventType.MODE,
             'target': event.target,
-            'modes': event.arguments[0] if event.arguments else '',
-            'args': event.arguments[1:] if len(event.arguments) > 1 else [],
-            'config_id': self.config_id
-        }))
-
-    # WHOIS numerics (simplified)
-    def on_numeric(self, conn, event):
-        if event.arguments[0] == '311':  # WHOIS user
-            req_id = hash(event.arguments[1])  # Match whois(nick)
-            if req_id in request_trackers:
-                tracker = request_trackers[req_id]
-                self.event_queue.put(('event', {
-                    'type': 'WHOIS_USER', 'nick': tracker['nick'],
-                    'user': event.arguments[2], 'host': event.arguments[3],
-                    'config_id': self.config_id
-                }))
-
-    def send_msg(self, target: str, text: str):
-        """Core-called via cmd_queue."""
-        self.connection.privmsg(target, text)
-
-    def send_action(self, target: str, action: str):
-        self.connection.action(target, action)
-
-    def send_mode(self, target: str, mode_str: str):
-        self.connection.mode(target, mode_str)
-
-    def do_cmd(self, cmd_data: dict):
-        """Execute cmd from cmd_queue."""
-        print(f"[IRC-Poller] CMD: {cmd_data}")  # Confirm receipt
-        if not self.connection:
-            print("[IRC] No connection")
-            return
-        if not self.connection.is_connected():
-            print("[IRC] Not connected")
-            return
-        print(f"[IRC] {cmd_data['cmd'].upper()} {cmd_data.get('channel', '')}")
-        cmd = cmd_data.get('cmd')
-        if cmd == 'msg':
-            self.send_msg(cmd_data['target'], cmd_data['text'])
-        elif cmd == 'action':
-            self.send_action(cmd_data['target'], cmd_data['text'])
-        elif cmd == 'mode':
-            self.send_mode(cmd_data['target'], cmd_data['mode'])
-        elif cmd == 'join':
-            self.connection.join(cmd_data['channel'])
-        elif cmd == 'part':
-            self.connection.part(cmd_data['channel'])
-        elif cmd == 'whois':
-            nick = cmd_data['nick']
-            req_id = hash(nick)
-            request_trackers[req_id] = {'type': 'whois', 'nick': nick}
-            self.connection.whois(nick)
-
+            'modes': modes,
+            'args': args,
+            'by': event.source.nick
+        })
+    
     def on_ctcp(self, conn, event):
+        """Handle CTCP requests (PING, VERSION, etc)"""
         super().on_ctcp(conn, event)
         nick = event.source.nick
-        ctcp_cmd = event.arguments[0]
+        ctcp_cmd = event.arguments[0].upper()
+        
         if ctcp_cmd == 'PING':
             ts = event.arguments[1] if len(event.arguments) > 1 else ''
             conn.ctcp_reply(nick, f"PING {ts}")
-
-def startircprocess(config: dict, channels: list, eventq: mp.Queue, cmdq: mp.Queue):
-    """mp.Process target: config from main.py, queues for IPC. Polls cmdq in daemon thread; reactor blocks."""
-    bot = WbsIrcBot(config, channels, eventq, cmdq)  # Your bot init
+        elif ctcp_cmd == 'VERSION':
+            conn.ctcp_reply(nick, f"VERSION {self.VERSION}")
     
-    def cmdpoller():  # <- Add HERE: nested def (captures bot, cmdq)
-        """Daemon thread: poll cmdq, execute bot.docmd()."""
+    def on_whoisuser(self, conn, event):
+        """WHOIS response (311 numeric)"""
+        # event.arguments = [mynick, nick, user, host, *, realname]
+        nick = event.arguments[1]
+        req_id = hash(nick)
+        
+        if req_id in self.whois_trackers:
+            self._emit_event({
+                'type': EventType.WHOIS_USER,
+                'nick': nick,
+                'user': event.arguments[2],
+                'host': event.arguments[3],
+                'realname': event.arguments[5]
+            })
+    
+    def on_endofwhois(self, conn, event):
+        """WHOIS complete (318 numeric)"""
+        nick = event.arguments[1]
+        req_id = hash(nick)
+        
+        if req_id in self.whois_trackers:
+            del self.whois_trackers[req_id]
+            self._emit_event({
+                'type': EventType.WHOIS_END,
+                'nick': nick
+            })
+    
+    # === Command Execution ===
+    
+    def execute_command(self, cmd_data: dict):
+        """Execute command from cmd_queue (called by poller thread)"""
+        if not self.connection.is_connected():
+            logger.warning(f"Not connected, dropping command: {cmd_data}")
+            return
+        
+        cmd = cmd_data.get('cmd')
+        
+        try:
+            if cmd == 'msg':
+                self.connection.privmsg(cmd_data['target'], cmd_data['text'])
+            
+            elif cmd == 'notice':
+                self.connection.notice(cmd_data['target'], cmd_data['text'])
+            
+            elif cmd == 'action':
+                self.connection.action(cmd_data['target'], cmd_data['text'])
+            
+            elif cmd == 'join':
+                self.connection.join(cmd_data['channel'])
+            
+            elif cmd == 'part':
+                reason = cmd_data.get('reason', '')
+                self.connection.part(cmd_data['channel'], reason)
+            
+            elif cmd == 'mode':
+                self.connection.mode(cmd_data['target'], cmd_data['mode'])
+            
+            elif cmd == 'kick':
+                reason = cmd_data.get('reason', 'Kicked')
+                self.connection.kick(
+                    cmd_data['channel'],
+                    cmd_data['nick'],
+                    reason
+                )
+            
+            elif cmd == 'whois':
+                nick = cmd_data['nick']
+                req_id = hash(nick)
+                self.whois_trackers[req_id] = {'nick': nick}
+                self.connection.whois(nick)
+            
+            elif cmd == 'raw':
+                self.connection.send_raw(cmd_data['line'])
+            
+            else:
+                logger.warning(f"Unknown command: {cmd}")
+        
+        except Exception as e:
+            logger.error(f"Command failed {cmd_data}: {e}")
+
+
+def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
+    """
+    Entry point for IRC process
+    """
+    bot = WbsIrcBot(config, core_q, irc_q, botnet_q, party_q)
+    
+    def command_poller():
+        """Daemon thread: poll cmd_queue and execute commands"""
+        throttle_interval = 0.1  # 100ms between commands (anti-flood)
+        last_cmd_time = 0
+        
         while True:
             try:
-                cmddata = cmdq.get_nowait()
-                logger.info(f"IRC cmd: {cmddata}, qsize={cmdq.qsize()}")
-                bot.docmd(cmddata)  # Execute msg/join/etc.
+                # Throttle check
+                elapsed = time.time() - last_cmd_time
+                if elapsed < throttle_interval:
+                    time.sleep(throttle_interval - elapsed)
+                
+                # Non-blocking get
+                cmd_data = irc_q.get_nowait()
+                logger.debug(f"Executing: {cmd_data}")
+                
+                bot.execute_command(cmd_data)
+                last_cmd_time = time.time()
+            
             except queue.Empty:
-                pass
-            threading.Event().wait(0.1)  # Low CPU (~10Hz)
+                time.sleep(0.01)  # Short sleep to reduce CPU usage
+            
+            except Exception as e:
+                logger.error(f"Command poller error: {e}")
+                time.sleep(0.1)
     
-    poller_thread = threading.Thread(target=cmdpoller, daemon=True)
-    poller_thread.start()
+    # Start command poller thread
+    poller = threading.Thread(target=command_poller, daemon=True)
+    poller.start()
     
-    logger.info("IRC process ready")
-    bot.start()  # Blocks: reactor + auto-reconnect
+    logger.info(f"IRC process started (config_id={config.get('id', 1)})")
+    
+    # Start IRC reactor (blocking)
+    bot.start()

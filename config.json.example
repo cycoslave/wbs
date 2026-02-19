@@ -59,5 +59,8 @@
     "wbsversub": 0,
     "wbsverpatch": 0,
     "task": {"auget": true}
+  },
+  "irc": {
+    "cmd_throttle_ms": 100
   }
 }

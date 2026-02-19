@@ -1,5 +1,7 @@
+db/*.db
+logs/*
+!logs/README.md
 config.json
 *.db
 *.pid
-logs/*
-!logs/README.md
+*.log

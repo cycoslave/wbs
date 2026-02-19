@@ -9,17 +9,20 @@ import os
 import signal
 import sys
 from pathlib import Path
-mp.set_start_method('fork', force=True)
+from datetime import timedelta
+import time
 
-import janus  # Add at top
-
-from src.irc import startircprocess
-from src.core import start_core_process, run_foreground_partyline
+from src.irc import start_irc_process
+import src.core
+from src.partyline import run_foreground_partyline
 from src.botnet import botnet_process
-from src.db import init_db, seed_db
+from src.db import init_db, seed_db, init_runtime_state, get_runtime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+mp.set_start_method('fork', force=True)
+PID_FILE = None
+active_processes = []
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="wbs", description="WBS IRC Bot")
@@ -29,27 +32,19 @@ def parse_args():
     parser.add_argument("-v", "--version", action="version", version="WBS 6.0.0")
     return parser.parse_args()
 
-def load_config(config_path):
+def load_config(config_path, db_path_override=None):
+    """Load and validate configuration file"""
     with open(config_path) as f:
         config = json.load(f)
     
     # Override DB path if specified
-    if args.db_path:
-        config['db']['path'] = args.db_path
-    
-    # Setup logging from config (file handlers OK with fork)
-    log_config = config.get('logging', {})
-    log_level = getattr(logging, log_config.get('level', 'INFO'))
-    logging.getLogger().setLevel(log_level)
-    if not args.foreground and log_config.get('file'):
-        fh = logging.FileHandler(log_config['file'])
-        fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-        logging.getLogger().handlers = [fh]
+    if db_path_override:
+        config['db']['path'] = db_path_override
     
     # Validate required sections/keys
     required = {
         'db': {'path'},
-        'bot': {'nick', 'user', 'realname', 'servers'},
+        'bot': {'nick', 'user', 'realname', 'servers', 'channels'},
         'botnet': {'enabled', 'hub_host', 'hub_port', 'hub_password', 'subnet_id'}
     }
     for section, keys in required.items():
@@ -59,7 +54,7 @@ def load_config(config_path):
         if missing:
             raise ValueError(f"Missing keys in {section}: {missing}")
     
-    # Normalize for modules: irc config from bot.*
+    # Normalize IRC config for irc.py module
     config['irc'] = {
         'host': config['bot']['servers'][0]['host'],
         'port': config['bot']['servers'][0]['port'],
@@ -73,7 +68,19 @@ def load_config(config_path):
     logger.info(f"Loaded config: nick={config['bot']['nick']}, channels={config['bot']['channels']}")
     return config
 
+def configure_logging(config, foreground):
+    """Setup logging handlers from config"""
+    log_config = config.get('logging', {})
+    log_level = getattr(logging, log_config.get('level', 'INFO'))
+    logging.getLogger().setLevel(log_level)
+    
+    if not foreground and log_config.get('file'):
+        fh = logging.FileHandler(log_config['file'])
+        fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+        logging.getLogger().handlers = [fh]
+
 def pid_file_acquire(pid_file: Path) -> bool:
+    """Acquire PID file lock, returns False if another instance is running"""
     if pid_file.exists():
         try:
             with open(pid_file) as f:
@@ -85,7 +92,7 @@ def pid_file_acquire(pid_file: Path) -> bool:
                         os.kill(pid, 0)
                         logger.warning(f"PID {pid} already running, aborting")
                         return False
-            logger.info(f"Removed stale PID file")
+            logger.info("Removed stale PID file")
             pid_file.unlink()
         except (OSError, ValueError):
             pid_file.unlink()
@@ -97,101 +104,207 @@ def pid_file_acquire(pid_file: Path) -> bool:
         f.flush()
     return True
 
+def pid_file_release(pid_file: Path):
+    """Release PID file and clean up"""
+    if pid_file and pid_file.exists():
+        try:
+            pid_file.unlink()
+            logger.info("PID file released")
+        except Exception as e:
+            logger.warning(f"Failed to remove PID file: {e}")
+
 def setup_db_once(config):
+    """Initialize and seed database (runs once in main process)"""
     db_path = config['db']['path']
     logger.info(f"DB init at {db_path}")
     asyncio.run(init_db(db_path, schema_path="db/schema.sql"))
     asyncio.run(seed_db(db_path, config))
     logger.info("DB seeded successfully")
 
-def runircprocess(config_path, channels, dbpath, eventq, cmdq):
+def run_irc_process(config_path, core_q, irc_q, botnet_q, party_q):
+    """IRC process entry point"""
     config = json.load(open(config_path))
-    asyncio.run(init_db(dbpath))
-    startircprocess(config, channels, eventq.sync_q, cmdq.sync_q) 
+    asyncio.run(init_db(config['db']['path']))
+    start_irc_process(config, core_q, irc_q, botnet_q, party_q)
 
-def runcoreprocess(config_path, dbpath, eventq, cmdq):
+def run_core_process(config_path, core_q, irc_q, botnet_q, party_q):
+    """Core process entry point"""
     config = json.load(open(config_path))
-    asyncio.run(init_db(dbpath, schemapath='db/schema.sql'))
-    start_core_process(config, eventq.sync_q, cmdq.sync_q) 
+    asyncio.run(init_db(config['db']['path']))
+    src.core.start_core_process(config, core_q, irc_q, botnet_q, party_q)
 
-def runbotnetprocess(botnetconfig, dbpath, queuetocore, queuefromcore):  
-    asyncio.run(init_db(dbpath, schemapath='db/schema.sql'))
-    botnet_process(queuetocore.sync_q, queuefromcore.sync_q, dbpath)  
+def run_botnet_process(config_path, core_q, irc_q, botnet_q, party_q):
+    """Botnet process entry point"""
+    config = json.load(open(config_path))
+    asyncio.run(init_db(config['db']['path']))
+    botnet_process(config, core_q, irc_q, botnet_q, party_q)
+
+async def show_shutdown_stats(config):
+    """Display uptime and stats on graceful shutdown."""
+    db_path = config['db']['path']
+    start_time = await get_runtime('bot_start_time', db_path)
+    if start_time:
+        uptime = str(timedelta(seconds=int(time.time()) - start_time))
+        return uptime
+    else:
+        return "0:00:00"
+
+async def shutdown(config, signum=None, frame=None):
+    """Signal handler for graceful shutdown"""
+    logger.info(f"Shutdown signal received (signal={signum})")
+    
+    for p in active_processes:
+        if p.is_alive():
+            logger.info(f"Terminating process: {p.name}")
+            p.terminate()
+    
+    # Wait for processes to terminate
+    for p in active_processes:
+        p.join(timeout=5)
+        if p.is_alive():
+            logger.warning(f"Force killing process: {p.name}")
+            p.kill()
+    
+    uptime = await show_shutdown_stats(config)
+    pid_file_release(PID_FILE)
+    logger.info(f"Shutdown complete - uptime: {uptime}")
+    sys.exit(0)
+
+def run_foreground_mode(config, args):
+    """Run in foreground with interactive partyline"""
+    logger.info("FOREGROUND PARTYLINE MODE")
+    
+    # Create communication queues
+    core_q = mp.Queue()
+    irc_q = mp.Queue()
+    party_q = mp.Queue()
+    botnet_q = mp.Queue() if config['botnet']['enabled'] else None
+    
+    # Start IRC process
+    ircp = mp.Process(
+        target=run_irc_process,
+        args=(args.config, core_q, irc_q, botnet_q, party_q),
+        name='irc', daemon=True
+    )
+    ircp.start()
+    active_processes.append(ircp)
+    logger.info("IRC process started")
+    
+    # Start botnet if enabled
+    botnet_p = None
+    if config['botnet']['enabled']:
+        botnet_p = mp.Process(
+            target=run_botnet_process,
+            args=(args.config, core_q, irc_q, botnet_q, party_q),
+            name="botnet", daemon=True
+        )
+        botnet_p.start()
+        active_processes.append(botnet_p)
+        logger.info("Botnet process started")
+    
+    # Let partyline handle everything (input + events)
+    try:
+        asyncio.run(run_foreground_partyline(config, core_q, irc_q, botnet_q, party_q))
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    finally:
+        asyncio.run(shutdown(config))
+
+def run_background_mode(config, args):
+    """Run in background daemon mode"""
+    logger.info("BACKGROUND DAEMON MODE")
+    
+    # Create communication queues
+    core_q = mp.Queue()
+    irc_q = mp.Queue()
+    party_q = mp.Queue()
+    botnet_q = mp.Queue() if config['botnet']['enabled'] else None
+    
+    # Start IRC process
+    ircp = mp.Process(
+        target=run_irc_process,
+        args=(args.config, core_q, irc_q, botnet_q, party_q),
+        name='irc',
+        daemon=True
+    )
+    ircp.start()
+    active_processes.append(ircp)
+    logger.info("IRC process started")
+    
+    # Start core process
+    corep = mp.Process(
+        target=run_core_process,
+        args=(args.config, core_q, irc_q, botnet_q, party_q),
+        name='core',
+        daemon=True
+    )
+    corep.start()
+    active_processes.append(corep)
+    logger.info("Core process started")
+    
+    # Start botnet process if enabled
+    if config['botnet']['enabled']:
+        botnet_p = mp.Process(
+            target=run_botnet_process,
+            args=(args.config, core_q, irc_q, botnet_q, party_q),
+            name="botnet",
+            daemon=True
+        )
+        botnet_p.start()
+        active_processes.append(botnet_p)
+        logger.info("Botnet process started")
+    
+    # Setup signal handlers
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+    
+    logger.info("All processes started, waiting...")
+    try:
+        for p in active_processes:
+            p.join()
+    except KeyboardInterrupt:
+        asyncio.run(shutdown(config))
 
 def main():
-    global args
-    args = parse_args()
+    global PID_FILE
     
+    args = parse_args()
+
+    # Load and validate config
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, args.db_path)
     except Exception as e:
         logger.error(f"Config load failed: {e}")
         sys.exit(1)
     
+    asyncio.run(init_runtime_state(config['db']['path']))
+
+    # Configure logging
+    configure_logging(config, args.foreground)
+    
+    # Acquire PID file lock
     PID_FILE = Path.cwd() / "wbs.pid"
     if not pid_file_acquire(PID_FILE):
         sys.exit(1)
     
-    setup_db_once(config)
+    # Initialize database once in main process
+    try:
+        setup_db_once(config)
+    except Exception as e:
+        logger.error(f"Database setup failed: {e}")
+        pid_file_release(PID_FILE)
+        sys.exit(1)
     
-    import janus
-    
-    if args.foreground:
-        logger.info("FOREGROUND PARTYLINE MODE")
-        eventq = janus.Queue()
-        cmdq = janus.Queue()
-        ircp = mp.Process(target=runircprocess, args=(args.config, config['bot']['channels'], config['db']['path'], eventq, cmdq), name='irc', daemon=True)
-        ircp.start()
-        if config['botnet']['enabled']:
-            botnet_p = mp.Process(
-                target=run_botnet_process,
-                args=(config['botnet'], config['db']['path']),
-                name="botnet", daemon=True
-            )
-            botnet_p.start()
-            logger.info("Botnet process started")
+    # Run in appropriate mode
+    try:
+        if args.foreground:
+            run_foreground_mode(config, args)
         else:
-            botnet_p = None
-        try:
-            asyncio.run(run_foreground_partyline(config, eventq.async_q, cmdq.async_q, ircp, botnet_p))
-        finally:
-            print("Shutting down processes...")
-            ircp.terminate() 
-            ircp.join(timeout=10)
-            if botnet_p:
-                botnet_p.terminate()
-                botnet_p.join(timeout=10)
-        return
-    else:
-        # Background mode
-        eventq = janus.Queue()
-        cmdq = janus.Queue()
-        processes = []
-        ircp = mp.Process(target=runircprocess, args=(args.config, config['bot']['channels'], config['db']['path'], eventq, cmdq), name='irc', daemon=True)
-        ircp.start(); processes.append(ircp)
-        logger.info("IRC process started")
-        corep = mp.Process(target=runcoreprocess, args=(args.config, config['db']['path'], eventq, cmdq), name='core', daemon=True)
-        corep.start(); processes.append(corep)
-        logger.info("Core process started")
-        if config['botnet']['enabled']:
-            botnet_p = mp.Process(
-                target=run_botnet_process,
-                args=(config['botnet'], config['db']['path']),
-                name="botnet", daemon=True
-            )
-            botnet_p.start()
-            processes.append(botnet_p)
-            logger.info("Botnet process started")
-        
-        signal.signal(signal.SIGINT, shutdown)
-        signal.signal(signal.SIGTERM, shutdown)
-        
-        logger.info("All processes started, waiting...")
-        try:
-            for p in processes:
-                p.join()
-        except KeyboardInterrupt:
-            shutdown()
+            run_background_mode(config, args)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        asyncio.run(shutdown(config))
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
