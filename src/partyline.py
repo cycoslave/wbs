@@ -113,7 +113,6 @@ class Partyline:
         
         # Command dispatch
         if line.startswith('.'):
-            print(f"DEBUG line='{line}'")
             await self._handle_command(line[1:])
         else:
             # Chat message to current botnet channel

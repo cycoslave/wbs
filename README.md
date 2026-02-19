@@ -10,6 +10,7 @@ Works best with Python 3.12.7.
 
 
 ## Usage
+```
 usage: wbs [-h] [-f] [-c CONFIG] [-d DB_PATH] [-v]
 options:
   -h, --help            show this help message and exit
@@ -19,7 +20,7 @@ options:
   -d DB_PATH, --db-path DB_PATH
                         Override DB path from config
   -v, --version         show program's version number and exit
-
+```
 
 ## Todo
 - recode the WBS TCL scripts into python
