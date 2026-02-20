@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-src/core.py - Core logic process.
+src/core.py - Main process: Core loop + spawns IRC/partyline/botnet children.
 """
-from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import threading
-import queue
 import time
 import logging
-import os
 from pathlib import Path
 from typing import Dict, Any
 from collections import deque
@@ -18,102 +15,135 @@ from collections import deque
 from .db import get_db, init_db
 from .user import UserManager, SeenDB
 from .channel import get_channel_mgr
-from .commands import COMMANDS, handle_dcc_chat
+from .irc import irc_target
+from .partyline import partyline_target
+from .botnet import botnet_target
 
 logger = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
 
-class CoreEventLoop:
-    """
-    Core bot process.
-    """
+class Core:
+    """Main process: Core event loop + child process manager."""
     
-    def __init__(self, config, core_q, irc_q, botnet_q, party_q):
+    def __init__(self, config):
         self.config = config
-        self.core_q = core_q
-        self.irc_q = irc_q
-        self.botnet_q = botnet_q
-        self.party_q = party_q
+        self.db_path = config['db']['path'] or BASE_DIR / "wbs.db"
         
-        # DB path resolution (prefer explicit config)
-        self.db_path = config['db']['path'] or config.get('db', {}).get('path', BASE_DIR / "wbs.db")
+        # Queues (Core owns all communication)
+        self.core_q = mp.Queue()     # Partyline/commands -> Core
+        self.irc_q = mp.Queue()      # Core -> IRC
+        self.botnet_q = mp.Queue() if config.get('botnet', {}).get('enabled') else None
+        self.party_q = mp.Queue()    # Core -> Partyline
         
-        # Channel list
-        self.channels = config.get('channels') or config.get('bot', {}).get('channels', [])
-        
-        # Managers (initialized in async_init)
-        self.user_mgr = None
-        self.seen = None
-        self.botnet_mgr = None
-        
-        # Thread-safe event buffer (accessed by poller thread, consumed by async loop)
+        # Event buffer (thread -> async)
         self._event_buffer = deque()
         self._buffer_lock = threading.Lock()
+        self.quit_event = mp.Event()
         
-        # Startup time for uptime tracking
+        # Managers
+        self.user_mgr = None
+        self.seen = None
+        self.channels = config.get('channels', [])
+        self.children = []
         self.start_time = time.time()
-        
-        # DCC sessions (partyline support - for commands.py integration)
-        self.dcc_sessions = {}  # idx: {'hand': str, 'writer': StreamWriter}
 
+    def spawn_children(self):
+        """Spawn daemon children - config from env."""
+        import os
+        config_path = os.environ.get('WBS_CONFIG', 'config.json')
+        
+        # IRC
+        irc_proc = mp.Process(
+            target=irc_target,
+            args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
+            daemon=True, name="IRC"
+        )
+        irc_proc.start()
+        self.children.append(irc_proc)
+        
+        # Partyline
+        party_proc = mp.Process(
+            target=partyline_target,
+            args=(config_path, self.party_q, self.core_q, self.quit_event),
+            daemon=True, name="Partyline"
+        )
+        party_proc.start()
+        self.children.append(party_proc)
+        
+        # Botnet if enabled
+        if self.botnet_q:
+            botnet_proc = mp.Process(
+                target=botnet_target,
+                args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
+                daemon=True, name="Botnet"
+            )
+            botnet_proc.start()
+            self.children.append(botnet_proc)
+        
+        logger.info(f"Spawned: {[p.name for p in self.children]}")
+
+    async def run(self):
+        """Main async event loop - THIS IS THE CORE."""
+        await self._async_init()
+        self.spawn_children()
+        
+        # Start event poller thread
+        poller_thread = threading.Thread(target=self.event_poller, daemon=True)
+        poller_thread.start()
+        
+        logger.info("Core event loop running")
+        await self._main_loop()
 
     def event_poller(self):
-        """
-        Threaded poller.
-        """
-        logger.info("Event poller thread started")
-        while True:
+        """Thread: Poll core_q -> event buffer."""
+        while not self.quit_event.is_set():
             try:
                 msg = self.core_q.get(timeout=0.1)
                 with self._buffer_lock:
                     self._event_buffer.append(msg)
-                logger.debug(f"Buffered event: {msg.get('type')}")
-            except queue.Empty:
+            except mp.queues.Empty:
                 pass
-            except Exception as e:
-                logger.error(f"Core poller error: {e}", exc_info=False)
 
-
-    async def run(self):
-        """
-        Main async loop: initialize resources, drain event buffer, handle events,
-        and run periodic tasks.
-        """
-        await self._async_init()
-        logger.info("Core event loop running")
-        
-        # Start background poller thread
-        poller_thread = threading.Thread(target=self.event_poller, daemon=True, name="EventPoller")
-        poller_thread.start()
-        
+    async def _main_loop(self):
+        """Core event loop: drain buffer, handle events, periodic tasks."""
         last_periodic = time.time()
-        
-        while True:
-            # Drain buffered events (thread-safe)
-            events_to_process = []
+        while not self.quit_event.is_set():
+            # Drain events
+            events = []
             with self._buffer_lock:
                 while self._event_buffer:
-                    events_to_process.append(self._event_buffer.popleft())
+                    events.append(self._event_buffer.popleft())
             
-            # Process all buffered events
-            for event in events_to_process:
-                try:
-                    await self.handle_event(event)
-                except Exception as e:
-                    logger.error(f"Event handler error: {e}", exc_info=True)
+            for event in events:
+                if event.get('cmd') == 'quit':
+                    await self._shutdown(event.get('message', 'Quit'))
+                    return
+                await self.handle_event(event)
             
-            # Periodic tasks (every 5 seconds)
-            now = time.time()
-            if now - last_periodic >= 5.0:
-                try:
-                    await self._periodic_tasks()
-                except Exception as e:
-                    logger.error(f"Periodic task error: {e}", exc_info=True)
-                last_periodic = now
+            # Periodic
+            if time.time() - last_periodic >= 5.0:
+                await self._periodic_tasks()
+                last_periodic = time.time()
             
-            # Yield control (prevent CPU spin)
             await asyncio.sleep(0.05)
 
+    async def _shutdown(self, message):
+        """Graceful shutdown cascade."""
+        self.quit_event.set()
+        logger.info(f"Shutdown: {message}")
+        
+        # Notify children
+        for q in (self.irc_q, self.party_q):
+            try: q.put_nowait({'cmd': 'quit', 'message': message})
+            except: pass
+        if self.botnet_q:
+            self.botnet_q.put_nowait({'cmd': 'quit', 'message': message})
+
+        # Join children
+        for child in self.children:
+            if child.is_alive():
+                child.join(timeout=5.0)
+                if child.is_alive(): child.terminate()
 
     async def _async_init(self):
         """One-time async initialization: DB schema, user/seen managers, botnet."""
@@ -138,7 +168,6 @@ class CoreEventLoop:
             logger.info("Botnet disabled")
         
         logger.info(f"Core initialized: channels={self.channels}")
-
 
     async def handle_event(self, event: Dict[str, Any]):
         """Dispatch events to appropriate handlers based on type."""
@@ -279,40 +308,23 @@ class CoreEventLoop:
 
 
     # === Outbound Command Helpers ===
-    
     def send_cmd(self, cmd_type: str, target: str, text: str = "", **kwargs):
-        """
-        Send command to IRC process via cmd_q (thread-safe, sync).
-        
-        Args:
-            cmd_type: 'msg', 'join', 'part', 'mode', 'raw', etc.
-            target: channel or nick
-            text: message content
-            **kwargs: additional parameters (e.g., quick=True for fast mode)
-        """
-        cmd_data = {'cmd': cmd_type, 'target': target, **kwargs}
-        if text:
-            cmd_data['text'] = text
-        
+        """Send to IRC queue."""
+        cmd = {'cmd': cmd_type, 'target': target, 'text': text, **kwargs}  # Fixed: 'text': text
         try:
-            self.cmd_q.put_nowait(cmd_data)
-            logger.debug(f"Sent command: {cmd_type} -> {target}, qsize={self.cmd_q.qsize()}")
-        except queue.Full:
-            logger.warning(f"Command queue full, dropping: {cmd_data}")
+            self.irc_q.put_nowait(cmd)
+            logger.debug(f"Sent: {cmd_type} -> {target}")
+        except mp.queues.Full:
+            logger.warning(f"IRC queue full, dropped: {cmd}")
+
 
     # === Periodic Tasks ===
-    
     async def _periodic_tasks(self):
-        """Run every ~5s: botnet link polling, cleanup, etc."""
-        if self.botnet_mgr:
-            # Botnet manager periodic maintenance
-            try:
-                await self.botnet_mgr.poll_links()
-            except Exception as e:
-                logger.error(f"Botnet poll error: {e}", exc_info=True)
-        
-        # Future: channel maintenance (limit checking, topic lock, etc.)
-
+        """Periodic tasks."""
+        # Fix: Check self.botnet_mgr exists first
+        if hasattr(self, 'botnet_mgr') and self.botnet_mgr:
+            await self.botnet_mgr.poll_links()
+        # Add other tasks...
 
 def start_core_process(config, core_q, irc_q, botnet_q, party_q):
     """

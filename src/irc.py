@@ -248,7 +248,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def execute_command(self, cmd_data: dict):
         """Execute command from cmd_queue (called by poller thread)"""
         if not self.connection.is_connected():
-            logger.warning(f"Not connected, dropping command: {cmd_data}")
+            logger.error(f"Not connected, dropping command: {cmd_data}")
             return
         
         cmd = cmd_data.get('cmd')
@@ -272,6 +272,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             
             elif cmd == 'mode':
                 self.connection.mode(cmd_data['target'], cmd_data['mode'])
+
+            elif cmd == 'quit':
+                self.connection.quit(cmd_data['message'])
+                self.core_q.put_nowait({'cmd': 'quit', 'message': cmd_data['message']})
             
             elif cmd == 'kick':
                 reason = cmd_data.get('reason', 'Kicked')
@@ -291,7 +295,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 self.connection.send_raw(cmd_data['line'])
             
             else:
-                logger.warning(f"Unknown command: {cmd}")
+                logger.error(f"[IRC] Unknown command: {cmd}")
         
         except Exception as e:
             logger.error(f"Command failed {cmd_data}: {e}")
@@ -337,3 +341,8 @@ def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
     
     # Start IRC reactor (blocking)
     bot.start()
+
+def irc_target(config_path, core_q, irc_q, botnet_q, party_q):
+    import json, asyncio
+    config = json.load(open(config_path))
+    asyncio.run(start_irc_process(config, core_q, irc_q, botnet_q, party_q))

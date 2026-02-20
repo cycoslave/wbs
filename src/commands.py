@@ -242,7 +242,7 @@ async def cmd_join(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int
     parts = arg.split()
     irc_q.put_nowait({'cmd': 'join', 'channel': parts[0], 
               'key': parts[1] if len(parts) > 1 else None})
-    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ JOIN {arg}")
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ JOIN {parts}")
 
 
 async def cmd_part(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
@@ -253,7 +253,7 @@ async def cmd_part(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int
     parts = arg.split(maxsplit=1)
     irc_q.put_nowait({'cmd': 'part', 'channel': parts[0],
               'reason': parts[1] if len(parts) > 1 else ''})
-    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ PART {parts[0]}")
+    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"→ PART {parts}")
 
 
 async def cmd_say(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int, arg: str):
@@ -318,8 +318,7 @@ COMMANDS = {
     'act': cmd_act,
     'bots': cmd_bots,
     'quit': cmd_quit,
-    'die': cmd_quit
-
+    'die': cmd_quit,
 }
 
 

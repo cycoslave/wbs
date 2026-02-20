@@ -23,26 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class Partyline:
-    """Partyline console interface - routes commands, displays events."""
-    
-    def __init__(self, config, core_q, irc_q, botnet_q, party_q):
+    def __init__(self, config, core_q):  # Only core_q needed
         self.config = config
-        self.core_q = core_q
-        self.irc_q = irc_q
-        self.irc_p = irc_q
-        self.botnet_q = botnet_q 
-        self.party_q = party_q
+        self.core_q = core_q  # ALL commands go to Core
         
-        # Partyline state
-        self.current_chan = 0  # 0 = global botnet channel
-        self.user = "console"  # Console user handle
+        self.current_chan = 0
+        self.user = "console"
         self.db_path = config['db']['path']
         self.users = UserManager()
-        
-        # Botnet partyline channels {chan_id: set(handles)}
         self.channels = {0: {'console'}}
-        
-        # Session tracking (for future DCC/telnet support)
         self.sessions = {}
         self.running = False
 
@@ -202,10 +191,10 @@ Chat: Type normally (no dot) to chat on current partyline channel
 
     async def _show_status(self):
         """Request and display bot status."""
-        await self.core_q.put({'cmd': 'status'})
+        self.core_q.put_nowait({'cmd': 'status'})
 
     async def run(self):
-        """Main loop - FIXED."""
+        """Main loop"""
         self.running = True
         event_task = asyncio.create_task(self.poll_events())
         
@@ -218,7 +207,7 @@ Chat: Type normally (no dot) to chat on current partyline channel
                     line = await session.prompt_async(prompt)
                     await self.handle_input(line)
                 except KeyboardInterrupt:
-                    print("\nUse .quit to exit")
+                    self.running = FALSE
                     continue
                 except EOFError:
                     break
@@ -233,9 +222,22 @@ class ConsoleSession:
         self.handle = handle
         self.idx = 0  # Single console session
 
-async def run_foreground_partyline(config, core_q, irc_q, botnet_q, party_q):
-    """Foreground console entrypoint."""
-    print("WBS Partyline active. Type .help for commands. Ctrl+C to quit.")
+def partyline_target(config_path, party_q, core_q, quit_event):
+    import json, asyncio, os
+    config = json.load(open(config_path))
     
-    pl = Partyline(config, core_q, irc_q, botnet_q, party_q)
+    # Use env flag (set by main.py)
+    if os.environ.get('WBS_FOREGROUND') == '1':
+        print("WBS Partyline active. Type .help for commands. Ctrl+C to quit.")
+        # Only pass core_q (Core handles everything)
+        asyncio.run(run_foreground_partyline(config, core_q))
+    else:
+        # Background telnet/DCC server (TODO)
+        print("Partyline server mode (telnet/DCC) - not implemented")
+        while not quit_event.is_set():
+            asyncio.sleep(1)
+
+async def run_foreground_partyline(config, core_q):  # Simplified signature
+    """Foreground console - ONLY needs config + core_q."""
+    pl = Partyline(config, core_q)  # Simplified constructor
     await pl.run()

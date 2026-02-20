@@ -378,3 +378,10 @@ def botnet_process(config, core_q, irc_q, botnet_q, party_q):
         log.info("Botnet process interrupted")
     finally:
         manager.stop()
+
+def botnet_target(config_path, core_q, irc_q, botnet_q, party_q):
+    """Stub - replace with real botnet."""
+    import time, asyncio
+    print("Botnet process starting (stub)")
+    while True:
+        time.sleep(1)
