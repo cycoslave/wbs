@@ -9,10 +9,10 @@ Seen tracking for all users (like gseen.mod).
 import asyncio
 import time
 import json
-import bcrypt  # Add to pyproject.toml
+import bcrypt
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
-from .db import get_db  # async context manager -> aiosqlite.Connection
+from .db import get_db 
 
 @dataclass
 class User:

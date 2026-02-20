@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import AsyncGenerator, Optional, List
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -135,11 +136,12 @@ async def seed_db(db_path: str, config: dict):
         await db.commit()
         print(f"DB seeded: bot={nick}, owner={owner}")
 
-async def get_db(db_path: str) -> AsyncGenerator[aiosqlite.Connection, None]:
-    """Context manager."""
+@asynccontextmanager
+async def get_db(db_path: str):
+    """Async context manager for DB connections."""
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
-    db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA journal_mode=WAL")
     try:
         yield db
         await db.commit()
