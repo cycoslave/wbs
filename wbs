@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+# wbs
+"""
+WBS Launcher
+"""
+
 import argparse
 import asyncio
 import json
 import logging
 import sys
 import os
-
 from src.core import Core
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -27,12 +31,8 @@ def load_config(config_path, db_path_override=None):
 
 def main():
     args = parse_args()
-    config = load_config(args.config, args.db_path)
-    os.environ['WBS_CONFIG'] = args.config
-    os.environ['WBS_FOREGROUND'] = '1' if args.foreground else '0' 
-    core = Core(config)
-    asyncio.run(core.run())
-
+    core = Core(args=args)
+    asyncio.run(core.run(foreground=args.foreground))
 
 if __name__ == '__main__':
     main()

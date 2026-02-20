@@ -1,5 +1,6 @@
+# src/user.py
 """
-src/user.py - Handles user management for WBS IRC bot.
+Handles user management for WBS IRC bot.
 Mimics Eggdrop userfile: handles, hostmasks, global/channel flags, info, hashed passwords.
 Async SQLite via db.py. Supports botnet sharing.
 Seen tracking for all users (like gseen.mod).
@@ -24,10 +25,11 @@ class User:
     laston: int = 0
     xtra: Dict[str, str] = None
 
-    def __post_init__(self):
+    def __post_init__(self, db_path):
         self.hostmasks = self.hostmasks or []
         self.chan_flags = self.chan_flags or {}
         self.xtra = self.xtra or {}
+        self.db_path = db_path
 
 class UserManager:
     FLAGS = {
@@ -36,11 +38,11 @@ class UserManager:
         'f': 'friend', 'i': 'info', 'g': 'gift', 'u': 'unban', 'a': 'autoop'
     }  # Eggdrop standard [web:22]
 
-    def __init__(self):
-        pass
+    def __init__(self, db_path):
+        self.db_path = db_path
 
     async def add_user(self, handle: str, hostmask: str = "") -> bool:
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute(
                 "INSERT OR IGNORE INTO users (handle, hostmasks, flags) VALUES (?, ?, ?)",
                 (handle, hostmask, "")
@@ -55,7 +57,7 @@ class UserManager:
             return was_new
 
     async def get_user(self, handle: str) -> Optional[User]:
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             row = await db.execute_fetchone("SELECT * FROM users WHERE handle = ?", (handle,))
             if not row:
                 return None
@@ -67,7 +69,7 @@ class UserManager:
 
     async def match_user(self, hostmask: str) -> Optional[str]:
         """Glob match hostmasks (eggdrop-style)."""
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             # Simple LIKE; enhance with fnmatch/regex if needed
             rows = await db.execute_fetchall(
                 "SELECT handle FROM users WHERE hostmasks LIKE ?",
@@ -87,7 +89,7 @@ class UserManager:
         else:
             new_flags = self._apply_changes(user.flags, changes)
             chan_json = None
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             if channel:
                 await db.execute("UPDATE users SET chan_flags = ? WHERE handle = ?", (chan_json, handle))
             else:
@@ -116,19 +118,19 @@ class UserManager:
         return ''.join(sorted(flags))
 
     async def del_user(self, handle: str) -> bool:
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute("DELETE FROM users WHERE handle = ?", (handle,))
             await db.commit()
             return db.rowcount > 0
 
     async def set_info(self, handle: str, info: str):
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute("UPDATE users SET info = ? WHERE handle = ?", (info, handle))
             await db.commit()
 
     async def set_password(self, handle: str, password: str):
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else ''
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
             await db.commit()
 
@@ -141,7 +143,7 @@ class UserManager:
         return all(f in flags for f in flags[1:]) if flags.startswith('+') else not any(f in flags for f in flags[1:])
 
     async def list_users(self, flag_filter: str = "") -> List[User]:
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
                 "SELECT * FROM users WHERE flags LIKE ? OR chan_flags LIKE ?",
                 (f"%{flag_filter}%", f"%{flag_filter}%")
@@ -156,7 +158,7 @@ class UserManager:
         return data
 
     async def sync_user(self, nick: str, host: str, channel: str = None, bot_id: int = None):
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO users (handle, hostmasks, laston, chan_flags, xtra)
                 VALUES (?, ?, strftime('%s','now'), ?, json_object('synced_by_bot', ?))
@@ -167,13 +169,14 @@ class UserManager:
 class SeenDB:
     EXPIRE_DAYS = 60
 
-    def __init__(self):
+    def __init__(self, db_path):
         self.rate_limits: Dict[str, List[float]] = {}
+        self.db_path = db_path
 
     async def update_seen(self, nick: str, hostmask: str, channel: str, action: str = "seen"):
         if not self.check_rate_limit(nick):
             return
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             now = int(time.time())
             await db.execute("""
                 INSERT OR REPLACE INTO seen (nick, lastseen, hostmask, channels, action)
@@ -182,7 +185,7 @@ class SeenDB:
             await db.commit()
 
     async def get_seen(self, nick: str) -> Optional[Dict[str, Any]]:
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             row = await db.execute_fetchone("SELECT * FROM seen WHERE nick = ?", (nick,))
             if not row:
                 return None
@@ -195,7 +198,7 @@ class SeenDB:
             return data
 
     async def delete_seen(self, nick: str):
-        async with get_db() as db:
+        async with get_db(self.db_path) as db:
             await db.execute("DELETE FROM seen WHERE nick = ?", (nick,))
             await db.commit()
 

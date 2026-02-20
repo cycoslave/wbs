@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+# src/botnet.py
 """
-src/botnet.py - Botnet manager for WBS.
+Botnet manager for WBS.
 Handles hub/leaf linking, partyline relay, command routing (bot/subnet/botnet),
 user/channel sharing. Multiprocessing IPC with core/IRC via queues.
 Eggdrop-compatible: aggressive/passive sharing (s/p flags), partyline (./, /, '), TLS.
@@ -37,10 +37,12 @@ class BotLink:
 class BotnetManager:
     """Manages botnet links in async event loop. Runs in separate process."""
 
-    def __init__(self, queue_to_core: mp.Queue, queue_from_core: mp.Queue, db_path: str):
-        self.queue_to_core = queue_to_core        # Send events TO core
-        self.queue_from_core = queue_from_core    # Receive commands FROM core
-        self.db_path = db_path
+    def __init__(self, config, core_q, irc_q, botnet_q, party_q):
+        self.config = config
+        self.core_q = core_q
+        self.irc_q = irc_q
+        self.botnet_q = botnet_q
+        self.party_q = party_q
         self.links: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self.peers: Dict[str, BotLink] = {}
         self.partyline_channels: Dict[int, List[str]] = {0: []}  # 0=global

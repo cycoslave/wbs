@@ -1,4 +1,7 @@
-# src/commands.py - Partyline commands for WBS
+# src/commands.py
+"""
+Partyline commands for WBS
+"""
 
 import asyncio
 import secrets

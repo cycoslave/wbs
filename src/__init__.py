@@ -1,4 +1,5 @@
-"""WBS 6.0 - Python Eggdrop replacement with multiprocessing."""
+# src/__init__.py
+"""WBS"""
 
 __version__ = "6.0.0"
 __author__ = "cyco"

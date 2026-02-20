@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+# src/db.py
 """
-src/db.py - Unified async SQLite for WBS: bots/users/channels/seen.
+Unified async SQLite for WBS: bots/users/channels/seen.
 Supports multi-process (WAL mode).
 """
 import aiosqlite

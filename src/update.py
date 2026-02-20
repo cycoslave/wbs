@@ -1,3 +1,8 @@
+# src/update.py
+"""
+Update Manager
+"""
+
 import aiohttp
 import asyncio
 import json

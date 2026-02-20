@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+# src/irc.py
 """
-src/irc.py - IRC client process
+IRC client process
 Responsibilities:
   - Connect to IRC server(s) using jaraco.irc
   - Execute commands from cmd_queue (msg/join/mode/etc)
