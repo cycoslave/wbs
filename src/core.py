@@ -20,6 +20,7 @@ from .user import UserManager, SeenDB
 from .irc import irc_target
 from .botnet import botnet_target
 from .commands import COMMANDS
+from .partyline import PartylineHub
 
 logger = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -55,7 +56,7 @@ class Core:
         self.botnet_q = mp.Queue() if self.config.get('botnet', {}).get('enabled') else None
         self.party_q = mp.Queue()    # Core -> Partyline
         
-        # NEW: Async queues for console (main process only)
+        # Async queues for console (main process only)
         self.command_queue = asyncio.Queue()  # Console -> Core
         self.console_queue = asyncio.Queue()  # Core -> Console
         
@@ -66,6 +67,7 @@ class Core:
         
         # Managers
         self.user_mgr = None
+        self.partyline_hub = None
         self.seen = None
         self.channels = self.config.get('channels', [])
         self.children = []
@@ -111,11 +113,18 @@ class Core:
         logger.info(f"Spawned: {[p.name for p in self.children]}")
 
     async def run(self, foreground=False):
-        """Main async event loop - THIS IS THE CORE."""
+        """Main async event loop"""
         self.foreground = foreground
         
         logger.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
+        
+        # Register console with partyline if foreground
+        if foreground:
+            self.console_session_id = self.partyline_hub.register_console(
+                handle='console',
+                output_callback=self._console_output
+            )
         
         self.spawn_children(foreground=foreground)
         
@@ -130,14 +139,21 @@ class Core:
         else:
             await self._main_loop()
 
+    def _console_output(self, message: str):
+        """Callback for partyline messages to console"""
+        print(message)            
+
     async def console_task(self):
-        """Non-blocking console input - runs in main process (has TTY)."""
+        """Non-blocking console input - partyline client"""
         if not sys.stdin.isatty():
             logger.warning("No TTY available - console disabled")
             return
-            
-        print("WBS Console active. Type .help for commands. Ctrl+C to quit.")
-        logger.info("Console task started")
+        
+        print("\n" + "="*60)
+        print("WBS 6.0 Partyline")
+        print("="*60)
+        print("Type .help for commands | Chat with other users")
+        print("="*60 + "\n")
         
         while self.running:
             try:
@@ -145,14 +161,11 @@ class Core:
                 if ready:
                     line = sys.stdin.readline().strip()
                     if line:
-                        await self.command_queue.put({
-                            'type': 'COMMAND',
-                            'nick': 'console',
-                            'text': line,
-                            'host': 'console',
-                            'source': 'console'
-                        })
-                        logger.debug(f"Console: {line}")
+                        # Send to partyline hub
+                        await self.partyline_hub.handle_input(
+                            self.console_session_id, 
+                            line
+                        )
                 
                 await asyncio.sleep(0.01)
                 
@@ -163,6 +176,53 @@ class Core:
             except Exception as e:
                 logger.error(f"Console error: {e}")
                 await asyncio.sleep(0.1)
+    
+    async def handle_event(self, event: Dict[str, Any]):
+        """Handle events from children or internal"""
+        if isinstance(event, tuple) and len(event) == 2 and event[0] == 'event':
+            event = event[1]
+        
+        if not isinstance(event, dict):
+            logger.error(f"Invalid event type received: {type(event)} - {event}")
+            return
+        
+        etype = event.get('type', 'UNKNOWN')
+        handlers = {
+            'PARTYLINE_COMMAND': self.on_partyline_command,
+            'PARTYLINE_CHAT': self.on_partyline_chat,
+            'COMMAND': self.on_command,
+            'PUBMSG': self.on_pubmsg,
+            'PRIVMSG': self.on_privmsg,
+            'JOIN': self.on_join,
+            'PART': self.on_part,
+            'KICK': self.on_kick,
+            'QUIT': self.on_quit,
+            'NICK': self.on_nick,
+            'READY': self.on_ready,
+            'ERROR': self.on_error,
+        }
+        handler = handlers.get(etype)
+        if handler:
+            await handler(event)
+        else:
+            logger.warning(f"Unhandled event type: {etype}")
+    
+    async def on_partyline_command(self, event):
+        """Forward partyline commands to partyline hub"""
+        session_id = event.get('session_id')
+        handle = event.get('handle')
+        text = event.get('text')
+        
+        # AWAIT the async call
+        await self.partyline_hub.handle_input(session_id, text)
+
+    async def on_partyline_chat(self, event):
+        """Handle chat from botnet partyline"""
+        from_bot = event.get('from', 'unknown')
+        text = event.get('text', '')
+        
+        # Broadcast to local partyline
+        self.partyline_hub.broadcast(f"<{from_bot}@botnet> {text}")
 
     def event_poller(self):
         """Thread: Poll core_q -> event buffer."""
@@ -287,7 +347,8 @@ class Core:
             logger.info("Botnet manager initialized")
         else:
             logger.info("Botnet disabled")
-            
+        
+        self.partyline_hub = PartylineHub(self.core_q, self.irc_q, self.botnet_q)
         logger.info(f"Core initialized: channels={self.channels}")
 
     # Event handlers unchanged - copy all your existing handlers

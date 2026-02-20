@@ -304,9 +304,21 @@ async def cmd_quit(config, core_q, irc_q, botnet_q, party_q, hand: str, idx: int
     await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "→ Shutdown initiated...")
     # Note: self.running=False happens in partyline.py after delay
 
+async def cmd_help(core_q, irc_q, botnet_q, handle: str, session_id: int, arg: str, respond):
+    """Show help"""
+    help_text = """WBS Partyline Commands:
+.help      - This help
+.uptime    - Bot uptime  
+.join #chan - Join channel
+.say #chan msg - Send message
+.quit      - Shutdown bot"""
+    
+    for line in help_text.split('\n'):
+        await respond(line)
 
 # Command registry
 COMMANDS = {
+    'help': cmd_help,
     'uptime': cmd_uptime,
     'mode': cmd_mode,
     'mnote': cmd_mnote,
@@ -323,7 +335,6 @@ COMMANDS = {
     'quit': cmd_quit,
     'die': cmd_quit,
 }
-
 
 async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):
     """
