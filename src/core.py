@@ -288,6 +288,7 @@ class Core:
                         
                     if event.get('cmd') == 'quit':
                         await self._shutdown(event.get('message', 'Quit'))
+                        self.quit_event.set()
                         return
                     await self.handle_event(event)
                 
@@ -348,7 +349,7 @@ class Core:
         else:
             logger.info("Botnet disabled")
         
-        self.partyline_hub = PartylineHub(self.core_q, self.irc_q, self.botnet_q)
+        self.partyline_hub = PartylineHub(self)
         logger.info(f"Core initialized: channels={self.channels}")
 
     # Event handlers unchanged - copy all your existing handlers

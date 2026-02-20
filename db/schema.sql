@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS users (
     handle TEXT PRIMARY KEY,
     password TEXT,                  -- bcrypt hash ($2b$12$...)
     flags TEXT DEFAULT '',          -- +fhoimnptx (global flags)
-    lastseen INTEGER DEFAULT 0,     -- CHANGED: Unix timestamp
+    last_seen INTEGER DEFAULT 0,     -- CHANGED: Unix timestamp
     hostmask TEXT DEFAULT '',       -- Primary hostmask (deprecated, use hostmasks)
     hostmasks TEXT DEFAULT '[]',    -- JSON array ["*!*@host1", "*!user@host2"]
     comment TEXT DEFAULT '',
@@ -162,12 +162,12 @@ CREATE TABLE IF NOT EXISTS seen (
     nick TEXT NOT NULL,
     handle TEXT,                    -- Matched user handle (if authed)
     channel TEXT,
-    action TEXT CHECK(action IN ('JOIN','PART','QUIT','KICK','NICK','MSG')), -- NEW: +MSG
+    action TEXT CHECK(action IN ('JOIN','PART','QUIT','KICK','NICK','MSG','PUBMSG')),
     hostmask TEXT,
-    message TEXT DEFAULT '',        -- NEW: Part/quit/kick message
+    message TEXT DEFAULT '',
     user_agent TEXT DEFAULT '',
-    seen_at INTEGER NOT NULL,
-    PRIMARY KEY(nick, channel, seen_at)
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY(nick, channel, last_seen)
 );
 
 -- Bot lag/ping stats
@@ -290,7 +290,7 @@ ORDER BY n.channel, n.nick;
 CREATE TRIGGER IF NOT EXISTS cleanup_seen
 AFTER INSERT ON seen
 BEGIN
-    DELETE FROM seen WHERE seen_at < (strftime('%s', 'now') - 2592000);
+    DELETE FROM seen WHERE last_seen < (strftime('%s', 'now') - 2592000);
 END;
 
 -- Update bot last_ping when link updates

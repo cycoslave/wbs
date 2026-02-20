@@ -29,7 +29,7 @@ class BotRecord:
     handle: str  # Changed from 'name'
     subnetid: Optional[int] = None
     isactive: bool = False
-    lastseen: Optional[str] = None
+    last_seen: Optional[str] = None
 
 @dataclass
 class ChannelSettingsRow:

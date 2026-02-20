@@ -179,7 +179,7 @@ class SeenDB:
         async with get_db(self.db_path) as db:
             now = int(time.time())
             await db.execute("""
-                INSERT OR REPLACE INTO seen (nick, lastseen, hostmask, channels, action)
+                INSERT OR REPLACE INTO seen (nick, last_seen, hostmask, channel, action)
                 VALUES (?, ?, ?, ?, ?)
             """, (nick, now, hostmask, channel, action))
             await db.commit()
@@ -190,9 +190,9 @@ class SeenDB:
             if not row:
                 return None
             data = dict(row)
-            data['lastseen_str'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(data['lastseen']))
+            data['lastseen_str'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(data['last_seen']))
             expire_ts = int(time.time()) - (86400 * self.EXPIRE_DAYS)
-            if data['lastseen'] < expire_ts:
+            if data['last_seen'] < expire_ts:
                 await self.delete_seen(nick)
                 return None
             return data

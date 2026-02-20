@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 class PartylineHub:
     """Central partyline hub - runs in core process, manages all sessions"""
     
-    def __init__(self, core_q, irc_q, botnet_q):
-        self.core_q = core_q
-        self.irc_q = irc_q
-        self.botnet_q = botnet_q
+    def __init__(self, core):
+        self.core = core
+        self.irc_q = self.core.irc_q
+        self.botnet_q = self.core.botnet_q
         
         # Session registry: session_id -> session info
         self.sessions = {}  # {session_id: {'type': 'console/telnet/dcc', 'handle': str, 'queue': Queue}}
@@ -116,10 +116,7 @@ class PartylineHub:
                 async def respond(msg: str):
                     self.send_to_session(session_id, msg)
                 
-                await COMMANDS[cmd](
-                    self.core_q, self.irc_q, self.botnet_q,
-                    handle, session_id, arg, respond
-                )
+                await COMMANDS[cmd](self.core, handle, session_id, arg, respond)
             except Exception as e:
                 logger.error(f"Command '{cmd}' error: {e}")
                 self.send_to_session(session_id, f"Error executing .{cmd}")

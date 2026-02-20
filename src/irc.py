@@ -77,7 +77,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         """Send event to core.py via queue"""
         event_data['config_id'] = self.config_id
         try:
-            self.core_q.put(('event', event_data), block=False)
+            self.core_q.put(event_data, block=False)
         except queue.Full:
             logger.error(f"Event queue full, dropping: {event_data['type']}")
     
@@ -206,7 +206,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def on_ctcp(self, conn, event):
         """Handle CTCP requests (PING, VERSION, etc)"""
-        super().on_ctcp(conn, event)
         nick = event.source.nick
         ctcp_cmd = event.arguments[0].upper()
         
@@ -215,6 +214,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             conn.ctcp_reply(nick, f"PING {ts}")
         elif ctcp_cmd == 'VERSION':
             conn.ctcp_reply(nick, f"VERSION {self.VERSION}")
+        else:
+            super().on_ctcp(conn, event)
     
     def on_whoisuser(self, conn, event):
         """WHOIS response (311 numeric)"""
@@ -271,7 +272,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 self.connection.part(cmd_data['channel'], reason)
             
             elif cmd == 'mode':
-                self.connection.mode(cmd_data['target'], cmd_data['mode'])
+                self.connection.mode(cmd_data['channel'], cmd_data['modes'])
 
             elif cmd == 'quit':
                 self.connection.quit(cmd_data['message'])
