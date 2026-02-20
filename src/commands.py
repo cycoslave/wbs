@@ -148,8 +148,6 @@ COMMANDS = {
     'help': cmd_help,
     'uptime': cmd_uptime,
     'mode': cmd_mode,
-    'mass': cmd_mass,
-    'dns': cmd_dns,
     'join': cmd_join,
     'part': cmd_part,
     'say': cmd_msg,
