@@ -17,6 +17,7 @@ from collections import deque
 
 from .db import init_db
 from .user import UserManager
+from .channel import ChannelManager
 from .seen import Seen
 from .irc import irc_target
 from .botnet import botnet_target
@@ -31,13 +32,14 @@ class Core:
     """Main process: Core event loop + child process manager."""
     
     def __init__(self, args):
+        self.version = "6.0.0"
         self.config_path = getattr(args, 'config', 'config.json')
         db_path_override = getattr(args, 'db_path', None)
         with open(self.config_path) as f:
             self.config = json.load(f)
         if db_path_override:
             self.config['db']['path'] = db_path_override
-        self.db_path = self.config['db']['path'] or BASE_DIR / "wbs.db"
+        self.db_path = self.config['db']['path'] or BASE_DIR / "db/wbs.db"
         
         # Queues (Core owns all communication)
         self.core_q = mp.Queue()     # Core
@@ -56,11 +58,11 @@ class Core:
         
         # Managers
         self.user_mgr = None
+        self.chan_mgr = None
         self.partyline_hub = None
         self.seen = None
 
         # Runtime variables
-        self.channels = self.config.get('channels', [])
         self.children = []
         self.start_time = time.time()
         self.running = True
@@ -299,6 +301,7 @@ class Core:
         
         # User and seen managers
         self.user_mgr = UserManager(self.db_path)
+        self.chan_mgr = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         
         # Botnet manager
@@ -315,7 +318,7 @@ class Core:
             logger.info("Botnet disabled")
         
         self.partyline_hub = PartylineHub(self)
-        logger.info(f"Core initialized: channels={self.channels}")
+        logger.info(f"Core process started. (pid={os.getpid()})")
 
     async def on_command(self, event):
         """
@@ -411,9 +414,13 @@ class Core:
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
         self.connected = True
-        logger.info("IRC READY - joining channels")
-        for channel in self.channels:
-            self.send_cmd('join', channel)
+        logger.info("IRC READY - joining channels..")
+        channels = await self.chan_mgr.getchans()
+        for channel in channels:
+            if not None:
+                logger.info(f"Joining {channel}..")
+                self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
+                time.sleep(0.2)
 
     async def on_disconnect(self, event: Dict[str, Any]):
         """IRC connection dropped."""

@@ -2,6 +2,7 @@
 """
 IRC client process
 """
+import os
 import multiprocessing as mp
 import queue
 import threading
@@ -35,8 +36,6 @@ class EventType:
 
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
     """IRC bot instance - pure dispatcher, no business logic"""
-    
-    VERSION = "WBS 6.0.0"
     
     def __init__(self, config, core_q, irc_q, botnet_q, party_q):
         self.config = config
@@ -95,13 +94,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
         logger.info(f"Connected as {conn.get_nickname()}")
-        conn.join("#tohands")
-        # Join configured channels with delay to avoid flood
-        #for ch in self.join_channels:
-        #    logger.info(f"Joining {ch}")
-        #    conn.join(ch)
-        #    time.sleep(0.5)  # Anti-flood delay
-        self._emit_event({'type': EventType.READY})
+        self._emit_event({
+            'type': EventType.READY,
+            'botname': conn.get_nickname()
+        })
     
     def on_disconnect(self, conn, event):
         """Connection lost"""
@@ -210,7 +206,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             ts = event.arguments[1] if len(event.arguments) > 1 else ''
             conn.ctcp_reply(nick, f"PING {ts}")
         elif ctcp_cmd == 'VERSION':
-            conn.ctcp_reply(nick, f"VERSION {self.VERSION}")
+            conn.ctcp_reply(nick, f"VERSION WBS 6.0.0")
         else:
             super().on_ctcp(conn, event)
     
@@ -336,7 +332,7 @@ def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
     poller = threading.Thread(target=command_poller, daemon=True)
     poller.start()
     
-    logger.info(f"IRC process started (config_id={config.get('id', 1)})")
+    logger.info(f"IRC process started. (pid={os.getpid()})")
     
     # Start IRC reactor (blocking)
     bot.start()

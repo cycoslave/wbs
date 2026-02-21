@@ -3,13 +3,13 @@
 -- =====================================================
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;  -- Better concurrency for multiprocessing
-PRAGMA user_version = 3;    -- Schema version for migrations
+PRAGMA user_version = 1;    -- Schema version for migrations
 
 
 -- Users
 CREATE TABLE IF NOT EXISTS users (
     handle TEXT PRIMARY KEY,
-    password TEXT DEFAULT NULL,                  -- bcrypt hash
+    password TEXT DEFAULT NULL,     -- bcrypt hash
     hostmasks TEXT DEFAULT '[]',    -- JSON array ["*!*@host1", "*!user@host2"]
     is_locked BOOLEAN DEFAULT 0,
     comment TEXT DEFAULT '',
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS bots (
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
     subnet_id INTEGER,
     share_level TEXT DEFAULT 'full', -- full/subnet/none
+    comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
@@ -114,6 +115,7 @@ CREATE TABLE IF NOT EXISTS channels (
     limit_tolerance INTEGER DEFAULT 2,
     limit_delta INTEGER DEFAULT 300,
     limit_at INTEGER DEFAULT 0,
+    comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,

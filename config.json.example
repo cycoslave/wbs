@@ -31,7 +31,7 @@
       "name": "default"
   },
   "db": {
-    "path": "wbs.db"
+    "path": "db/wbs.db"
   },
   "logging": {
     "level": "INFO",

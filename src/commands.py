@@ -7,6 +7,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
+    await respond(f"WBS {core.version}")
+
 async def cmd_date(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Current time is: {datetime.now().ctime()}")
     return  
@@ -149,7 +152,7 @@ async def cmd_part(core, handle, session_id, arg, respond):
 
 async def cmd_quit(core, handle, session_id, arg, respond):
     """Shutdown bot."""
-    quit_msg = arg or "WBS 6.0.0"
+    quit_msg = arg or f"WBS {core.version}"
     await respond("→ Shutdown initiated...")
     core.irc_q.put_nowait({'cmd': 'quit', 'message': quit_msg})
 
@@ -178,8 +181,37 @@ async def cmd_bots(core, handle, session_id, arg, respond):
     #core.irc_q.put_nowait({'cmd': 'botnet_list'})
     await respond(" Botnet currently: disabled")
 
-async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
-    await respond("WBS 6.0.0")
+async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .addchan <user>")
+        return
+    parts = arg.split()
+    if await core.chan_mgr.addchan(parts[0]) == True:
+        core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+        await respond(f"→ Channel {parts[0]} added!")
+    else:
+        await respond(f"→ Channel {parts[0]} NOT added!")
+
+async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .delchan <user>")
+        return
+    parts = arg.split()
+    if await core.chan_mgr.delchan(parts[0]) == True:
+        core.irc_q.put_nowait({'cmd': 'part', 'channel': parts[0]})
+        await respond(f"→ Channel {parts[0]} deleted!")
+    else:
+        await respond(f"→ Channel {parts[0]} NOT deleted!")
+
+async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .showchan <user>")
+        return
+    parts = arg.split()
+    await respond(await core.chan_mgr.showchan(parts[0]))
+
+async def cmd_listchans(core, handle: str, session_id: int, arg: str, respond):
+    await respond(await core.chan_mgr.listchans())    
 
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -555,16 +587,21 @@ COMMANDS = {
     #'quit': cmd_quit,
     'die': cmd_quit,
     # user    
-    'adduser': cmd_adduser,
-    'deluser': cmd_deluser,
-    'showuser': cmd_showuser,
-    'listusers': cmd_listusers,
+    '+user': cmd_adduser,
+    '-user': cmd_deluser,
+    'userinfo': cmd_showuser,
+    'users': cmd_listusers,
     'chusercomment': cmd_chusercomment,
     'addaccess': cmd_addaccess,
     'delaccess': cmd_delaccess,
     'lockuser': cmd_lockuser,
     'unlockuser': cmd_unlockuser,
     'chpass': cmd_passwd,
+    # channel    
+    '+chan': cmd_addchan,
+    '-chan': cmd_delchan,
+    'chaninfo': cmd_showchan,
+    'channels': cmd_listchans,
 }
 
 async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):
