@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS user_access (
     subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
     is_admin BOOLEAN DEFAULT 0,
+    is_bot BOOLEAN DEFAULT 0,
     is_op BOOLEAN DEFAULT 0,
     is_deop BOOLEAN DEFAULT 0,
     is_voice BOOLEAN DEFAULT 0,

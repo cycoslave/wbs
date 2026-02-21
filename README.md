@@ -22,11 +22,15 @@ options:
   -v, --version         show program's version number and exit
 ```
 
+## Create your first user
+- Edit config.json.example save it as config.json
+- Launch your bot in foreground mode (./wbs -f)
+- .adduser yourname *!ident@your.hostname.or.ip
+- .addaccess yourname admin
+- .die
+
 ## Todo
 - recode the WBS TCL scripts into python
 
-
 ## Bugs
-- launching in background will not work for now.
-- bot does not reconnect to the server when it disconnects
 - will not connect to channels on_welcome

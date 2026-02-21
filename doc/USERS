@@ -1,0 +1,14 @@
+The users in WBS.
+
+User flags:
+-is_locked: User is not able to login (same as if a user has no password)
+
+User access:
+- admin (global)
+- partyline (global)
+- bot (global) -- this mode cannot be set by the user
+- friend (global/channel/subnet)
+- op (global/channel/subnet)
+- deop (global/channel/subnet)
+- voice (global/channel/subnet)
+- devoice (global/channel/subnet)
