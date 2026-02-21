@@ -1,7 +1,4 @@
 {
-  "db": {
-    "path": "wbs.db"
-  },
   "bot": {
     "nick": "WBS",
     "user": "wbs",
@@ -9,54 +6,41 @@
     "servers": [
       {"host": "irc.example.com", "port": 6667, "password": null}
     ],
-    "channels": ["#channel"],
-    "owners": ["ownerhandle"]
-  },
-  "botnet": {
-    "enabled": false,
-    "hub_host": "botnet-hub.example.com",
-    "hub_port": 3333,
-    "hub_password": "secret",
-    "subnet_id": "default"
+    "channels": ["#channel", "#channel2"]
   },
   "users": [
     {
       "handle": "owner",
       "password": "changeme",
-      "hosts": ["owner!user@host.example.com"]
-    }
-  ],
-  "subnets": [
+      "hosts": ["owner!user@host.example.com"],
+      "access": [
+        {"is_admin": 1}
+      ]
+    },
     {
-      "id": "default",
-      "networks": ["default"],
-      "channels": ["#channel"]
+      "handle": "user2",
+      "password": "changeme2",
+      "hosts": ["user2!user2@another.example.com"],
+      "access": [
+        {"is_op": 1, "channel": "#randomchannel", "subnet": 1}
+      ]
     }
   ],
+  "subnet": {
+      "id": "1",
+      "name": "default"
+  },
+  "db": {
+    "path": "wbs.db"
+  },
   "logging": {
     "level": "INFO",
     "file": "logs/wbs.log"
   },
-  "seen": {
-    "save_interval": 60,
-    "expire_days": 60,
-    "max_seens": {"count": 7, "seconds": 60},
-    "tell_seens": true,
-    "botnet_seens": true,
-    "no_pub_seens": [],
-    "quiet_seens": [],
-  },
-  "update": {
-    "auhost": "https://yourhost.com",
-    "auremotefile": "/UPDATE",
-    "useragent": "wbs/6.0.0",
-    "updatetimeout": 10,
-    "wbsver": 6,
-    "wbsversub": 0,
-    "wbsverpatch": 0,
-    "task": {"auget": true}
-  },
-  "irc": {
-    "cmd_throttle_ms": 100
+  "settings": {
+    "botnet": false,
+    "seen": false,
+    "auto_update": false,
+    "irc_throttle_ms": 100
   }
 }
