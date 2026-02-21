@@ -31,6 +31,7 @@ class EventType:
     QUIT = 'QUIT'
     COMMAND = 'COMMAND'
     READY = 'READY'
+    DISCONNECT = 'DISCONNECT'
     ERROR = 'ERROR'
     WHOIS_USER = 'WHOIS_USER'
     WHOIS_END = 'WHOIS_END'
@@ -104,7 +105,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         #    logger.info(f"Joining {ch}")
         #    conn.join(ch)
         #    time.sleep(0.5)  # Anti-flood delay
-        
         self._emit_event({'type': EventType.READY})
     
     def on_disconnect(self, conn, event):
@@ -114,6 +114,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'type': EventType.ERROR,
             'data': 'disconnect'
         })
+        self._emit_event({'type': EventType.DISCONNECT})
     
     # === IRC Event Handlers ===
     
@@ -276,6 +277,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
             elif cmd == 'quit':
                 self.connection.quit(cmd_data['message'])
+                time.sleep(2.0)
                 self.core_q.put_nowait({'cmd': 'quit', 'message': cmd_data['message']})
             
             elif cmd == 'kick':

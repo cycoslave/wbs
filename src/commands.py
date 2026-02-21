@@ -3,22 +3,9 @@
 Partyline commands for WBS
 """
 
-import asyncio
-import secrets
-import socket
-import subprocess
 import time
 from datetime import datetime, timedelta
 from typing import Optional
-
-#from src.core import CoreEventLoop
-from .user import UserManager
-#from .channel import get_channel_modes, bot_is_op, chanlist
-from .db import get_db
-from .botnet import BotnetManager
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from .core import CoreEventLoop
 
 # Universal (-|-)
 async def cmd_uptime(core, handle, session_id, arg, respond):
@@ -53,14 +40,16 @@ async def cmd_mode(core, handle, session_id, arg, respond):
         return await respond("Usage: .mode <#channel> <modes>")
     
     chan, modes = parts
-    user_mgr = UserManager()
-    
-    if await user_mgr.matchattr(hand, 'o|o', chan):
-        # Queue IRC command
-        core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-        await respond(f"Mode set: {chan} {modes}")
-    else:
-        await respond("Access denied (need +o)")
+    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    await respond(f"Mode set: {chan} {modes}")
+    #user_mgr = UserManager()
+    #
+    #if await user_mgr.matchattr(hand, 'o|o', chan):
+    #    # Queue IRC command
+    #    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    #    await respond(f"Mode set: {chan} {modes}")
+    #else:
+    #    await respond("Access denied (need +o)")
     return 1
 
 #async def cmd_channels(core, handle, session_id, arg, respond):
@@ -98,9 +87,8 @@ async def cmd_part(core, handle, session_id, arg, respond):
 async def cmd_quit(core, handle, session_id, arg, respond):
     """Shutdown bot."""
     quit_msg = arg or "WBS 6.0.0"
-    core.irc_q.put_nowait({'cmd': 'quit', 'message': quit_msg})
-    await core._shutdown(quit_msg)
     await respond("→ Shutdown initiated...")
+    core.irc_q.put_nowait({'cmd': 'quit', 'message': quit_msg})
 
 async def cmd_msg(core, handle, session_id, arg, respond):
     """Send message to channel."""
@@ -124,15 +112,101 @@ async def cmd_act(core, handle, session_id, arg, respond):
 async def cmd_bots(core, handle, session_id, arg, respond):
     """List botnet status."""
     # Check botnet config/status via core or simple check
-    core.irc_q.put_nowait({'cmd': 'botnet_list'})
+    #core.irc_q.put_nowait({'cmd': 'botnet_list'})
     await respond(" Botnet currently: disabled")
+
+async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
+    await respond("WBS 6.0.0")
+
+async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .adduser <user> [hostmask]")
+        return
+    parts = arg.split()
+    if await core.user_mgr.adduser(parts[0], parts[1]) == True:
+        await respond(f"→ User {parts[0]} added!")
+    else:
+        await respond(f"→ User {parts[0]} NOT added!")
+
+async def cmd_deluser(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .deluser <user>")
+        return
+    parts = arg.split()
+    if await core.user_mgr.deluser(parts[0]) == True:
+        await respond(f"→ User {parts[0]} deleted!")
+    else:
+        await respond(f"→ User {parts[0]} NOT deleted!")
+
+async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .showuser <user>")
+        return
+    parts = arg.split()
+    await respond(await core.user_mgr.showuser(core.db_path, parts[0]))
+
+async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
+    #if not arg:
+    #    await respond("Usage: .listusers")
+    #    return
+    #parts = arg.split()
+    await respond(await core.user_mgr.listusers())                
+
+async def cmd_chusercomment(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .chusercomment <user> <comment>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_addaccess(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .addaccess [options] <user> <access>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_delaccess(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .delaccess [options] <user> <access>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_lockuser(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .lockuser <user>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .unlockuser <user>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .passwd [user] <password>")
+        return
+    #parts = arg.split()
+    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
+    await respond(f"→ JOIN {parts[0]}")                            
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
     help_text = """
 WBS Partyline Commands:
 .help      - This help
-.uptime    - Bot uptime  
+.uptime    - Bot uptime
+.version    - Bot version  
 .say #chan msg - Send message
 .msg nick msg - Send message
 .join #chan - Join channel
@@ -147,6 +221,7 @@ WBS Partyline Commands:
 COMMANDS = {
     'help': cmd_help,
     'uptime': cmd_uptime,
+    'version': cmd_version,
     'mode': cmd_mode,
     'join': cmd_join,
     'part': cmd_part,
@@ -156,6 +231,17 @@ COMMANDS = {
     'bots': cmd_bots,
     'quit': cmd_quit,
     'die': cmd_quit,
+    # user    
+    'adduser': cmd_adduser,
+    'deluser': cmd_deluser,
+    'showuser': cmd_showuser,
+    'listusers': cmd_listusers,
+    'chusercomment': cmd_chusercomment,
+    'addaccess': cmd_addaccess,
+    'delaccess': cmd_delaccess,
+    'lockuser': cmd_lockuser,
+    'unlockuser': cmd_unlockuser,
+    'passwd': cmd_passwd,
 }
 
 async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):

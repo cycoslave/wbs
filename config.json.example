@@ -23,7 +23,6 @@
     {
       "handle": "owner",
       "password": "changeme",
-      "flags": "mno",
       "hosts": ["owner!user@host.example.com"]
     }
   ],
@@ -38,9 +37,7 @@
     "level": "INFO",
     "file": "logs/wbs.log"
   },
-  "gseen": {
-    "file": "seen.db",
-    "cmdchar": "!",
+  "seen": {
     "save_interval": 60,
     "expire_days": 60,
     "max_seens": {"count": 7, "seconds": 60},
@@ -48,7 +45,6 @@
     "botnet_seens": true,
     "no_pub_seens": [],
     "quiet_seens": [],
-    "ai_ignore": ["$nick", "${botnet-nick}", "seen"]
   },
   "update": {
     "auhost": "https://yourhost.com",

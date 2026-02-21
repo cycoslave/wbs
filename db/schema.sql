@@ -76,18 +76,40 @@ CREATE TABLE IF NOT EXISTS bot_links (
 -- USERS & ACCESS
 -- =====================================================
 
--- Global users (partyline/DCC authentication)
+-- Users
 CREATE TABLE IF NOT EXISTS users (
     handle TEXT PRIMARY KEY,
     password TEXT,                  -- bcrypt hash ($2b$12$...)
-    flags TEXT DEFAULT '',          -- +fhoimnptx (global flags)
-    last_seen INTEGER DEFAULT 0,     -- CHANGED: Unix timestamp
-    hostmask TEXT DEFAULT '',       -- Primary hostmask (deprecated, use hostmasks)
     hostmasks TEXT DEFAULT '[]',    -- JSON array ["*!*@host1", "*!user@host2"]
+    is_locked BOOLEAN DEFAULT 0,
     comment TEXT DEFAULT '',
-    xtra TEXT DEFAULT '{}',         -- NEW: JSON for custom fields
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    last_seen INTEGER DEFAULT 0,
+    seen_where TEXT DEFAULT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL
 );
+
+-- User access
+CREATE TABLE IF NOT EXISTS user_access (
+    handle TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT '*',  -- '*' = global access
+    subnet_id INTEGER DEFAULT NULL,
+    has_partyline BOOLEAN DEFAULT 0,
+    is_admin BOOLEAN DEFAULT 0,
+    is_op BOOLEAN DEFAULT 0,
+    is_deop BOOLEAN DEFAULT 0,
+    is_voice BOOLEAN DEFAULT 0,
+    is_devoice BOOLEAN DEFAULT 0,
+    is_friend BOOLEAN DEFAULT 0,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    
+    PRIMARY KEY(handle, channel),  -- ✅ Fixed
+    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
+    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
+);
+
 
 -- Channels
 CREATE TABLE IF NOT EXISTS channels (
@@ -105,18 +127,6 @@ CREATE TABLE IF NOT EXISTS channels (
     chanmode TEXT DEFAULT '',       -- NEW: Current channel modes (+ntk key)
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE CASCADE
-);
-
--- Per-user/channel flags
-CREATE TABLE IF NOT EXISTS user_chan_flags (
-    handle TEXT NOT NULL,
-    channel TEXT NOT NULL,
-    flags TEXT DEFAULT '',          -- +vopqa (channel-specific)
-    info TEXT DEFAULT '',           -- NEW: User info text (.chinfo)
-    last_updated INTEGER DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY(handle, channel),
-    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
-    FOREIGN KEY(channel) REFERENCES channels(name) ON DELETE CASCADE
 );
 
 -- =====================================================
@@ -218,8 +228,6 @@ CREATE INDEX IF NOT EXISTS idx_bots_subnet ON bots(subnet_id);
 CREATE INDEX IF NOT EXISTS idx_bots_online ON bots(is_online, is_linked);
 CREATE INDEX IF NOT EXISTS idx_bot_links_bot ON bot_links(bot_handle);
 CREATE INDEX IF NOT EXISTS idx_bot_links_linked ON bot_links(linked_bot_handle);
-CREATE INDEX IF NOT EXISTS idx_users_flags ON users(flags);
-CREATE INDEX IF NOT EXISTS idx_user_chan_channel ON user_chan_flags(channel);
 CREATE INDEX IF NOT EXISTS idx_channels_subnet ON channels(subnet_id);
 CREATE INDEX IF NOT EXISTS idx_seen_nick ON seen(nick);
 CREATE INDEX IF NOT EXISTS idx_seen_channel ON seen(channel);
@@ -254,33 +262,12 @@ GROUP BY b.handle;
 -- Partyline who (active sessions)
 CREATE VIEW IF NOT EXISTS partyline_who AS
 SELECT 
-    d.handle,
-    d.channel,
-    d.bot_handle,
-    d.idle_time,
-    d.away,
-    u.flags as user_flags,
+    d.handle, d.channel, d.bot_handle, d.idle_time, d.away,
     (strftime('%s', 'now') - d.last_activity) as seconds_idle
 FROM dcc_sessions d
-JOIN users u ON d.handle = u.handle
 WHERE d.session_type IN ('chat', 'telnet')
 ORDER BY d.channel, d.handle;
 
--- Channel user list (for .chanwho / .chanseen)
-CREATE VIEW IF NOT EXISTS channel_users AS
-SELECT 
-    n.channel,
-    n.nick,
-    n.hostmask,
-    n.modes as nick_modes,
-    ucf.flags as user_flags,
-    ucf.handle,
-    n.joined_at,
-    (strftime('%s', 'now') - n.last_seen) as idle_seconds
-FROM irc_nicks n
-LEFT JOIN user_chan_flags ucf ON n.channel = ucf.channel
-WHERE n.last_seen > (strftime('%s', 'now') - 300)  -- Active in last 5min
-ORDER BY n.channel, n.nick;
 
 -- =====================================================
 -- TRIGGERS (Data Integrity & Auto-Cleanup)
@@ -301,14 +288,6 @@ BEGIN
     UPDATE bots SET last_ping = NEW.last_seen WHERE handle = NEW.bot_handle;
 END;
 
--- Cascade cleanup on channel deletion
-CREATE TRIGGER IF NOT EXISTS cleanup_chan_flags
-AFTER DELETE ON channels
-FOR EACH ROW
-BEGIN
-    DELETE FROM user_chan_flags WHERE channel = OLD.name;
-    DELETE FROM irc_nicks WHERE channel = OLD.name;
-END;
 
 -- Update channel user count on nick join
 CREATE TRIGGER IF NOT EXISTS update_chan_users_join
@@ -370,45 +349,6 @@ BEGIN
     DELETE FROM partyline_log 
     WHERE timestamp < (strftime('%s', 'now') - 7776000);
 END;
-
--- =====================================================
--- SEED DATA (CORRECTED ORDER)
--- =====================================================
-
--- 1. USERS FIRST (referenced by subnets)
-INSERT OR IGNORE INTO users (handle, flags, hostmasks, comment) 
-VALUES 
-    ('owner', '+fhoimn', '["*!*@localhost","*!*@127.0.0.1"]', 'Botnet owner'),
-    ('botowner', '+fho', '["*!*@127.0.0.1"]', 'DCC partyline user'),
-    ('console', '+f', '["console@wbs"]', 'Foreground console user');
-
--- 2. NOW SUBNETS (can reference users)
-INSERT OR IGNORE INTO subnets (id, name, irc_network, irc_server, irc_ssl, channels, owner_handle) 
-VALUES (1, 'default', 'Libera.Chat', 'irc.libera.chat:6697', 1, '["#wbs-test","#botnet"]', 'owner');
-
--- 3. BOTS (references subnets)
-INSERT OR IGNORE INTO bots (handle, address, port, role, subnet_id, flags, listen_port, share_flags, nick) 
-VALUES 
-    ('WBS', '127.0.0.1', 3333, 'leaf', 1, '+sp', 0, 'ucbgi', 'WBS'),
-    ('WBS-Hub', '127.0.0.1', 4444, 'hub', 1, '+ghplsr', 4444, 'ucbgi', 'WBS-Hub');
-
--- 4. CHANNELS (references subnets)
-INSERT OR IGNORE INTO channels (name, subnet_id, settings, bot_flags) 
-VALUES 
-    ('#wbs-test', 1, '{"limit":50,"enforce_bans":true,"flood_lines":5,"flood_time":10}', '+o'),
-    ('#botnet', 1, '{"limit":20,"secret":true}', '+o');
-
--- 5. USER_CHAN_FLAGS (references users + channels)
-INSERT OR IGNORE INTO user_chan_flags (handle, channel, flags, info) 
-VALUES 
-    ('owner', '#wbs-test', '+oamnf', 'Permanent owner'),
-    ('owner', '#botnet', '+oamnf', 'Botnet admin'),
-    ('botowner', '#botnet', '+vo', 'Trusted user');
-
--- 6. BOT_LINKS LAST (references bots)
-INSERT OR IGNORE INTO bot_links (bot_handle, linked_bot_handle, flags, link_type)
-VALUES ('WBS', 'WBS-Hub', '+sp', 'tcp');
-
 
 -- =====================================================
 -- UTILITY FUNCTIONS (SQLite doesn't have UDFs, but helpers)

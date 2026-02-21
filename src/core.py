@@ -16,7 +16,8 @@ from typing import Dict, Any
 from collections import deque
 
 from .db import init_db
-from .user import UserManager, SeenDB
+from .user import UserManager
+from .seen import Seen
 from .irc import irc_target
 from .botnet import botnet_target
 from .commands import COMMANDS
@@ -29,32 +30,19 @@ class Core:
     """Main process: Core event loop + child process manager."""
     
     def __init__(self, args):
-        # Load config from args
-        config_path = getattr(args, 'config', os.environ.get('WBS_CONFIG', 'config.json'))
+        self.config_path = getattr(args, 'config', 'config.json')
         db_path_override = getattr(args, 'db_path', None)
-        
-        with open(config_path) as f:
+        with open(self.config_path) as f:
             self.config = json.load(f)
-        
-        # Override DB path if specified
         if db_path_override:
             self.config['db']['path'] = db_path_override
-            
         self.db_path = self.config['db']['path'] or BASE_DIR / "wbs.db"
         
-        # Set env vars for ALL child processes
-        os.environ['WBS_CONFIG'] = config_path
-        os.environ['WBS_DB_PATH'] = str(self.db_path)
-        os.environ['WBS_FOREGROUND'] = '1'  # Default foreground for main process
-        
-        self.dcc_sessions = {}
-        self.foreground = False
-        
         # Queues (Core owns all communication)
-        self.core_q = mp.Queue()     # Partyline/commands -> Core
-        self.irc_q = mp.Queue()      # Core -> IRC
+        self.core_q = mp.Queue()     # Core
+        self.irc_q = mp.Queue()      # IRC
         self.botnet_q = mp.Queue() if self.config.get('botnet', {}).get('enabled') else None
-        self.party_q = mp.Queue()    # Core -> Partyline
+        self.party_q = mp.Queue()    # Partyline
         
         # Async queues for console (main process only)
         self.command_queue = asyncio.Queue()  # Console -> Core
@@ -69,14 +57,20 @@ class Core:
         self.user_mgr = None
         self.partyline_hub = None
         self.seen = None
+
+        # Runtime variables
         self.channels = self.config.get('channels', [])
         self.children = []
         self.start_time = time.time()
         self.running = True
+        self.connected = False
+        self.botname = None
+        self.dcc_sessions = {}
+        self.foreground = False
 
     def spawn_children(self, foreground=False):
         """Spawn daemon children - skip partyline in foreground mode."""
-        config_path = os.environ['WBS_CONFIG']
+        config_path = self.config_path
         
         # IRC always
         irc_proc = mp.Process(
@@ -197,8 +191,10 @@ class Core:
             'PART': self.on_part,
             'KICK': self.on_kick,
             'QUIT': self.on_quit,
+            'MODE': self.on_null,
             'NICK': self.on_nick,
             'READY': self.on_ready,
+            'DISCONNECT': self.on_disconnect,
             'ERROR': self.on_error,
         }
         handler = handlers.get(etype)
@@ -334,7 +330,7 @@ class Core:
         
         # User and seen managers
         self.user_mgr = UserManager(self.db_path)
-        self.seen = SeenDB(self.db_path)
+        self.seen = Seen(self.db_path)
         
         # Botnet manager
         botnet_cfg = self.config.get('botnet', {})
@@ -364,7 +360,9 @@ class Core:
             'KICK': self.on_kick,
             'QUIT': self.on_quit,
             'NICK': self.on_nick,
+            'MODE': self.on_null,
             'READY': self.on_ready,
+            'DISCONNECT': self.on_disconnect,
             'ERROR': self.on_error,
         }
         handler = handlers.get(etype)
@@ -462,13 +460,22 @@ class Core:
         old_nick = event.get('old_nick', '')
         new_nick = event.get('new_nick', '')
         
-        await self.seen.update_seen(old_nick, '', '', f'NICK -> {new_nick}')
+        await self.seen.update_seen(old_nick, '', '', 'NICK')
 
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
+        self.connected = True
         logger.info("IRC READY - joining channels")
         for channel in self.channels:
             self.send_cmd('join', channel)
+
+    async def on_disconnect(self, event: Dict[str, Any]):
+        """IRC connection dropped."""
+        self.connected = False       
+
+    async def on_null(self, event: Dict[str, Any]):
+        """Just do nothing."""
+        pass              
 
     async def on_error(self, event: Dict[str, Any]):
         """IRC error occurred."""
