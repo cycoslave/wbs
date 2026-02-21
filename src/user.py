@@ -1,8 +1,6 @@
 # src/user.py
 """
 Handles user management for WBS IRC bot.
-Mimics Eggdrop userfile: handles, hostmasks, global/channel flags, info, hashed passwords.
-Async SQLite via db.py. Supports botnet sharing.
 """
 
 import aiosqlite

@@ -1,9 +1,6 @@
 # src/botnet.py
 """
 Botnet manager for WBS.
-Handles hub/leaf linking, partyline relay, command routing (bot/subnet/botnet),
-user/channel sharing. Multiprocessing IPC with core/IRC via queues.
-Eggdrop-compatible: aggressive/passive sharing (s/p flags), partyline (./, /, '), TLS.
 """
 
 import asyncio

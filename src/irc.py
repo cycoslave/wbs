@@ -1,10 +1,6 @@
 # src/irc.py
 """
 IRC client process
-Responsibilities:
-  - Connect to IRC server(s) using jaraco.irc
-  - Execute commands from cmd_queue (msg/join/mode/etc)
-  - NO database access, NO command logic
 """
 import multiprocessing as mp
 import queue

@@ -476,7 +476,7 @@ COMMANDS = {
     'msg': cmd_msg,
     'act': cmd_act,
     'bots': cmd_bots,
-    'quit': cmd_quit,
+    #'quit': cmd_quit,
     'die': cmd_quit,
     # user    
     'adduser': cmd_adduser,

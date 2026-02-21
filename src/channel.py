@@ -1,9 +1,6 @@
 # src/channel.py
 """
 Handles IRC channel management for WBS.
-
-Manages channel state, settings, bans, user flags on channels, and DB interactions.
-Inspired by Eggdrop channels module.
 """
 
 import asyncio
