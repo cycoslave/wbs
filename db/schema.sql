@@ -1,90 +1,18 @@
 -- =====================================================
--- WBS 6.0 ENHANCED SCHEMA (Production-Ready)
--- Multiprocessing-Safe | Full Botnet | Partyline/DCC
+-- WBS 6.0.0 Sqlite database schema
 -- =====================================================
--- Changes from v6.0:
--- + Schema versioning (migrations)
--- + DCC sessions table (telnet/TLS partyline)
--- + Botnet share granularity (user/chan/ignores)
--- + IRC state tracking (nicknames, mode tracking)
--- + Flood protection tables
--- + Enhanced indexes for hot paths
--- + Additional triggers for data integrity
--- =====================================================
-
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;  -- Better concurrency for multiprocessing
-PRAGMA user_version = 2;    -- Schema version for migrations
+PRAGMA user_version = 3;    -- Schema version for migrations
 
--- =====================================================
--- CORE BOTNET TABLES
--- =====================================================
-
--- Subnets (isolated IRC networks/channel groups)
-CREATE TABLE IF NOT EXISTS subnets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    irc_network TEXT DEFAULT '',
-    irc_server TEXT DEFAULT '',     -- NEW: Current server (irc.libera.chat:6697)
-    irc_ssl BOOLEAN DEFAULT 1,      -- NEW: TLS connection
-    channels TEXT DEFAULT '[]',     -- JSON ["#chan1"]
-    owner_handle TEXT,
-    auto_rejoin BOOLEAN DEFAULT 1,  -- NEW: Auto-rejoin on kick
-    created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY(owner_handle) REFERENCES users(handle) ON DELETE SET NULL
-);
-
--- Bots (Eggdrop-style handles + attributes)
-CREATE TABLE IF NOT EXISTS bots (
-    handle TEXT PRIMARY KEY,
-    address TEXT NOT NULL,
-    port INTEGER NOT NULL DEFAULT 3333,
-    role TEXT CHECK(role IN ('hub', 'leaf', 'none')) DEFAULT 'none',
-    is_linked BOOLEAN DEFAULT 0,
-    is_online BOOLEAN DEFAULT 0,
-    subnet_id INTEGER,
-    flags TEXT DEFAULT '',          -- +ghplsr (botattr)
-    listen_port INTEGER DEFAULT 0,
-    last_ping INTEGER DEFAULT 0,
-    share_level TEXT DEFAULT 'full', -- full/subnet/none
-    share_flags TEXT DEFAULT 'ucbgi', -- NEW: u=users c=chans b=bans g=global i=ignores
-    version TEXT DEFAULT 'WBS6.0',
-    uptime_start INTEGER DEFAULT 0, -- NEW: Track actual uptime
-    nick TEXT DEFAULT '',           -- NEW: Current IRC nickname
-    created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
-);
-
--- Bot links (bidirectional hub<->leaf relationships)
-CREATE TABLE IF NOT EXISTS bot_links (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bot_handle TEXT NOT NULL,
-    linked_bot_handle TEXT NOT NULL,
-    flags TEXT DEFAULT '',          -- Link-specific flags
-    link_type TEXT DEFAULT 'tcp',   -- tcp/tls/relay
-    linked_at INTEGER DEFAULT (strftime('%s', 'now')),
-    last_seen INTEGER DEFAULT 0,
-    last_activity INTEGER DEFAULT 0, -- NEW: Last non-ping activity
-    lag_ms INTEGER DEFAULT 0,
-    retry_count INTEGER DEFAULT 0,  -- NEW: Failed reconnect attempts
-    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
-    FOREIGN KEY(linked_bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
-    UNIQUE(bot_handle, linked_bot_handle)
-);
-
--- =====================================================
--- USERS & ACCESS
--- =====================================================
 
 -- Users
 CREATE TABLE IF NOT EXISTS users (
     handle TEXT PRIMARY KEY,
-    password TEXT,                  -- bcrypt hash ($2b$12$...)
+    password TEXT DEFAULT NULL,                  -- bcrypt hash
     hostmasks TEXT DEFAULT '[]',    -- JSON array ["*!*@host1", "*!user@host2"]
     is_locked BOOLEAN DEFAULT 0,
     comment TEXT DEFAULT '',
-    last_seen INTEGER DEFAULT 0,
-    seen_where TEXT DEFAULT NULL,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
@@ -94,7 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- User access
 CREATE TABLE IF NOT EXISTS user_access (
     handle TEXT NOT NULL,
-    channel TEXT NOT NULL DEFAULT '*',  -- '*' = global access
+    channel TEXT DEFAULT NULL,
     subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
     is_admin BOOLEAN DEFAULT 0,
@@ -105,70 +33,108 @@ CREATE TABLE IF NOT EXISTS user_access (
     is_devoice BOOLEAN DEFAULT 0,
     is_friend BOOLEAN DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL,
     
-    PRIMARY KEY(handle, channel),  -- ✅ Fixed
+    PRIMARY KEY(handle, channel),
     FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
     FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
 
+-- Bots
+CREATE TABLE IF NOT EXISTS bots (
+    handle TEXT PRIMARY KEY,
+    address TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 3333,
+    role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
+    subnet_id INTEGER,
+    share_level TEXT DEFAULT 'full', -- full/subnet/none
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
+);
+
+-- Subnets
+CREATE TABLE IF NOT EXISTS subnets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL
+);
 
 -- Channels
 CREATE TABLE IF NOT EXISTS channels (
     name TEXT PRIMARY KEY,
-    subnet_id INTEGER DEFAULT 1,
-    settings TEXT DEFAULT '{}',     -- JSON: {limit:50, enforce_bans:true, chanmode:"+ntk"}
+    subnet_id INTEGER DEFAULT NULL,
+    modes TEXT DEFAULT '',
     bans TEXT DEFAULT '[]',         -- JSON ban list
     invites TEXT DEFAULT '[]',      -- JSON invite list  
-    exempts TEXT DEFAULT '[]',      -- NEW: Ban exemptions
-    users_count INTEGER DEFAULT 0,
-    topic TEXT DEFAULT '',          -- NEW: Current topic
-    topic_by TEXT DEFAULT '',       -- NEW: Who set topic
-    topic_at INTEGER DEFAULT 0,     -- NEW: When topic was set
-    bot_flags TEXT DEFAULT '',      -- Bot's modes in channel (+o)
-    chanmode TEXT DEFAULT '',       -- NEW: Current channel modes (+ntk key)
+    exempts TEXT DEFAULT '[]',      -- JSON Ban exemptions
+    flood_pub INTEGER DEFAULT 15,
+    flood_pub_time INTEGER DEFAULT 60,
+    flood_ctcp INTEGER DEFAULT 3,
+    flood_ctcp_time INTEGER DEFAULT 60,
+    flood_join INTEGER DEFAULT 5,
+    flood_join_time INTEGER DEFAULT 60,
+    flood_kick INTEGER DEFAULT 3,
+    flood_kick_time INTEGER DEFAULT 10,
+    flood_deop INTEGER DEFAULT 3,
+    flood_deop_time INTEGER DEFAULT 10,
+    flood_nick INTEGER DEFAULT 5,
+    flood_nick_time INTEGER DEFAULT 60,
+    is_bitch BOOLEAN DEFAULT 0,
+    is_autoop BOOLEAN DEFAULT 0,
+    is_autovoice BOOLEAN DEFAULT 0,
+    is_revenge BOOLEAN DEFAULT 0,
+    is_revengebots BOOLEAN DEFAULT 0,
+    is_protectfriends BOOLEAN DEFAULT 0,
+    is_protectops BOOLEAN DEFAULT 0,
+    is_dontkickops BOOLEAN DEFAULT 0,
+    is_inactive BOOLEAN DEFAULT 0,
+    is_enforcebans BOOLEAN DEFAULT 0,
+    is_dynamicbans BOOLEAN DEFAULT 0,
+    is_dynamicexempts BOOLEAN DEFAULT 0,
+    is_dynamicinvites BOOLEAN DEFAULT 0,
+    is_pubcom BOOLEAN DEFAULT 0,
+    is_news BOOLEAN DEFAULT 0,
+    is_url BOOLEAN DEFAULT 0,
+    is_stats BOOLEAN DEFAULT 0,
+    is_lock BOOLEAN DEFAULT 0,      -- CHANLOCK
+    lock_by TEXT DEFAULT '',
+    lock_at INTEGER DEFAULT 0,
+    lock_reason TEXT DEFAULT '',
+    is_topiclock BOOLEAN DEFAULT 0, -- TOPICLOCK
+    topiclock TEXT DEFAULT '',
+    topiclock_by TEXT DEFAULT '',
+    topiclock_at INTEGER DEFAULT 0,
+    topiclock_reason TEXT DEFAULT '',
+    is_limit BOOLEAN DEFAULT 0,     -- LIMIT
+    limit_add INTEGER DEFAULT 15,
+    limit_rand INTEGER DEFAULT 200,
+    limit_tolerance INTEGER DEFAULT 2,
+    limit_delta INTEGER DEFAULT 300,
+    limit_at INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL,
+
     FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE CASCADE
 );
 
--- =====================================================
--- PARTYLINE & DCC
--- =====================================================
-
--- DCC/Telnet sessions (active connections)
-CREATE TABLE IF NOT EXISTS dcc_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    handle TEXT NOT NULL,
-    session_type TEXT CHECK(session_type IN ('chat', 'telnet', 'file', 'bot')) DEFAULT 'chat',
-    host TEXT NOT NULL,
-    port INTEGER DEFAULT 0,
-    bot_handle TEXT,                -- Which bot owns this session
-    channel INTEGER DEFAULT 0,      -- Partyline channel (0=global)
-    connected_at INTEGER DEFAULT (strftime('%s', 'now')),
-    last_activity INTEGER DEFAULT (strftime('%s', 'now')),
-    idle_time INTEGER DEFAULT 0,
-    away BOOLEAN DEFAULT 0,         -- NEW: .away status
-    away_msg TEXT DEFAULT '',       -- NEW: Away message
-    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
-    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE CASCADE
-);
-
--- Partyline chat log (persistent chat history)
-CREATE TABLE IF NOT EXISTS partyline_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
-    channel INTEGER DEFAULT 0,      -- 0=global, 1+= custom channels
-    handle TEXT NOT NULL,
-    message TEXT NOT NULL,
-    bot_handle TEXT,                -- NEW: Which bot relayed it
-    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE SET NULL,
-    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE SET NULL
+-- Runtime
+CREATE TABLE IF NOT EXISTS runtime (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    expires_at INTEGER DEFAULT 0
 );
 
 -- =====================================================
 -- TRACKING & STATS
 -- =====================================================
 
--- Seen tracking (gseen + whowas)
+-- Seen
 CREATE TABLE IF NOT EXISTS seen (
     nick TEXT NOT NULL,
     handle TEXT,                    -- Matched user handle (if authed)
@@ -181,197 +147,75 @@ CREATE TABLE IF NOT EXISTS seen (
     PRIMARY KEY(nick, channel, last_seen)
 );
 
--- Bot lag/ping stats
-CREATE TABLE IF NOT EXISTS bot_lag (
-    bot_handle TEXT NOT NULL,
-    linked_bot_handle TEXT NOT NULL,
-    lag_ms INTEGER DEFAULT 0,
-    ping_sent INTEGER DEFAULT 0,
-    pong_rcvd INTEGER DEFAULT 0,
-    avg_lag_ms INTEGER DEFAULT 0,   -- NEW: Rolling average
-    last_updated INTEGER DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY(bot_handle, linked_bot_handle),
-    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
-    FOREIGN KEY(linked_bot_handle) REFERENCES bots(handle) ON DELETE CASCADE
-);
-
--- IRC nickname tracking (current nicks on each bot/subnet)
-CREATE TABLE IF NOT EXISTS irc_nicks (
-    bot_handle TEXT NOT NULL,
-    channel TEXT NOT NULL,
-    nick TEXT NOT NULL,
-    hostmask TEXT DEFAULT '',
-    modes TEXT DEFAULT '',          -- +ov flags
-    joined_at INTEGER DEFAULT (strftime('%s', 'now')),
-    last_seen INTEGER DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY(bot_handle, channel, nick),
-    FOREIGN KEY(bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
-    FOREIGN KEY(channel) REFERENCES channels(name) ON DELETE CASCADE
-);
-
--- Flood protection tracking
-CREATE TABLE IF NOT EXISTS flood_tracking (
-    hostmask TEXT NOT NULL,
-    channel TEXT NOT NULL,
-    event_type TEXT CHECK(event_type IN ('msg', 'join', 'nick', 'ctcp')) NOT NULL,
-    event_count INTEGER DEFAULT 1,
-    window_start INTEGER DEFAULT (strftime('%s', 'now')),
-    last_event INTEGER DEFAULT (strftime('%s', 'now')),
-    PRIMARY KEY(hostmask, channel, event_type)
-);
-
 -- =====================================================
 -- INDEXES (Optimized for Hot Paths)
 -- =====================================================
 
--- Existing indexes
-CREATE INDEX IF NOT EXISTS idx_bots_subnet ON bots(subnet_id);
-CREATE INDEX IF NOT EXISTS idx_bots_online ON bots(is_online, is_linked);
-CREATE INDEX IF NOT EXISTS idx_bot_links_bot ON bot_links(bot_handle);
-CREATE INDEX IF NOT EXISTS idx_bot_links_linked ON bot_links(linked_bot_handle);
-CREATE INDEX IF NOT EXISTS idx_channels_subnet ON channels(subnet_id);
-CREATE INDEX IF NOT EXISTS idx_seen_nick ON seen(nick);
-CREATE INDEX IF NOT EXISTS idx_seen_channel ON seen(channel);
+-- Users & Access
+CREATE INDEX IF NOT EXISTS idx_users_hostmasks ON users(hostmasks);
+CREATE INDEX IF NOT EXISTS idx_user_access_handle_chan ON user_access(handle, channel);
+CREATE INDEX IF NOT EXISTS idx_user_access_channel_handle ON user_access(channel, handle);
+CREATE INDEX IF NOT EXISTS idx_user_access_subnet ON user_access(subnet_id);
 
--- NEW indexes for performance
-CREATE INDEX IF NOT EXISTS idx_dcc_sessions_handle ON dcc_sessions(handle);
-CREATE INDEX IF NOT EXISTS idx_dcc_sessions_bot ON dcc_sessions(bot_handle, channel);
-CREATE INDEX IF NOT EXISTS idx_partyline_log_channel ON partyline_log(channel, timestamp);
-CREATE INDEX IF NOT EXISTS idx_irc_nicks_channel ON irc_nicks(channel);
-CREATE INDEX IF NOT EXISTS idx_bot_links_activity ON bot_links(last_activity);
-CREATE INDEX IF NOT EXISTS idx_flood_tracking_cleanup ON flood_tracking(window_start);
+-- Channels 
+CREATE INDEX IF NOT EXISTS idx_channels_subnet_name ON channels(subnet_id, name);
+CREATE INDEX IF NOT EXISTS idx_channels_name_subnet ON channels(name, subnet_id);
+
+-- Runtime
+CREATE INDEX IF NOT EXISTS idx_runtime_key ON runtime(key);
+CREATE INDEX IF NOT EXISTS idx_runtime_expires ON runtime(expires_at);
 
 -- =====================================================
--- VIEWS
+-- TRIGGERS - PERFORMANCE & INTEGRITY
 -- =====================================================
 
--- Active botnet (online + linked bots)
-CREATE VIEW IF NOT EXISTS active_botnet AS
-SELECT 
-    b.*,
-    s.name as subnet_name,
-    s.irc_network,
-    COUNT(DISTINCT bl.linked_bot_handle) as link_count,
-    AVG(bl.lag_ms) as avg_lag_ms,
-    MAX(bl.last_seen) as last_link_activity
-FROM bots b 
-LEFT JOIN subnets s ON b.subnet_id = s.id
-LEFT JOIN bot_links bl ON b.handle = bl.bot_handle
-WHERE b.is_online = 1 AND b.is_linked = 1
-GROUP BY b.handle;
+-- Timestamp auto-update (users/channels/access)
+CREATE TRIGGER IF NOT EXISTS trig_users_update_ts
+AFTER UPDATE ON users FOR EACH ROW
+BEGIN
+  UPDATE users SET updated_at=strftime('%s','now') WHERE handle=OLD.handle;
+END;
 
--- Partyline who (active sessions)
-CREATE VIEW IF NOT EXISTS partyline_who AS
-SELECT 
-    d.handle, d.channel, d.bot_handle, d.idle_time, d.away,
-    (strftime('%s', 'now') - d.last_activity) as seconds_idle
-FROM dcc_sessions d
-WHERE d.session_type IN ('chat', 'telnet')
-ORDER BY d.channel, d.handle;
+CREATE TRIGGER IF NOT EXISTS trig_channels_update_ts
+AFTER UPDATE ON channels FOR EACH ROW
+BEGIN
+  UPDATE channels SET updated_at=strftime('%s','now') WHERE name=OLD.name;
+END;
 
+CREATE TRIGGER IF NOT EXISTS trig_access_update_ts
+AFTER UPDATE ON user_access FOR EACH ROW
+BEGIN
+  UPDATE user_access SET updated_at=strftime('%s','now') 
+  WHERE handle=OLD.handle AND channel=OLD.channel;
+END;
 
--- =====================================================
--- TRIGGERS (Data Integrity & Auto-Cleanup)
--- =====================================================
-
--- Auto-clean old seen records (keep 30 days)
-CREATE TRIGGER IF NOT EXISTS cleanup_seen
+-- Seen cleanup (30 days, batched)
+CREATE TRIGGER IF NOT EXISTS trig_seen_cleanup
 AFTER INSERT ON seen
+WHEN (SELECT COUNT(*) FROM seen WHERE last_seen<strftime('%s','now')-2592000)>5000
 BEGIN
-    DELETE FROM seen WHERE last_seen < (strftime('%s', 'now') - 2592000);
+  DELETE FROM seen WHERE last_seen<strftime('%s','now')-2592000;
 END;
 
--- Update bot last_ping when link updates
-CREATE TRIGGER IF NOT EXISTS update_bot_ping
-AFTER UPDATE OF last_seen ON bot_links
-FOR EACH ROW
+-- Runtime cleanup
+CREATE TRIGGER IF NOT EXISTS trig_runtime_cleanup
+AFTER INSERT ON runtime
 BEGIN
-    UPDATE bots SET last_ping = NEW.last_seen WHERE handle = NEW.bot_handle;
+  DELETE FROM runtime WHERE expires_at > 0 AND expires_at < strftime('%s', 'now');
 END;
 
-
--- Update channel user count on nick join
-CREATE TRIGGER IF NOT EXISTS update_chan_users_join
-AFTER INSERT ON irc_nicks
-FOR EACH ROW
+-- Timestamp refresh on update
+CREATE TRIGGER IF NOT EXISTS trig_runtime_update_ts
+AFTER UPDATE ON runtime FOR EACH ROW
 BEGIN
-    UPDATE channels 
-    SET users_count = (
-        SELECT COUNT(*) FROM irc_nicks 
-        WHERE channel = NEW.channel
-    )
-    WHERE name = NEW.channel;
-END;
-
--- Update channel user count on nick part
-CREATE TRIGGER IF NOT EXISTS update_chan_users_part
-AFTER DELETE ON irc_nicks
-FOR EACH ROW
-BEGIN
-    UPDATE channels 
-    SET users_count = (
-        SELECT COUNT(*) FROM irc_nicks 
-        WHERE channel = OLD.channel
-    )
-    WHERE name = OLD.channel;
-END;
-
--- Auto-cleanup stale flood tracking (5 min windows)
-CREATE TRIGGER IF NOT EXISTS cleanup_flood_tracking
-AFTER INSERT ON flood_tracking
-BEGIN
-    DELETE FROM flood_tracking 
-    WHERE window_start < (strftime('%s', 'now') - 300);
-END;
-
--- Auto-cleanup stale DCC sessions (24h idle)
-CREATE TRIGGER IF NOT EXISTS cleanup_stale_dcc
-AFTER UPDATE ON dcc_sessions
-FOR EACH ROW
-WHEN (strftime('%s', 'now') - NEW.last_activity) > 86400
-BEGIN
-    DELETE FROM dcc_sessions WHERE id = NEW.id;
-END;
-
--- Update DCC idle time
-CREATE TRIGGER IF NOT EXISTS update_dcc_idle
-AFTER UPDATE OF last_activity ON dcc_sessions
-FOR EACH ROW
-BEGIN
-    UPDATE dcc_sessions 
-    SET idle_time = (strftime('%s', 'now') - NEW.last_activity)
-    WHERE id = NEW.id;
-END;
-
--- Clean partyline logs older than 90 days
-CREATE TRIGGER IF NOT EXISTS cleanup_partyline_log
-AFTER INSERT ON partyline_log
-BEGIN
-    DELETE FROM partyline_log 
-    WHERE timestamp < (strftime('%s', 'now') - 7776000);
+  UPDATE runtime SET updated_at = strftime('%s', 'now') WHERE key = OLD.key;
 END;
 
 -- =====================================================
--- UTILITY FUNCTIONS (SQLite doesn't have UDFs, but helpers)
+-- POST-DEPLOY OPTIMIZE (run once after load)
 -- =====================================================
--- Use these queries in Python code for common operations:
-
--- Check if user matches hostmask:
--- SELECT handle FROM users WHERE ? GLOB json_extract(hostmasks, '$[*]');
-
--- Get user's effective flags for channel:
--- SELECT u.flags || COALESCE(ucf.flags, '') as effective_flags
--- FROM users u
--- LEFT JOIN user_chan_flags ucf ON u.handle = ucf.handle AND ucf.channel = ?
--- WHERE u.handle = ?;
-
--- Check flood limits:
--- SELECT event_count FROM flood_tracking 
--- WHERE hostmask = ? AND channel = ? AND event_type = ?
--- AND window_start > (strftime('%s', 'now') - ?);
-
-CREATE TABLE IF NOT EXISTS runtime (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-);
+/*
+VACUUM;
+ANALYZE;
+PRAGMA optimize;
+*/

@@ -143,7 +143,7 @@ async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .showuser <user>")
         return
     parts = arg.split()
-    await respond(await core.user_mgr.showuser(core.db_path, parts[0]))
+    await respond(await core.user_mgr.showuser(parts[0]))
 
 async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:

@@ -26,11 +26,6 @@ class User:
         self.db_path = db_path
 
 class UserManager:
-    FLAGS = {
-        'n': 'owner', 'm': 'master', 'o': 'op', 'v': 'voice', 'p': 'prot', 
-        'h': 'halfop', 'b': 'bot', 'k': 'kick', 'd': 'deop', 't': 'trust',
-        'f': 'friend', 'i': 'info', 'g': 'gift', 'u': 'unban', 'a': 'autoop'
-    }  # Eggdrop standard [web:22]
 
     def __init__(self, db_path):
         self.db_path = db_path
@@ -112,9 +107,9 @@ class UserManager:
             
             return "\n".join(result)
 
-    async def showuser(db_path: str, target_handle: str) -> str:
+    async def showuser(self, target_handle: str) -> str:
         """Show detailed info for specific user."""
-        async with get_db(db_path) as db:
+        async with get_db(self.db_path) as db:
             # Check rights
             #actor_rights = await db.fetchone(
             #    "SELECT is_admin FROM user_access WHERE handle = ? AND channel = '*'",
@@ -124,7 +119,7 @@ class UserManager:
             #    return f"{actor_handle}: Admin rights required."
             
             # Get user details
-            user = await db.fetchone("""
+            user = await db.execute("""
                 SELECT handle, password IS NOT NULL as has_pass, 
                     hostmasks, is_locked, comment, last_seen,
                     created_at, updated_at
@@ -134,37 +129,57 @@ class UserManager:
             if not user:
                 return f"User '{target_handle}' not found."
             
-            # Get access details
-            access = await db.execute("""
-                SELECT channel, subnet_id, has_partyline, is_admin, is_op, 
-                    is_voice, is_friend, created_at
-                FROM user_access WHERE handle = ?
-                ORDER BY channel
-            """, (target_handle,))
-            
-            result = [f"User: {user['handle']}"]
-            result.append(f"  Comment: {user['comment'] or 'None'}")
-            result.append(f"  Password: {'Set' if user['has_pass'] else 'None'}")
-            result.append(f"  Locked: {'Yes' if user['is_locked'] else 'No'}")
-            result.append(f"  Hostmasks: {user['hostmasks']}")
-            result.append(f"  Last seen: {user['last_seen'] or 'Never'}")
-            
-            result.append("  Access:")
-            async for row in access:
-                flags = []
-                if row['has_partyline']: flags.append('P')
-                if row['is_admin']: flags.append('A')
-                if row['is_op']: flags.append('O')
-                if row['is_voice']: flags.append('V')
-                if row['is_friend']: flags.append('F')
+            # Get user details - separate connection
+            async with get_db(self.db_path) as db:
+                user_cursor = await db.execute("""
+                    SELECT handle, password IS NOT NULL as has_pass, 
+                        hostmasks, is_locked, comment, last_seen,
+                        created_at, updated_at
+                    FROM users WHERE handle = ?
+                """, (target_handle,))
                 
-                subnet = f" (subnet {row['subnet_id']})" if row['subnet_id'] else ""
-                result.append(f"    {row['channel']}{subnet}: +{''.join(flags)}")
+                user = None
+                async for row in user_cursor:
+                    user = row
+                    break
             
-            if not any(await access.fetchall()):  # No access rows
-                result.append("    No access granted")
+            if not user:
+                return f"User '{target_handle}' not found."
             
-            return "\n".join(result)
+            # Get access details - separate connection
+            async with get_db(self.db_path) as db:
+                access_cursor = await db.execute("""
+                    SELECT channel, subnet_id, has_partyline, is_admin, is_op, 
+                        is_voice, is_friend, created_at
+                    FROM user_access WHERE handle = ?
+                    ORDER BY channel
+                """, (target_handle,))
+                
+                result = [f"User: {user['handle']}"]
+                result.append(f"  Comment: {user['comment'] or 'None'}")
+                result.append(f"  Password: {'Set' if user['has_pass'] else 'None'}")
+                result.append(f"  Locked: {'Yes' if user['is_locked'] else 'No'}")
+                result.append(f"  Hostmasks: {user['hostmasks']}")
+                result.append(f"  Last seen: {user['last_seen'] or 'Never'}")
+                
+                result.append("  Access:")
+                has_access = False
+                async for row in access_cursor:
+                    has_access = True
+                    flags = []
+                    if row['has_partyline']: flags.append('P')
+                    if row['is_admin']: flags.append('A')
+                    if row['is_op']: flags.append('O')
+                    if row['is_voice']: flags.append('V')
+                    if row['is_friend']: flags.append('F')
+                    
+                    subnet = f" (subnet {row['subnet_id']})" if row['subnet_id'] else ""
+                    result.append(f"    {row['channel']}{subnet}: +{''.join(flags)}")
+                
+                if not has_access:
+                    result.append("    No access granted")
+                
+                return "\n".join(result)
 
     async def get_user(self, handle: str) -> Optional[User]:
         async with get_db(self.db_path) as db:

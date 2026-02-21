@@ -348,29 +348,6 @@ class Core:
         self.partyline_hub = PartylineHub(self)
         logger.info(f"Core initialized: channels={self.channels}")
 
-    # Event handlers unchanged - copy all your existing handlers
-    async def handle_event(self, event: Dict[str, Any]):
-        etype = event.get('type', 'UNKNOWN')
-        handlers = {
-            'COMMAND': self.on_command,
-            'PUBMSG': self.on_pubmsg,
-            'PRIVMSG': self.on_privmsg,
-            'JOIN': self.on_join,
-            'PART': self.on_part,
-            'KICK': self.on_kick,
-            'QUIT': self.on_quit,
-            'NICK': self.on_nick,
-            'MODE': self.on_null,
-            'READY': self.on_ready,
-            'DISCONNECT': self.on_disconnect,
-            'ERROR': self.on_error,
-        }
-        handler = handlers.get(etype)
-        if handler:
-            await handler(event)
-        else:
-            logger.warning(f"Unhandled event type: {etype}")
-
     async def on_command(self, event):
         """
         Handle commands from authorized users (partyline/DCC or IRC privmsg).
