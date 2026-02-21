@@ -22,6 +22,7 @@ from .irc import irc_target
 from .botnet import botnet_target
 from .commands import COMMANDS
 from .partyline import PartylineHub
+from .console import ConsoleTask
 
 logger = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -136,40 +137,6 @@ class Core:
     def _console_output(self, message: str):
         """Callback for partyline messages to console"""
         print(message)            
-
-    async def console_task(self):
-        """Non-blocking console input - partyline client"""
-        if not sys.stdin.isatty():
-            logger.warning("No TTY available - console disabled")
-            return
-        
-        print("\n" + "="*60)
-        print("WBS 6.0 Partyline")
-        print("="*60)
-        print("Type .help for commands | Chat with other users")
-        print("="*60 + "\n")
-        
-        while self.running:
-            try:
-                ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0)
-                if ready:
-                    line = sys.stdin.readline().strip()
-                    if line:
-                        # Send to partyline hub
-                        await self.partyline_hub.handle_input(
-                            self.console_session_id, 
-                            line
-                        )
-                
-                await asyncio.sleep(0.01)
-                
-            except KeyboardInterrupt:
-                logger.info("Console: Ctrl+C received")
-                self.quit_event.set()
-                break
-            except Exception as e:
-                logger.error(f"Console error: {e}")
-                await asyncio.sleep(0.1)
     
     async def handle_event(self, event: Dict[str, Any]):
         """Handle events from children or internal"""
@@ -259,18 +226,18 @@ class Core:
 
     async def _main_loop_with_console(self):
         """Foreground mode: handle console + child events."""
-        console_task = asyncio.create_task(self.console_task())
+        
+        # Create and start console task with partyline integration
+        console = ConsoleTask(
+            partyline_hub=self.partyline_hub,
+            session_id=self.console_session_id,
+            handle='console'
+        )
+        console_task = asyncio.create_task(console.run())
         
         last_periodic = time.time()
         try:
-            while not self.quit_event.is_set():
-                # Check console commands (non-blocking)
-                try:
-                    cmd = self.command_queue.get_nowait()
-                    await self.handle_event(cmd)
-                except asyncio.QueueEmpty:
-                    pass
-                
+            while not self.quit_event.is_set() and console.running:
                 # Drain child process events
                 events = []
                 with self._buffer_lock:
@@ -285,6 +252,7 @@ class Core:
                     if event.get('cmd') == 'quit':
                         await self._shutdown(event.get('message', 'Quit'))
                         self.quit_event.set()
+                        console.running = False
                         return
                     await self.handle_event(event)
                 
@@ -296,6 +264,7 @@ class Core:
                 await asyncio.sleep(0.05)
                 
         finally:
+            console.running = False
             console_task.cancel()
             try:
                 await console_task
