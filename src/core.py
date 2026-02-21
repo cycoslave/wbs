@@ -65,7 +65,7 @@ class Core:
         self.start_time = time.time()
         self.running = True
         self.connected = False
-        self.botname = None
+        self.botname = self.config['bot']['nick']
         self.dcc_sessions = {}
         self.foreground = False
 

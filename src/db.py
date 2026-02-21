@@ -7,82 +7,26 @@ import aiosqlite
 import time
 import logging
 from pathlib import Path
-from typing import AsyncGenerator, Optional, List
-from dataclasses import dataclass
+from typing import Optional
 from contextlib import asynccontextmanager
+
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-@dataclass
-class BotConfig:
-    server: str
-    port: int
-    nickname: str
-    realname: str
-    channels: List[str]
-
-@dataclass
-class BotRecord:
-    id: int
-    handle: str  # Changed from 'name'
-    subnetid: Optional[int] = None
-    isactive: bool = False
-    last_seen: Optional[str] = None
-
-@dataclass
-class ChannelSettingsRow:
-    channel: str
-    settings: str  # e.g., "enforce-bans,dynamic-bans"
-
-@dataclass
-class UserChanFlagsRow:
-    handle: str
-    channel: str
-    flags: str  # e.g., "voipf"
-
-@dataclass
-class BotLinkRecord:
-    id: int
-    bot_handle: str
-    linked_bot_handle: str
-    flags: str = ''
-    link_type: str = 'tcp'
-    linked_at: int = 0
-    last_seen: int = 0
-    lag_ms: int = 0
-
-async def get_bot_config(bot_handle: str) -> BotConfig:  # handle not ID
-    """Load IRC config for bot handle from bots table."""
-    async with get_db() as db:
-        row = await db.fetchone("""
-            SELECT address AS server, port, handle AS nickname, 
-                   'WBS Bot' AS realname, '[]' AS channels  -- Static or config.json
-            FROM bots WHERE handle = ?
-        """, (bot_handle,))
-        
-        if not row:
-            raise ValueError(f"No bot config for handle '{bot_handle}'")
-            
-        channels = ['#tohands']  # From your config['bot']['channels']
-        return BotConfig(
-            server=row['server'] or 'irc.wcksoft.com',
-            port=row['port'] or 6667,
-            nickname=row['nickname'],
-            realname=row['realname'],
-            channels=channels
-        )
 
 async def get_schema_sql() -> str:
     """Load schema.sql."""
     return SCHEMA_PATH.read_text(encoding="utf-8")
+
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
     """Idempotent schema apply."""
     schema = await get_schema_sql()
     await db.executescript(schema)
     await db.commit()
+
 
 async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool = False) -> None:
     """Unified init: config path, schema file, WAL multi-process."""
@@ -105,7 +49,8 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
             await db.commit()
         
         await ensure_schema(db)
-        print(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
+        logger.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
+
 
 async def seed_db(db_path: str, config: dict):
     """Seed from config.json: bot record, channels, users."""
@@ -134,7 +79,8 @@ async def seed_db(db_path: str, config: dict):
         """, (owner,))
         
         await db.commit()
-        print(f"DB seeded: bot={nick}, owner={owner}")
+        logger.info(f"DB seeded: bot={nick}, owner={owner}")
+
 
 @asynccontextmanager
 async def get_db(db_path: str):
@@ -147,6 +93,7 @@ async def get_db(db_path: str):
         await db.commit()
     finally:
         await db.close()
+
 
 async def init_runtime_state(db_path: str):
     """
@@ -173,9 +120,9 @@ async def init_runtime_state(db_path: str):
         await db.commit()
         logger.info(f"Runtime state initialized: start_time={start_time}")
 
-async def get_runtime(key: str, db_path: str = None) -> Optional[float]:
+
+async def get_runtime(key: str, db_path: str) -> Optional[int]:
     """Get typed runtime value from DB."""
-    db_path = db_path or DEFAULT_DB_PATH
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT value FROM runtime WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()

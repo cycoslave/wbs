@@ -13,14 +13,14 @@ from dataclasses import dataclass, asdict
 
 import aiosqlite
 
-from .db import get_db, BotLinkRecord
+from .db import get_db
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class BotLink:
-    """Active bot link config (normalized from BotLinkRecord)."""
+    """Active bot link config."""
     name: str              # linked_bot_handle
     host: str              # Resolved from bots table
     port: int              # From bots table

@@ -7,11 +7,16 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-# Universal (-|-)
+async def cmd_date(core, handle: str, session_id: int, arg: str, respond):
+    await respond(f"Current time is: {datetime.now().ctime()}")
+    return  
+
+async def cmd_whoami(core, handle: str, session_id: int, arg: str, respond):
+    await respond(f"You are {handle}@{core.botname}")
+
 async def cmd_uptime(core, handle, session_id, arg, respond):
     """Show bot/server/system uptime."""
-    #start_time = getattr(core, 'start_time', time.time())
-    start_time = 0
+    start_time = getattr(core, 'start_time', time.time())  # Use real start_time
     uptime = str(timedelta(seconds=int(time.time() - start_time)))
     await respond(f"Bot uptime: {uptime}")
     
@@ -28,7 +33,7 @@ async def cmd_uptime(core, handle, session_id, arg, respond):
     #        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"System: {out}")
     #    except:
     #        pass
-    return 1
+    return
 
 async def cmd_mode(core, handle, session_id, arg, respond):
     """Change channel modes (.mode #chan +o nick)."""
@@ -50,6 +55,64 @@ async def cmd_mode(core, handle, session_id, arg, respond):
     #    await respond(f"Mode set: {chan} {modes}")
     #else:
     #    await respond("Access denied (need +o)")
+    return 1
+
+async def cmd_op(core, handle, session_id, arg, respond):
+    """Change channel modes (.mode #chan +o nick)."""
+    #if core.config.get('limbo_hub'):
+    #    return await respond("Cannot use MODE as limbo hub.")
+    
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond("Usage: .op <nick> <#channel>")
+    
+    nick, chan = parts
+    modes = f"+o {nick}"
+    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    await respond(f"Gave op to {nick} on {chan}")
+    return 1
+
+async def cmd_deop(core, handle, session_id, arg, respond):
+    """Change channel modes (.mode #chan +o nick)."""
+    #if core.config.get('limbo_hub'):
+    #    return await respond("Cannot use MODE as limbo hub.")
+    
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond("Usage: .deop <nick> <#channel>")
+    
+    nick, chan = parts
+    modes = f"-o {nick}"
+    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    await respond(f"Took op from {nick} on {chan}")
+    return 1
+
+async def cmd_voice(core, handle, session_id, arg, respond):
+    #if core.config.get('limbo_hub'):
+    #    return await respond("Cannot use MODE as limbo hub.")
+    
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond("Usage: .voice <nick> <#channel>")
+    
+    nick, chan = parts
+    modes = f"+v {nick}"
+    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    await respond(f"Gave voice to {nick} on {chan}")
+    return 1
+
+async def cmd_devoice(core, handle, session_id, arg, respond):
+    #if core.config.get('limbo_hub'):
+    #    return await respond("Cannot use MODE as limbo hub.")
+    
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond("Usage: .devoice <nick> <#channel>")
+    
+    nick, chan = parts
+    modes = f"-v {nick}"
+    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    await respond(f"Took voice from {nick} on {chan}")
     return 1
 
 #async def cmd_channels(core, handle, session_id, arg, respond):
@@ -145,6 +208,20 @@ async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split()
     await respond(await core.user_mgr.showuser(parts[0]))
 
+async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .passwd [user] <password>")
+        return
+    parts = arg.split()
+    if len(parts) > 1:
+        await respond(core.user_mgr.set_password(parts[1], parts[2]))  
+    else:
+        if handle == "console":
+            await respond("ERROR: Console user don't have a password to change.")
+            return
+        await respond(core.user_mgr.set_password(handle, parts[1]))
+    return
+
 async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:
     #    await respond("Usage: .listusers")
@@ -190,15 +267,7 @@ async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond):
         return
     #parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
-
-async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .passwd [user] <password>")
-        return
-    #parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")                            
+    await respond(f"→ JOIN {parts[0]}")                         
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
@@ -467,9 +536,16 @@ ERROR: Unknown command: {text}
 # Command registry
 COMMANDS = {
     'help': cmd_help,
+    'date': cmd_date,
+    'time': cmd_date,
+    'whoami': cmd_whoami,
     'uptime': cmd_uptime,
     'version': cmd_version,
     'mode': cmd_mode,
+    'op': cmd_op,
+    'deop': cmd_deop,
+    'voice': cmd_voice,
+    'devoice': cmd_devoice,
     'join': cmd_join,
     'part': cmd_part,
     'say': cmd_msg,
@@ -488,7 +564,7 @@ COMMANDS = {
     'delaccess': cmd_delaccess,
     'lockuser': cmd_lockuser,
     'unlockuser': cmd_unlockuser,
-    'passwd': cmd_passwd,
+    'chpass': cmd_passwd,
 }
 
 async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):
