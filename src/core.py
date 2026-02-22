@@ -19,8 +19,8 @@ from .db import init_db
 from .user import UserManager
 from .channel import ChannelManager
 from .seen import Seen
-from .irc import irc_target
-from .botnet import botnet_target
+from .irc import irc_process_launcher
+from .botnet import botnet_process_launcher
 from .commands import COMMANDS
 from .partyline import PartylineHub
 from .console import ConsoleTask
@@ -77,7 +77,7 @@ class Core:
         
         # IRC always
         irc_proc = mp.Process(
-            target=irc_target,
+            target=irc_process_launcher,
             args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
             daemon=True, name="IRC"
         )
@@ -98,9 +98,9 @@ class Core:
             logger.info("Foreground mode: Using console (no partyline process)")
         
         # Botnet if enabled
-        if self.botnet_q:
+        if self.config['settings']['botnet']:
             botnet_proc = mp.Process(
-                target=botnet_target,
+                target=botnet_process_launcher,
                 args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
                 daemon=True, name="Botnet"
             )
@@ -304,19 +304,6 @@ class Core:
         self.chan_mgr = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         
-        # Botnet manager
-        botnet_cfg = self.config.get('botnet', {})
-        if botnet_cfg.get('enabled', False):
-            from .botnet import BotnetManager
-            self.botnet_mgr = BotnetManager(
-                self.config, self.core_q, self.irc_q, 
-                self.botnet_q, self.party_q
-            )
-            await self.botnet_mgr.load_config()
-            logger.info("Botnet manager initialized")
-        else:
-            logger.info("Botnet disabled")
-        
         self.partyline_hub = PartylineHub(self)
         logger.info(f"Core process started. (pid={os.getpid()})")
 
@@ -446,4 +433,4 @@ class Core:
     async def _periodic_tasks(self):
         """Periodic tasks."""
         if hasattr(self, 'botnet_mgr') and self.botnet_mgr:
-            await self.botnet_mgr.poll_links()
+            await self.botnet_mgr.poll_queues()

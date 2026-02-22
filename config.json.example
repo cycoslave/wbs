@@ -39,6 +39,7 @@
   },
   "settings": {
     "botnet": false,
+    "listen_port": 3333,
     "seen": false,
     "auto_update": false,
     "irc_throttle_ms": 100

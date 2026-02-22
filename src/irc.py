@@ -337,7 +337,7 @@ def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
     # Start IRC reactor (blocking)
     bot.start()
 
-def irc_target(config_path, core_q, irc_q, botnet_q, party_q):
+def irc_process_launcher(config_path, core_q, irc_q, botnet_q, party_q):
     import json, asyncio
     config = json.load(open(config_path))
     asyncio.run(start_irc_process(config, core_q, irc_q, botnet_q, party_q))
