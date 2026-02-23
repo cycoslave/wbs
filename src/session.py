@@ -28,7 +28,7 @@ class Session:
         self.handle = handle
         self.core_q = core_q
         self.running = True
-        self.responseq = response_q or mp.Queue()
+        self.response_q = response_q or mp.Queue()
         
         # Transport-specific storage
         self.reader = transports.get('reader')

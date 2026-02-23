@@ -122,8 +122,9 @@ class Partyline:
             if session_id == exclude_session:
                 continue
             if session['type'] == 'console':
-                print(message)
-            if session['queue']:
+                if session.get('output'):
+                    session['output'](message)
+            elif session['queue']: 
                 try:
                     session['queue'].put_nowait({'type': 'MESSAGE', 'text': message})
                 except:
