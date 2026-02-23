@@ -2,7 +2,7 @@ db/*.db
 logs/*
 src/__pycache__/*
 !logs/README.md
-config.json
+*.json
 *.db
 *.pid
 *.log
