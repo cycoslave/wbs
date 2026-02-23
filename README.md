@@ -33,4 +33,4 @@ options:
 - recode the WBS TCL scripts into python
 
 ## Bugs
-- will not connect to channels on_welcome
+- console does does not broadcast to partyline
