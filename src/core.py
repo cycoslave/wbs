@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import select
+import socket
 from pathlib import Path
 from typing import Dict, Any
 from collections import deque
@@ -22,8 +23,10 @@ from .seen import Seen
 from .irc import irc_process_launcher
 from .botnet import botnet_process_launcher
 from .commands import COMMANDS
-from .partyline import PartylineHub
-from .console import ConsoleTask
+from .partyline import Partyline
+from .console import Console
+from .session import Session
+from .net import NetListener
 
 logger = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -44,7 +47,7 @@ class Core:
         # Queues (Core owns all communication)
         self.core_q = mp.Queue()     # Core
         self.irc_q = mp.Queue()      # IRC
-        self.botnet_q = mp.Queue() if self.config.get('botnet', {}).get('enabled') else None
+        self.botnet_q = mp.Queue() if self.config['settings']['botnet'] else None
         self.party_q = mp.Queue()    # Partyline
         
         # Async queues for console (main process only)
@@ -59,8 +62,9 @@ class Core:
         # Managers
         self.user_mgr = None
         self.chan_mgr = None
-        self.partyline_hub = None
+        self.partyline = None
         self.seen = None
+        self.net_listener = NetListener(self.core_q)
 
         # Runtime variables
         self.children = []
@@ -69,6 +73,7 @@ class Core:
         self.connected = False
         self.botname = self.config['bot']['nick']
         self.dcc_sessions = {}
+        self.party_sessions = {}
         self.foreground = False
 
     def spawn_children(self, foreground=False):
@@ -95,7 +100,7 @@ class Core:
             self.children.append(party_proc)
             logger.info("Partyline process spawned")
         else:
-            logger.info("Foreground mode: Using console (no partyline process)")
+            logger.info("Foreground mode: Using console.")
         
         # Botnet if enabled
         if self.config['settings']['botnet']:
@@ -112,13 +117,15 @@ class Core:
     async def run(self, foreground=False):
         """Main async event loop"""
         self.foreground = foreground
-        
         logger.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
         
+        if hasattr(self, 'net_listener'):
+            asyncio.create_task(self.net_listener.listen(port=self.config['settings']['listen_port']))
+
         # Register console with partyline if foreground
         if foreground:
-            self.console_session_id = self.partyline_hub.register_console(
+            self.console_session_id = self.partyline.register_console(
                 handle='console',
                 output_callback=self._console_output
             )
@@ -130,7 +137,6 @@ class Core:
         poller_thread.start()
         
         logger.info("Core event loop running")
-        
         if foreground:
             await self._main_loop_with_console()
         else:
@@ -151,8 +157,9 @@ class Core:
         
         etype = event.get('type', 'UNKNOWN')
         handlers = {
-            'PARTYLINE_COMMAND': self.on_partyline_command,
-            'PARTYLINE_CHAT': self.on_partyline_chat,
+            'PARTYLINE_INPUT': self.on_partyline_input,
+            'PARTYLINE_CONNECT': self.on_partyline_connect,
+            'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
             'COMMAND': self.on_command,
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
@@ -172,22 +179,75 @@ class Core:
         else:
             logger.warning(f"Unhandled event type: {etype}")
     
-    async def on_partyline_command(self, event):
-        """Forward partyline commands to partyline hub"""
-        session_id = event.get('session_id')
-        handle = event.get('handle')
-        text = event.get('text')
-        
-        # AWAIT the async call
-        await self.partyline_hub.handle_input(session_id, text)
+    async def on_partyline_input(self, event: dict):
+        """Forward partyline input to Partyline manager."""
+        session_id = event['session_id']
+        text = event['text']
+        await self.partyline.handle_input(session_id, text)
 
-    async def on_partyline_chat(self, event):
-        """Handle chat from botnet partyline"""
-        from_bot = event.get('from', 'unknown')
-        text = event.get('text', '')
+    async def on_partyline_connect(self, event: dict):
+        """Recreate socket from DUP'd FD → reader/writer."""
+        handle = event['handle']
+        peer = event.get('peer', 'unknown')
+        dup_fd = event.get('sockfd')
         
-        # Broadcast to local partyline
-        self.partyline_hub.broadcast(f"<{from_bot}@botnet> {text}")
+        logger.info(f"Partyline newuser {handle} fd={dup_fd}")
+        
+        if dup_fd is None:
+            logger.warning(f"No dup_fd for {handle}")
+            return
+        
+        try:
+            dup_sock = socket.socket(fileno=dup_fd)
+            dup_sock.setblocking(False)
+            
+            reader, writer = await asyncio.open_connection(sock=dup_sock)
+            
+            response_q = mp.Queue()
+            session_id = self.partyline.register_remote('telnet', handle, response_q)
+            
+            #logger.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
+            session = Session(session_id, 'telnet', handle=handle,
+                              reader=reader, writer=writer,
+                              core_q=self.core_q, response_q=response_q)
+            #logger.info("DEBUG Session created OK")
+            
+            self.party_sessions[session_id] = session
+            asyncio.create_task(session.run())
+            
+            await session.send("Welcome to WBS partyline! Type .help")
+            logger.info(f"Remote session {session_id} (telnet) registered for {handle}")
+            
+        except Exception as e:
+            logger.error(f"Session dup_fd {dup_fd} failed: {e}")
+            # Cleanup: close dup_fd IF socket creation failed
+            try:
+                os.close(dup_fd)
+            except OSError:
+                pass
+
+    async def on_partyline_disconnect(self, event: dict):
+        """Cleanup partyline session on disconnect."""
+        session_id = event['session_id']
+        
+        if session_id in self.party_sessions:
+            session = self.party_sessions.pop(session_id)
+            try:
+                if session.writer:
+                    session.writer.close()
+                    await session.writer.wait_closed()
+                logger.info(f"Party socket fd closed + session {session_id} ({getattr(session, 'handle', 'unknown')}) unregistered")
+            except Exception as e:
+                logger.warning(f"Session {session_id} close failed: {e}")
+        
+        if hasattr(self, 'partyline') and self.partyline:
+            if session_id in self.partyline.sessions:
+                handle = self.partyline.sessions[session_id]['handle']
+                del self.partyline.sessions[session_id]
+                logger.info(f"Partyline unregistered {handle}#{session_id}")
+                self.partyline.broadcast(f"{handle} left the partyline", exclude_session=session_id)
+        
+        logger.debug(f"Partyline disconnect complete: {session_id}")
 
     def event_poller(self):
         """Thread: Poll core_q -> event buffer."""
@@ -227,46 +287,31 @@ class Core:
             await asyncio.sleep(0.05)
 
     async def _main_loop_with_console(self):
-        """Foreground mode: handle console + child events."""
-        
-        # Create and start console task with partyline integration
-        console = ConsoleTask(
-            partyline_hub=self.partyline_hub,
-            session_id=self.console_session_id,
-            handle='console'
+        """Foreground: console + child events."""
+        console_task = asyncio.create_task(
+            Console(self.partyline, self.console_session_id, "console").run()
         )
-        console_task = asyncio.create_task(console.run())
-        
         last_periodic = time.time()
         try:
-            while not self.quit_event.is_set() and console.running:
-                # Drain child process events
+            while not self.quit_event.is_set() and console_task.done() == False:
+                # Drain event buffer
                 events = []
                 with self._buffer_lock:
                     while self._event_buffer:
                         events.append(self._event_buffer.popleft())
-                
                 for event in events:
-                    if not isinstance(event, dict):
-                        logger.error(f"Invalid event: {type(event)} - {event}")
-                        continue
-                        
-                    if event.get('cmd') == 'quit':
+                    if isinstance(event, dict) and event.get('cmd') == 'quit':
                         await self._shutdown(event.get('message', 'Quit'))
                         self.quit_event.set()
-                        console.running = False
+                        console_task.cancel()
                         return
                     await self.handle_event(event)
-                
                 # Periodic
                 if time.time() - last_periodic >= 5.0:
                     await self._periodic_tasks()
                     last_periodic = time.time()
-                
                 await asyncio.sleep(0.05)
-                
         finally:
-            console.running = False
             console_task.cancel()
             try:
                 await console_task
@@ -304,7 +349,7 @@ class Core:
         self.chan_mgr = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         
-        self.partyline_hub = PartylineHub(self)
+        self.partyline = Partyline(self)
         logger.info(f"Core process started. (pid={os.getpid()})")
 
     async def on_command(self, event):

@@ -181,7 +181,8 @@ class UserManager:
 
     async def get_user(self, handle: str) -> Optional[User]:
         async with get_db(self.db_path) as db:
-            row = await db.execute_fetchone("SELECT * FROM users WHERE handle = ?", (handle,))
+            row = await db.execute("SELECT * FROM users WHERE handle = ?", (handle,))
+            row = await row.fetchone()
             if not row:
                 return None
             data = dict(row)

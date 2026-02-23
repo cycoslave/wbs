@@ -11,40 +11,33 @@ from prompt_toolkit.history import InMemoryHistory
 
 logger = logging.getLogger(__name__)
 
-class ConsoleTask:
-    def __init__(self, partyline_hub, session_id, handle='console'):
-        self.partyline_hub = partyline_hub
+class Console:
+    def __init__(self, partyline, session_id, handle='console'):
+        self.partyline = partyline
         self.session_id = session_id
         self.handle = handle
         self.running = True
         self.session = PromptSession(history=InMemoryHistory())
         
     async def run(self):
-        """Non-blocking console task"""
+        """Directly calls partyline.handle_input for input processing."""
         if not sys.stdin.isatty():
             logger.warning("No TTY available for console")
             return
-            
-        logger.info("Console active. Type .help for commands. Ctrl+C to quit.")
-        
+        logger.info("Type .help for commands. Ctrl+C to quit.")
         with patch_stdout():
             while self.running:
                 try:
                     line = await self.session.prompt_async(f"{self.handle}> ")
-                    
                     if line.strip():
-                        await self.partyline_hub.handle_input(
-                            self.session_id,
-                            line.strip()
-                        )
-                
+                        await self.partyline.handle_input(self.session_id, line.strip())
                 except (EOFError, KeyboardInterrupt):
-                    logger.info("Console: Exit signal received")
+                    logger.info("Console exit signal received")
                     self.running = False
                     break
-                    
                 except Exception as e:
                     logger.error(f"Console error: {e}")
                     await asyncio.sleep(0.1)
+        logger.info("Console session ended")
         
         logger.info("Console session ended")

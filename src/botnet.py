@@ -33,7 +33,7 @@ class BotLink:
 
 
 class BotnetManager:
-    """Manages botnet links in async event loop. Runs in separate process."""
+    """Manages botnet links. Runs in separate process."""
 
     def __init__(self, config, core_q, irc_q, botnet_q, party_q, db_path='wbs.db'):
         self.config = config
@@ -47,10 +47,13 @@ class BotnetManager:
         self.partyline_channels: Dict[int, List[str]] = {0: []}
         self.is_hub: bool = False
         self.subnet_id: int = 1
-        self.my_handle: str = "WBS"
+        self.my_handle: str = config.get('bot', {}).get('nick', 'WBS')
         self.my_port: Optional[int] = None
         self.running: bool = True
         self.server = None
+        self.loop = None
+        self.inbufs: Dict[str, bytearray] = {}
+        self.outbufs: Dict[str, bytearray] = {}
 
     async def start_link(self, link: BotLink) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Open TCP connection to peer (outgoing)."""
@@ -94,16 +97,17 @@ class BotnetManager:
 
     async def read_loop(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str) -> None:
         """Read/process messages from peer."""
+        self.inbufs.setdefault(name, bytearray())
         try:
             while self.running:
                 data = await reader.read(4096)
-                if not data:
-                    break
-                    
-                lines = data.decode('utf-8', errors='ignore').splitlines()
-                for line in lines:
-                    if line.strip():
-                        await self.process_line(line, name, writer)
+                if not data: break
+                self.inbufs[name].extend(data)
+                while b'\n' in self.inbufs[name]:
+                    line, rest = self.inbufs[name].split(b'\n', 1)
+                    line = line.decode('utf-8', errors='ignore').rstrip('\r')
+                    if line: await self.process_line(line, name, writer)
+                    self.inbufs[name] = rest
         except Exception as e:
             log.error(f"Read loop {name} error: {e}")
         finally:
@@ -137,6 +141,13 @@ class BotnetManager:
             if len(parts) == 3:
                 chan, msg = int(parts[1]), parts[2]
                 await self.relay_to_partyline(msg, chan)
+        elif line.startswith('CMD:'):
+            # Command from another bot
+            try:
+                cmd = json.loads(line.split(':', 1)[1])
+                await self.route_command(cmd, from_bot)
+            except Exception as e:
+                log.error(f"Failed to parse CMD: {e}")
         else:  # Regular chat
             chan = 0
             await self.broadcast_chat(f"<{from_bot}> {line}", chan, exclude=from_bot)
@@ -267,122 +278,103 @@ class BotnetManager:
 
     async def _safe_write(self, writer: asyncio.StreamWriter, msg: str) -> None:
         """Safe write with error handling."""
-        try:
-            writer.write(msg.encode())
-            await writer.drain()
-        except Exception as e:
-            log.error(f"Write error: {e}")
+        self.outbufs.setdefault(name, bytearray()).extend(msg.encode('utf-8'))
+        while self.outbufs[name]:
+            try:
+                wrote = writer.write(self.outbufs[name])
+                del self.outbufs[name][:wrote]
+                await writer.drain()
+            except Exception as e:
+                log.error(f"Partial write to {name}: {e}")
+                break
 
     async def handle_incoming(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Handle incoming bot/user connection (like eggdrop answer())."""
-        peer_addr = writer.get_extra_info('peername')
-        client_ip, client_port = peer_addr
-        log.info(f"Incoming connection from {client_ip}:{client_port}")
-        
-        # Wait for handshake (BOTLINK or USER auth)
+        """Handle incoming: botlink vs partyline user → core Partyline (picklable data only)."""
+        peeraddr = writer.get_extra_info('peername')
+        clientip, clientport = peeraddr
+        log.info(f"Incoming connection from {clientip}:{clientport}")
         try:
-            # Read first line to determine connection type
             data = await asyncio.wait_for(reader.readline(), timeout=30.0)
             line = data.decode('utf-8', errors='ignore').strip()
-            
             if line.startswith('BOTLINK'):
-                # Bot connection
+                # Bot link handshake
                 parts = line.split()
                 if len(parts) >= 3:
-                    remote_handle = parts[1]
-                    log.info(f"Bot link established from {remote_handle}")
-                    
-                    # Send our handshake back
-                    await self.send_handshake(writer, remote_handle)
-                    
-                    # Add to links and start read loop
-                    self.links[remote_handle] = (reader, writer)
-                    asyncio.create_task(self.read_loop(reader, writer, remote_handle))
+                    remotehandle = parts[1]
+                    log.info(f"Bot link established from {remotehandle}")
+                    await self.send_handshake(writer, remotehandle)
+                    self.links[remotehandle] = (reader, writer)
+                    asyncio.create_task(self.read_loop(reader, writer, remotehandle))
             else:
-                # Assume partyline user connection
-                temp_name = f"user_{client_ip}_{client_port}"
-                log.info(f"Partyline connection: {temp_name}")
-                
-                # Forward to partyline handler via queue
-                self.party_q.put_nowait({
-                    'type': 'new_connection',
-                    'reader': reader,
-                    'writer': writer,
-                    'addr': peer_addr
+                # Partyline user: forward PICKLABLE data to core Partyline
+                tempname = f"user_{clientip}_{clientport}"
+                log.info(f"Partyline connection: {tempname}")
+                self.core_q.put_nowait({
+                    'type': 'PARTYLINE_NEWUSER',
+                    'handle': tempname,
+                    'peer': peeraddr,  # (ip, port) tuple - picklable
+                    'firstline': line
                 })
-                
+                # Close in botnet process; core spawns new session
         except asyncio.TimeoutError:
-            log.warning(f"Handshake timeout from {client_ip}:{client_port}")
-            writer.close()
-            await writer.wait_closed()
+            log.warning(f"Handshake timeout from {clientip}:{clientport}")
         except Exception as e:
             log.error(f"Incoming connection error: {e}")
+        finally:
             writer.close()
             await writer.wait_closed()
 
-    async def listen(self) -> None:
-        """Listen for incoming bot/user connections (eggdrop-style open_listen)."""
-        if not self.my_port:
-            # Auto-assign port if not configured
-            self.my_port = self.config['settings']['listen_port']
+    def execute_command(self, cmd_data: dict):
+        """Execute command from botnet_q (called by poller thread)."""
+        if not self.loop:
+            log.error("Event loop not available")
+            return
         
         try:
-            # Create listening socket (like eggdrop's open_listen)
-            self.server = await asyncio.start_server(
-                self.handle_incoming,
-                '0.0.0.0',  # Listen on all interfaces
-                self.my_port,
-                reuse_address=True
-            )
+            cmd_type = cmd_data.get('type')
             
-            # Get actual port (if 0 was specified)
-            actual_port = self.server.sockets[0].getsockname()[1]
-            self.my_port = actual_port
+            if cmd_type == 'chat':
+                # Broadcast chat message
+                asyncio.run_coroutine_threadsafe(
+                    self.broadcast_chat(
+                        f"<{cmd_data.get('user', 'core')}> {cmd_data['text']}",
+                        cmd_data.get('channel', 0)
+                    ),
+                    self.loop
+                )
             
-            log.info(f"Botnet listening on 0.0.0.0:{self.my_port} (bots + users)")
+            elif cmd_type == 'cmd':
+                # Parse and route command
+                parsed = self.parse_command(f".{cmd_data['cmd']}")
+                asyncio.run_coroutine_threadsafe(
+                    self.route_command(parsed, cmd_data.get('user', 'core')),
+                    self.loop
+                )
             
-            async with self.server:
-                await self.server.serve_forever()
-                
+            elif cmd_type == 'link':
+                # Connect to new bot
+                link = BotLink(**cmd_data['link'])
+                self.peers[link.name] = link
+                asyncio.run_coroutine_threadsafe(
+                    self.handle_peer(link.name),
+                    self.loop
+                )
+            
+            elif cmd_type == 'unlink':
+                # Disconnect from bot
+                name = cmd_data['name']
+                if name in self.links:
+                    _, writer = self.links[name]
+                    writer.close()
+                    del self.links[name]
+                if name in self.peers:
+                    del self.peers[name]
+            
+            else:
+                log.error(f"Unknown command type: {cmd_type}")
+        
         except Exception as e:
-            log.error(f"Listen failed: {e}")
-
-    async def poll_queues(self) -> None:
-        """Poll queues from core/partyline for outgoing messages."""
-        while self.running:
-            if self.botnet_q is not None:
-                try:
-                    # Check botnet_q for messages from other processes
-                    msg = self.botnet_q.get_nowait()
-                    
-                    if msg.get('type') == 'chat':
-                        await self.broadcast_chat(
-                            f"<{msg['user']}> {msg['text']}",
-                            msg.get('channel', 0)
-                        )
-                    elif msg.get('type') == 'cmd':
-                        parsed = self.parse_command(f".{msg['cmd']}")
-                        await self.route_command(parsed, msg.get('user', 'core'))
-                        
-                except Exception:
-                    pass
-            await asyncio.sleep(0.05)
-
-    async def run(self) -> None:
-        """Main botnet event loop."""        
-        tasks = []
-        
-        # Always listen (for bots and partyline users)
-        tasks.append(self.listen())
-        
-        # Connect to configured peer bots
-        for name in self.peers:
-            tasks.append(self.handle_peer(name))
-        
-        # Queue poller
-        tasks.append(self.poll_queues())
-        
-        await asyncio.gather(*tasks, return_exceptions=True)
+            log.error(f"Execute command failed: {e}")
 
     def stop(self) -> None:
         """Graceful shutdown."""
@@ -393,18 +385,40 @@ class BotnetManager:
             writer.close()
 
 
+async def start_server_tasks(manager: BotnetManager):
+    """Start all async tasks for botnet."""
+    tasks = []
+    
+    # Connect to configured peer bots
+    for name in manager.peers:
+        tasks.append(asyncio.create_task(manager.handle_peer(name)))
+    
+    # Wait for all tasks
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def start_botnet_process(config, core_q, irc_q, botnet_q, party_q, db_path='db/wbs.db'):
     """
-    Entry point for botnet process - matches IRC pattern exactly.
-    Starts command poller thread + botnet reactor.
+    Entry point for botnet process - matches IRC pattern.
     """
     logger = logging.getLogger('botnet')
     
     manager = BotnetManager(config, core_q, irc_q, botnet_q, party_q, db_path)
     
+    # Load peer bots from config
+    for bot_config in config.get('botnet', {}).get('bots', []):
+        link = BotLink(
+            name=bot_config['name'],
+            host=bot_config['host'],
+            port=bot_config['port'],
+            flags=bot_config.get('flags', ''),
+            subnet_id=bot_config.get('subnet_id', 1)
+        )
+        manager.peers[link.name] = link
+    
     def command_poller():
-        """Daemon thread: poll botnet_q for commands (anti-flood throttled)."""
-        throttle_interval = 0.1  # 100ms between commands (matches IRC)
+        """Daemon thread: poll botnet_q for commands."""
+        throttle_interval = 0.1  # 100ms between commands
         last_cmd_time = 0
         
         while manager.running:
@@ -414,17 +428,15 @@ def start_botnet_process(config, core_q, irc_q, botnet_q, party_q, db_path='db/w
                 if elapsed < throttle_interval:
                     time.sleep(throttle_interval - elapsed)
                 
-                if botnet_q is not None:
-                    # Non-blocking get from botnet_q
-                    cmd_data = botnet_q.get_nowait()
-                    logger.debug(f"Executing botnet command: {cmd_data}")
-                    
-                    # Execute command (same as IRC pattern)
-                    manager.execute_command(cmd_data)
-                    last_cmd_time = time.time()
+                # Non-blocking get from botnet_q
+                cmd_data = botnet_q.get_nowait()
+                logger.debug(f"Executing botnet command: {cmd_data}")
+                
+                manager.execute_command(cmd_data)
+                last_cmd_time = time.time()
             
             except queue.Empty:
-                time.sleep(0.01)  # Short sleep to reduce CPU usage
+                time.sleep(0.1)  # Reduce CPU usage
             
             except Exception as e:
                 logger.error(f"Botnet command poller error: {e}")
@@ -434,22 +446,32 @@ def start_botnet_process(config, core_q, irc_q, botnet_q, party_q, db_path='db/w
     poller = threading.Thread(target=command_poller, daemon=True)
     poller.start()
     
-    logger.info(f"Botnet process started. (pid={os.getpid()})")
+    logger.info(f"Botnet process started (pid={os.getpid()})")
     
-    # Start botnet reactor (blocking) - matches bot.start()
-    asyncio.run(manager.run())
+    # Get event loop and store in manager
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    manager.loop = loop
+    
+    # Start async server (blocking)
+    try:
+        loop.run_until_complete(start_server_tasks(manager))
+    except KeyboardInterrupt:
+        logger.info("Botnet process interrupted")
+    finally:
+        manager.stop()
+        loop.close()
 
 
 def botnet_process_launcher(config_path, core_q, irc_q, botnet_q, party_q, db_path='db/wbs.db'):
     """
-    Launcher for multiprocessing.Process - matches irc_process_launcher exactly.
-    Loads config from file path, then calls start_botnet_process.
+    Launcher for multiprocessing.Process - matches irc_process_launcher.
     """
     import json
     
-    # Load config from file path (matches IRC)
+    # Load config from file path
     with open(config_path, 'r') as f:
         config = json.load(f)
     
     # Start the actual process (blocking)
-    asyncio.run(start_botnet_process(config, core_q, irc_q, botnet_q, party_q, db_path))
+    start_botnet_process(config, core_q, irc_q, botnet_q, party_q, db_path)
