@@ -33,4 +33,4 @@ options:
 - recode the WBS TCL scripts into python
 
 ## Bugs
-- console does does not broadcast to partyline
+- 
