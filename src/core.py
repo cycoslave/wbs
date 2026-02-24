@@ -73,6 +73,7 @@ class Core:
         self.botname = self.config['bot']['nick']
         self.dcc_sessions = {}
         self.party_sessions = {}
+        self.bot_sessions = {} 
         self.foreground = False
 
     def spawn_children(self, foreground=False):
@@ -153,6 +154,7 @@ class Core:
             'PARTYLINE_CONNECT': self.on_partyline_connect,
             'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
             'BOTLINK_CONNECT': self.on_bot_connect,
+            'BOT_DISCONNECT': self.on_bot_disconnect,
             'COMMAND': self.on_command,
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
@@ -179,15 +181,15 @@ class Core:
         await self.partyline.handle_input(session_id, text)
 
     async def on_bot_connect(self, event: dict):
-        """Recreate socket from DUP'd FD → reader/writer."""
-        handle = event['handle']
+        """Handle incoming bot connection - create bot session."""
+        bot_name = event['handle']
         peer = event.get('peer', 'unknown')
         dup_fd = event.get('sockfd')
         
-        logger.info(f"New Bot connection ({handle}) fd={dup_fd}")
+        logger.info(f"New bot connection: {bot_name} fd={dup_fd}")
         
         if dup_fd is None:
-            logger.warning(f"No dup_fd for {handle}")
+            logger.warning(f"No dup_fd for bot {bot_name}")
             return
         
         try:
@@ -196,27 +198,48 @@ class Core:
             
             reader, writer = await asyncio.open_connection(sock=dup_sock)
             
+            # Generate session ID
+            bot_id = len(self.bot_sessions) + 10000  # Offset to avoid collision
+            
             response_q = mp.Queue()
-            #session_id = self.partyline.register_remote('telnet', handle, response_q)
             
-            #logger.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
-            #session = Session(session_id, 'telnet', handle=handle,
-            #                  reader=reader, writer=writer,
-            #                  core_q=self.core_q, response_q=response_q)
-            #logger.info("DEBUG Session created OK")
+            # Create bot session (same as telnet, just different type)
+            bot_session = Session(
+                session_id=bot_id,
+                session_type='bot',
+                handle=bot_name,
+                reader=reader,
+                writer=writer,
+                core_q=self.core_q,
+                response_q=response_q,
+                subnet_id=1  # Get from config if needed
+            )
             
-            #self.party_sessions[session_id] = session
-            #asyncio.create_task(session.run())
+            self.bot_sessions[bot_id] = bot_session
             
-            #logger.info(f"Remote session {session_id} (bot) registered for {handle}")
+            # Send handshake response
+            await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS 6.0")
+            asyncio.create_task(bot_session.run())
+            
+            logger.info(f"Bot session {bot_id} created for {bot_name}")
+            self.partyline.broadcast(f"*** {bot_name} linked to botnet")
             
         except Exception as e:
-            logger.error(f"Session dup_fd {dup_fd} failed: {e}")
-            # Cleanup: close dup_fd IF socket creation failed
+            logger.error(f"Bot session {bot_name} failed: {e}")
             try:
                 os.close(dup_fd)
-            except OSError:
+            except:
                 pass
+
+    async def on_bot_disconnect(self, event: dict):
+        """Handle bot disconnection."""
+        session_id = event['session_id']
+        bot_name = event['handle']
+        
+        if session_id in self.bot_sessions:
+            del self.bot_sessions[session_id]
+            logger.info(f"Bot {bot_name} disconnected")
+            self.partyline.broadcast(f"*** {bot_name} unlinked")
 
     async def on_partyline_connect(self, event: dict):
         """Recreate socket from DUP'd FD → reader/writer."""

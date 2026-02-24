@@ -121,7 +121,7 @@ class BotnetManager:
                     await writer.drain()
                     
                     self.links[peer_name] = (reader, writer)
-                    asyncio.create_task(self.read_peer(peer_name, reader, writer))
+                    await self.read_peer(peer_name, reader, writer)
                     return
             
             # Not a bot link - close
@@ -142,20 +142,47 @@ class BotnetManager:
         """Process message from peer."""
         
         if line.startswith('.'):
-            # Partyline command
-            cmd = self.parse_command(line)
-            await self.route_command(cmd, from_bot)
+            # Bot command - route to botcmds
+            cmd_parts = line[1:].split(maxsplit=1)
+            cmd_name = cmd_parts[0].lower()
+            args = cmd_parts[1] if len(cmd_parts) > 1 else ''
+            
+            from .botcmds import BOTCMDS
+            
+            if cmd_name in BOTCMDS:
+                async def respond(msg: str):
+                    """Send response back to requesting bot"""
+                    await self._safe_send(writer, f"RESPONSE:{msg}\n")
+                
+                try:
+                    await BOTCMDS[cmd_name](self, from_bot, args, respond)
+                except Exception as e:
+                    log.error(f"Bot command '{cmd_name}' error: {e}")
+                    await respond(f"Error executing .{cmd_name}")
+            else:
+                # Unknown command - maybe forward to core
+                log.warning(f"Unknown bot command from {from_bot}: {line}")
+                await respond(f"Unknown command: {cmd_name}")
         
         elif line.startswith('CMD:'):
-            # JSON command
+            # JSON command (existing logic)
             try:
                 cmd = json.loads(line[4:])
                 await self.route_command(cmd, from_bot)
             except json.JSONDecodeError as e:
                 log.error(f"Invalid CMD from {from_bot}: {e}")
         
+        elif line.startswith('RESPONSE:'):
+            # Command response from another bot
+            msg = line[9:]
+            self.party_q.put_nowait({
+                'type': 'botnet_response',
+                'from': from_bot,
+                'text': msg
+            })
+        
         elif line.startswith('CHAT:'):
-            # Chat message
+            # Chat message (existing logic)
             parts = line.split(':', 2)
             if len(parts) == 3:
                 chan = int(parts[1])
@@ -177,7 +204,7 @@ class BotnetManager:
             log.debug(f"Handshake confirmed: {from_bot}")
         
         else:
-            # Regular chat
+            # Regular chat - broadcast
             await self.broadcast_chat(f"<{from_bot}> {line}", 0, exclude=from_bot)
     
     def parse_command(self, line: str) -> Dict[str, Any]:
