@@ -22,35 +22,61 @@ class NetListener:
             await self.server.serve_forever()
     
     async def handle_connection(self, reader, writer):
-        """DUP FD → core_q immediately."""
+        """Detect botlink vs partyline → route to core_q with DUP FD or picklable data."""
         peer = writer.get_extra_info('peername')
-        logger.info(f"Net incoming {peer}")
+        logger.info(f"Incoming {peer}")
+        
         try:
             data = await asyncio.wait_for(reader.readline(), 30.0)
             line = data.decode('utf-8', errors='ignore').strip()
-            
-            # DUP FD (core gets independent copy)
-            orig_sock = writer.transport.get_extra_info('socket')
-            sockfd = orig_sock.fileno()
-            dup_fd = os.dup(sockfd)
-            
-            logger.info(f"DUP fd {dup_fd} (orig {sockfd}) → core for {peer}")
-            
-            # DIRECT TO CORE
-            self.core_q.put_nowait({
-                'type': 'PARTYLINE_CONNECT',
-                'handle': f"user_{peer[0]}_{peer[1]}",
-                'peer': peer,
-                'firstline': line,
-                'sockfd': dup_fd
-            })
 
-            logger.debug(f"Net closing original sock {sockfd} for {peer}")
+            logger.info(f"RAW firstline: {repr(data)}")
+            logger.info(f"LINE firstline: '{line}' (len={len(line)})")
+            
+            if line.startswith('BOTLINK'):
+                # Botnet link → DUP FD to core for full control
+                parts = line.split()
+                if len(parts) >= 3:
+                    remotehandle = parts[1]
+                    logger.info(f"Botlink from {remotehandle}")
+                    
+                    # DUP FD → core handles link entirely
+                    orig_sock = writer.transport.get_extra_info('socket')
+                    sockfd = orig_sock.fileno()
+                    dup_fd = os.dup(sockfd)
+                    
+                    self.core_q.put_nowait({
+                        'type': 'BOTLINK_CONNECT', 
+                        'handle': remotehandle,
+                        'peer': peer,
+                        'firstline': line,
+                        'sockfd': dup_fd
+                    })
+                else:
+                    logger.warning(f"Invalid BOTLINK from {peer}: {line}")
+            else:
+                # Partyline user → picklable data only (no FD)
+                handle = f"user_{peer[0]}_{peer[1]}"
+                logger.info(f"Partyline user: {handle}")
+                
+                orig_sock = writer.transport.get_extra_info('socket')
+                sockfd = orig_sock.fileno()
+                dup_fd = os.dup(sockfd)
+
+                self.core_q.put_nowait({
+                    'type': 'PARTYLINE_CONNECT',
+                    'handle': f"user_{peer[0]}_{peer[1]}",
+                    'peer': peer,
+                    'firstline': line,
+                    'sockfd': dup_fd
+                })
+                
+        except asyncio.TimeoutError:
+            logger.warning(f"Handshake timeout {peer}")
+        except Exception as e:
+            logger.error(f"Connection error {peer}: {e}")
+        finally:
+            # Always close original in net process
+            logger.debug(f"Net closing original for {peer}")
             writer.close()
             await writer.wait_closed()
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout {peer}")
-        except Exception as e:
-            logger.error(f"Net handoff failed {peer}: {e}")
-        # NO close() - server owns writer forever

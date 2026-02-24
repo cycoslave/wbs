@@ -8,11 +8,13 @@ import queue
 import threading
 import time
 import logging
-from typing import Optional
-
 import irc.bot
-import irc.client
+from typing import Optional
 from irc.client import ServerConnectionError
+
+from .user import UserManager
+from .channel import ChannelManager
+from . import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def __init__(self, config, core_q, irc_q, botnet_q, party_q):
         self.config = config
-        #self.join_channels = channels
+        self.chan = ChannelManager(self.config['db']['path'])
         self.core_q = core_q
         self.irc_q = irc_q
         self.botnet_q = botnet_q
@@ -163,9 +165,13 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_kick(self, conn, event):
         kicked_nick = event.arguments[0]
         reason = event.arguments[1] if len(event.arguments) > 1 else ''
+        channel = event.target
+        if kicked_nick == conn.get_nickname():
+            if self.chan.exist(channel):
+                conn.join(channel)
         self._emit_event({
             'type': EventType.KICK,
-            'channel': event.target,
+            'channel': channel,
             'nick': event.source.nick,
             'kicked': kicked_nick,
             'reason': reason
@@ -206,7 +212,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             ts = event.arguments[1] if len(event.arguments) > 1 else ''
             conn.ctcp_reply(nick, f"PING {ts}")
         elif ctcp_cmd == 'VERSION':
-            conn.ctcp_reply(nick, f"VERSION WBS 6.0.0")
+            conn.ctcp_reply(nick, f"VERSION WBS {__version__}")
         else:
             super().on_ctcp(conn, event)
     

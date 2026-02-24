@@ -35,7 +35,6 @@ class Core:
     """Main process: Core event loop + child process manager."""
     
     def __init__(self, args):
-        self.version = "6.0.0"
         self.config_path = getattr(args, 'config', 'config.json')
         db_path_override = getattr(args, 'db_path', None)
         with open(self.config_path) as f:
@@ -91,14 +90,7 @@ class Core:
         
         # Partyline ONLY if not foreground
         if not foreground:
-            party_proc = mp.Process(
-                target=partyline_target,
-                args=(config_path, self.party_q, self.core_q, self.quit_event),
-                daemon=True, name="Partyline"
-            )
-            party_proc.start()
-            self.children.append(party_proc)
-            logger.info("Partyline process spawned")
+            logger.info("Background mode")
         else:
             logger.info("Foreground mode: Using console.")
         
@@ -160,6 +152,7 @@ class Core:
             'PARTYLINE_INPUT': self.on_partyline_input,
             'PARTYLINE_CONNECT': self.on_partyline_connect,
             'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
+            'BOTLINK_CONNECT': self.on_bot_connect,
             'COMMAND': self.on_command,
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
@@ -184,6 +177,46 @@ class Core:
         session_id = event['session_id']
         text = event['text']
         await self.partyline.handle_input(session_id, text)
+
+    async def on_bot_connect(self, event: dict):
+        """Recreate socket from DUP'd FD → reader/writer."""
+        handle = event['handle']
+        peer = event.get('peer', 'unknown')
+        dup_fd = event.get('sockfd')
+        
+        logger.info(f"New Bot connection ({handle}) fd={dup_fd}")
+        
+        if dup_fd is None:
+            logger.warning(f"No dup_fd for {handle}")
+            return
+        
+        try:
+            dup_sock = socket.socket(fileno=dup_fd)
+            dup_sock.setblocking(False)
+            
+            reader, writer = await asyncio.open_connection(sock=dup_sock)
+            
+            response_q = mp.Queue()
+            #session_id = self.partyline.register_remote('telnet', handle, response_q)
+            
+            #logger.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
+            #session = Session(session_id, 'telnet', handle=handle,
+            #                  reader=reader, writer=writer,
+            #                  core_q=self.core_q, response_q=response_q)
+            #logger.info("DEBUG Session created OK")
+            
+            #self.party_sessions[session_id] = session
+            #asyncio.create_task(session.run())
+            
+            #logger.info(f"Remote session {session_id} (bot) registered for {handle}")
+            
+        except Exception as e:
+            logger.error(f"Session dup_fd {dup_fd} failed: {e}")
+            # Cleanup: close dup_fd IF socket creation failed
+            try:
+                os.close(dup_fd)
+            except OSError:
+                pass
 
     async def on_partyline_connect(self, event: dict):
         """Recreate socket from DUP'd FD → reader/writer."""

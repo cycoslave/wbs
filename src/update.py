@@ -15,6 +15,8 @@ from packaging import version
 from typing import List, Optional, Dict
 import logging
 
+from . import __version__
+
 logger = logging.getLogger(__name__)
 
 class UpdateManager:
@@ -22,7 +24,7 @@ class UpdateManager:
         self.auhost = config.get('auhost', 'https://example.com')
         self.auremotefile = config.get('auremotefile', '/UPDATE')
         self.aulocalfile = Path('.tmp/UPDATE')
-        self.useragent = config.get('useragent', 'wbs/6.0.0')
+        self.useragent = config.get('useragent', f"wbs/{__version__}")
         self.updatetimeout = config.get('updatetimeout', 10)
         ver_str = f"{config['wbsver']}.{config['wbsversub']}.{config['wbsverpatch']}"
         self.current_ver = version.parse(ver_str)

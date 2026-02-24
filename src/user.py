@@ -4,6 +4,7 @@ Handles user management for WBS IRC bot.
 """
 
 import aiosqlite
+import sqlite3
 import json
 import bcrypt
 from typing import List, Optional, Dict, Any, Tuple
@@ -220,6 +221,15 @@ class UserManager:
                 (f"%{flag_filter}%", f"%{flag_filter}%")
             )
             return [User(**self._row_to_data(r)) for r in rows]
+        
+    def exist(self, channel: str):
+        try:
+            with sqlite3.connect(self.db_path) as db:
+                db.row_factory = sqlite3.Row
+                cursor = db.execute("SELECT 1 FROM channels WHERE name = ?", (channel.lower(),))
+                return cursor.fetchone() is not None
+        except sqlite3.Error:
+            return False        
 
     def _row_to_data(self, row: Dict) -> Dict:
         data = dict(row)

@@ -110,7 +110,7 @@ class Partyline:
                 logger.error(f"Command '{cmd}' error: {e}")
                 self.send_to_session(session_id, f"Error executing .{cmd}")
         else:
-            self.send_to_session(session_id, f"Unknown command .{cmd}   (Type .help for help)")
+            self.send_to_session(session_id, f"Unknown command .{cmd}   (Type .help)")
     
     async def on_command_response(self, session_id: int, message: str):
         """Commands call this to send responses back to session"""

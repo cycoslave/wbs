@@ -4,6 +4,7 @@ Handles IRC channel management for WBS.
 """
 
 import aiosqlite
+import sqlite3
 import asyncio
 import logging
 import json
@@ -135,6 +136,15 @@ class ChannelManager:
                 self._irc_send(f"MODE {channel} -b {banmask}")
             
             logger.info(f"Unbanned {banmask} on {channel}")
+
+    def exist(self, channel: str):
+        try:
+            with sqlite3.connect(self.db_path) as db:
+                db.row_factory = sqlite3.Row
+                cursor = db.execute("SELECT 1 FROM channels WHERE name = ?", (channel.lower(),))
+                return cursor.fetchone() is not None
+        except sqlite3.Error:
+            return False
 
     async def enforce_modes(self, channel: str):
         """Enforce channel modes from settings."""

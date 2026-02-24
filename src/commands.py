@@ -7,8 +7,10 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+from . import __version__
+
 async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
-    await respond(f"WBS {core.version}")
+    await respond(f"WBS {__version__}")
 
 async def cmd_date(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Current time is: {datetime.now().ctime()}")
