@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .db import get_db
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 class ChannelManager:
 
@@ -114,7 +114,7 @@ class ChannelManager:
         """
         state = self.get_state(channel)
         if not state:
-            logger.warning(f"Cannot add ban to unknown channel {channel}")
+            log.warning(f"Cannot add ban to unknown channel {channel}")
             return
         
         state.bans.add(banmask)
@@ -122,7 +122,7 @@ class ChannelManager:
         if self._irc_send:
             self._irc_send(f"MODE {channel} +b {banmask}")
         
-        logger.info(f"Banned {banmask} on {channel} by {creator} (lifetime: {lifetime}s)")
+        log.info(f"Banned {banmask} on {channel} by {creator} (lifetime: {lifetime}s)")
         
         # TODO: Store ban in DB with expiry if lifetime > 0
 
@@ -135,7 +135,7 @@ class ChannelManager:
             if self._irc_send:
                 self._irc_send(f"MODE {channel} -b {banmask}")
             
-            logger.info(f"Unbanned {banmask} on {channel}")
+            log.info(f"Unbanned {banmask} on {channel}")
 
     def exist(self, channel: str):
         try:
@@ -154,7 +154,7 @@ class ChannelManager:
         
         if self._irc_send:
             self._irc_send(f"MODE {channel} {settings.chanmode}")
-            logger.debug(f"Enforcing modes {settings.chanmode} on {channel}")
+            log.debug(f"Enforcing modes {settings.chanmode} on {channel}")
 
     async def sync_from_peer(self, channel_data: Dict):
         """
@@ -165,7 +165,7 @@ class ChannelManager:
         """
         channel = channel_data.get('channel')
         if not channel:
-            logger.warning("sync_from_peer called without channel name")
+            log.warning("sync_from_peer called without channel name")
             return
         
         try:
@@ -191,9 +191,9 @@ class ChannelManager:
             
             # Reload channel from DB
             await self._load_channels()
-            logger.info(f"Synced channel {channel} from botnet peer")
+            log.info(f"Synced channel {channel} from botnet peer")
         except Exception as e:
-            logger.error(f"Failed to sync channel {channel}: {e}")
+            log.error(f"Failed to sync channel {channel}: {e}")
 
 
 # Global instance
@@ -205,7 +205,7 @@ async def init_channel_manager(db_path: str, irc_send_callback: Optional[Callabl
     global _channel_mgr
     _channel_mgr = ChannelManager(db_path, irc_send_callback)
     await _channel_mgr.initialize()
-    logger.info("Channel manager initialized")
+    log.info("Channel manager initialized")
 
 
 def get_channel_mgr() -> ChannelManager:

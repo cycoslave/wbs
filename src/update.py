@@ -17,7 +17,7 @@ import logging
 
 from . import __version__
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 class UpdateManager:
     def __init__(self, config: Dict):
@@ -42,21 +42,21 @@ class UpdateManager:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url, headers=headers) as resp:
                     if resp.status != 200:
-                        logger.error(f"Failed to download UPDATE: {resp.status}")
+                        log.error(f"Failed to download UPDATE: {resp.status}")
                         return None
                     content = await resp.text()
             self.aulocalfile.parent.mkdir(exist_ok=True, parents=True)
             self.aulocalfile.write_text(content)
         except Exception as e:
-            logger.error(f"Error fetching UPDATE: {e}")
+            log.error(f"Error fetching UPDATE: {e}")
             return None
 
         au_data = self._parse_update_file()
         if not au_data or not self._is_newer(au_data[:3]):
             if au_data:
-                logger.info(f"No update needed. Remote: {au_data[0]}.{au_data[1]}.{au_data[2]} vs Current: {self.current_ver}")
+                log.info(f"No update needed. Remote: {au_data[0]}.{au_data[1]}.{au_data[2]} vs Current: {self.current_ver}")
             return None
-        logger.info(f"New update available: {au_data[0]}.{au_data[1]}.{au_data[2]}")
+        log.info(f"New update available: {au_data[0]}.{au_data[1]}.{au_data[2]}")
         return au_data
 
     def _parse_update_file(self) -> Optional[List]:
@@ -78,7 +78,7 @@ class UpdateManager:
                 data['author'], data['date'], data['url'], data['prereq']
             ]
         except Exception as e:
-            logger.error(f"Error parsing UPDATE file: {e}")
+            log.error(f"Error parsing UPDATE file: {e}")
             return None
         finally:
             if self.aulocalfile.exists():
@@ -99,15 +99,15 @@ class UpdateManager:
             try:
                 prereq_ver = version.parse(au_data[7])
                 if prereq_ver > self.current_ver:
-                    logger.info(f"Prerequisite {au_data[7]} required. Checking...")
+                    log.info(f"Prerequisite {au_data[7]} required. Checking...")
                     await self.check_update()
                     return
             except Exception:
-                logger.warning("Invalid prereq version, skipping.")
+                log.warning("Invalid prereq version, skipping.")
 
         url = au_data[6]
         if url == 'none':
-            logger.error("No update URL provided.")
+            log.error("No update URL provided.")
             return
 
         tgz_path = self.tmp_dir / 'update.tgz'
@@ -125,9 +125,9 @@ class UpdateManager:
             if au_data[3] == 'yes':
                 await self._install_full(au_data)
 
-            logger.info("Update completed successfully!")
+            log.info("Update completed successfully!")
         except Exception as e:
-            logger.error(f"Update failed: {e}")
+            log.error(f"Update failed: {e}")
             raise
         finally:
             for path in [tgz_path, self.update_dir]:
@@ -172,11 +172,11 @@ class UpdateManager:
             dst_update = dst_wbs / 'core' / 'update.tcl'
             dst_update.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(new_update, dst_update)
-            logger.info("Updated core/update.tcl")
+            log.info("Updated core/update.tcl")
 
     async def _install_full(self, au_data: List):
         """Perform full installation (adapt for WBS, e.g., pip install or pyproject.toml)."""
-        logger.info(f"Performing full install for {au_data[0]}.{au_data[1]}.{au_data[2]}")
+        log.info(f"Performing full install for {au_data[0]}.{au_data[1]}.{au_data[2]}")
         wbs_root = next(self.update_dir.glob('wbs*'), None)
         if wbs_root:
             # Example: run pip install from extracted dir (customize as needed)
@@ -187,4 +187,4 @@ class UpdateManager:
             # stdout, stderr = await proc.communicate()
             # if proc.returncode != 0:
             #     raise RuntimeError(f"Full install failed: {stderr.decode()}")
-            logger.info("Full install placeholder executed (customize for WBS).")
+            log.info("Full install placeholder executed (customize for WBS).")

@@ -7,7 +7,7 @@ import logging
 from typing import Dict, Optional
 from .user import UserManager
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 class Partyline:
     """Central partyline hub - runs in core process, manages all sessions"""
@@ -41,7 +41,7 @@ class Partyline:
         self.console_session_id = session_id
         self.console_output_callback = output_callback
         
-        logger.info(f"Console registered as partyline session {session_id}")
+        log.info(f"Console registered as partyline session {session_id}")
         self.broadcast(f"*** {handle} joined the partyline (console)", exclude_session=session_id)
         return session_id
     
@@ -49,7 +49,7 @@ class Partyline:
         sessionid = self.next_id
         self.next_id += 1
         self.sessions[sessionid] = {'type': sessiontype, 'handle': handle, 'queue': responsequeue}
-        logger.info(f"Remote session {sessionid} ({sessiontype}) registered for {handle}")
+        log.info(f"Remote session {sessionid} ({sessiontype}) registered for {handle}")
         self.broadcast(f"{handle} joined the partyline ({sessiontype})", exclude_session=sessionid)
         return sessionid
     
@@ -60,7 +60,7 @@ class Partyline:
             handle = session['handle']
             self.broadcast(f"*** {handle} left the partyline")
             del self.sessions[session_id]
-            logger.info(f"Session {session_id} unregistered")
+            log.info(f"Session {session_id} unregistered")
     
     async def handle_input(self, session_id: int, text: str):
         """Process input: commands locally, chat broadcast to sessions + botnet."""
@@ -107,7 +107,7 @@ class Partyline:
                 
                 await COMMANDS[cmd](self.core, handle, session_id, arg, respond)
             except Exception as e:
-                logger.error(f"Command '{cmd}' error: {e}")
+                log.error(f"Command '{cmd}' error: {e}")
                 self.send_to_session(session_id, f"Error executing .{cmd}")
         else:
             self.send_to_session(session_id, f"Unknown command .{cmd}   (Type .help)")
@@ -128,7 +128,7 @@ class Partyline:
                 try:
                     session['queue'].put_nowait({'type': 'MESSAGE', 'text': message})
                 except:
-                    logger.warning(f"Failed to send to session {session_id}")
+                    log.warning(f"Failed to send to session {session_id}")
 
     def send_to_session(self, session_id: int, message: str):
         """Send message to specific session (command response)"""
@@ -144,7 +144,7 @@ class Partyline:
             if hasattr(self, 'core') and session_id in self.core.party_sessions:
                 telnet_session = self.core.party_sessions[session_id]
                 asyncio.create_task(telnet_session.send(message))
-                logger.debug(f"TELNET direct send to session {session_id}")
+                log.debug(f"TELNET direct send to session {session_id}")
                 return     
         else:
             if session['queue']:
@@ -154,4 +154,4 @@ class Partyline:
                         'text': message
                     })
                 except:
-                    logger.warning(f"Failed to send response to session {session_id}")
+                    log.warning(f"Failed to send response to session {session_id}")

@@ -154,7 +154,7 @@ async def cmd_part(core, handle, session_id, arg, respond):
 
 async def cmd_quit(core, handle, session_id, arg, respond):
     """Shutdown bot."""
-    quit_msg = arg or f"WBS {core.version}"
+    quit_msg = arg or f"WBS {__version__}"
     await respond("→ Shutdown initiated...")
     core.irc_q.put_nowait({'cmd': 'quit', 'message': quit_msg})
 
@@ -179,9 +179,18 @@ async def cmd_act(core, handle, session_id, arg, respond):
 
 async def cmd_bots(core, handle, session_id, arg, respond):
     """List botnet status."""
-    # Check botnet config/status via core or simple check
-    #core.irc_q.put_nowait({'cmd': 'botnet_list'})
-    await respond(" Botnet currently: disabled")
+    if not core.bot_sessions:
+        await respond("No linked bots.")
+        return
+    
+    bots_list = []
+    for bot_id, session in core.bot_sessions.items():
+        # Prioritize session.handle or .nick; fallback to ID
+        bot_handle = getattr(session, 'handle', None) or getattr(session, 'nick', None) or str(bot_id)
+        bots_list.append(f"{bot_handle}")
+    
+    bots_str = " | ".join(bots_list)
+    await respond(f"Linked bots: {bots_str}")
 
 async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
     if not arg:

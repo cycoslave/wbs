@@ -16,7 +16,7 @@ from .user import UserManager
 from .channel import ChannelManager
 from . import __version__
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 # Event type constants
 class EventType:
@@ -77,7 +77,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         try:
             self.core_q.put(event_data, block=False)
         except queue.Full:
-            logger.error(f"Event queue full, dropping: {event_data['type']}")
+            log.error(f"Event queue full, dropping: {event_data['type']}")
     
     # === Connection Lifecycle ===
     
@@ -86,7 +86,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         try:
             super()._connect()
         except ServerConnectionError as e:
-            logger.error(f"Connection failed: {e}")
+            log.error(f"Connection failed: {e}")
             self._emit_event({
                 'type': EventType.ERROR,
                 'data': 'connect_fail',
@@ -95,7 +95,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
-        logger.info(f"Connected as {conn.get_nickname()}")
+        log.info(f"Connected as {conn.get_nickname()}")
         self._emit_event({
             'type': EventType.READY,
             'botname': conn.get_nickname()
@@ -103,7 +103,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def on_disconnect(self, conn, event):
         """Connection lost"""
-        logger.warning("Disconnected from server")
+        log.warning("Disconnected from server")
         self._emit_event({
             'type': EventType.ERROR,
             'data': 'disconnect'
@@ -248,7 +248,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def execute_command(self, cmd_data: dict):
         """Execute command from cmd_queue (called by poller thread)"""
         if not self.connection.is_connected():
-            logger.error(f"Not connected, dropping command: {cmd_data}")
+            log.error(f"Not connected, dropping command: {cmd_data}")
             return
         
         cmd = cmd_data.get('cmd')
@@ -296,10 +296,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 self.connection.send_raw(cmd_data['line'])
             
             else:
-                logger.error(f"[IRC] Unknown command: {cmd}")
+                log.error(f"[IRC] Unknown command: {cmd}")
         
         except Exception as e:
-            logger.error(f"Command failed {cmd_data}: {e}")
+            log.error(f"Command failed {cmd_data}: {e}")
 
 
 def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
@@ -322,7 +322,7 @@ def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
                 
                 # Non-blocking get
                 cmd_data = irc_q.get_nowait()
-                logger.debug(f"Executing: {cmd_data}")
+                log.debug(f"Executing: {cmd_data}")
                 
                 bot.execute_command(cmd_data)
                 last_cmd_time = time.time()
@@ -331,14 +331,14 @@ def start_irc_process(config, core_q, irc_q, botnet_q, party_q):
                 time.sleep(0.01)  # Short sleep to reduce CPU usage
             
             except Exception as e:
-                logger.error(f"Command poller error: {e}")
+                log.error(f"Command poller error: {e}")
                 time.sleep(0.1)
     
     # Start command poller thread
     poller = threading.Thread(target=command_poller, daemon=True)
     poller.start()
     
-    logger.info(f"IRC process started. (pid={os.getpid()})")
+    log.info(f"IRC process started. (pid={os.getpid()})")
     
     # Start IRC reactor (blocking)
     bot.start()

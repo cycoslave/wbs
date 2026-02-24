@@ -8,7 +8,7 @@ import logging
 import sys
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 class Session:
     """partyline session - handles console/telnet/DCC"""
@@ -55,7 +55,7 @@ class Session:
             elif self.session_type == 'dcc' and self.dcc:
                 await self.dcc.send(message)
         except Exception as e:
-            logger.error(f"Send error {self.session_type}: {e}")
+            log.error(f"Send error {self.session_type}: {e}")
     
     async def receive(self) -> Optional[str]:
         """Abstraction layer - receive from appropriate transport"""
@@ -78,7 +78,7 @@ class Session:
         except (EOFError, KeyboardInterrupt):
             return None
         except Exception as e:
-            logger.error(f"Receive error ({self.session_type}): {e}")
+            log.error(f"Receive error ({self.session_type}): {e}")
             return None
     
     async def close(self) -> None:
@@ -90,15 +90,15 @@ class Session:
             elif self.session_type == 'dcc' and self.dcc:
                 await self.dcc.close()
         except Exception as e:
-            logger.error(f"Close error {self.session_type}: {e}")
+            log.error(f"Close error {self.session_type}: {e}")
     
     async def run(self):
         """Main session loop - works for all transport types"""
-        logger.info(f"Session {self.session_id} ({self.session_type}) started: {self.handle}")
+        log.info(f"Session {self.session_id} ({self.session_type}) started: {self.handle}")
         
         if self.session_type == 'bot':
             # Send bot handshake response (core already sent, but handle errors)
-            logger.info(f"Bot {self.handle} linked")
+            log.info(f"Bot {self.handle} linked")
         else:
             await self.send(f"Welcome to WBS partyline, {self.handle}!")
             await self.send("Type .help for commands, .quit to exit")
@@ -133,7 +133,7 @@ class Session:
                     })
         
         except Exception as e:
-            logger.error(f"Session {self.session_id} error: {e}")
+            log.error(f"Session {self.session_id} error: {e}")
         
         finally:
             response_task.cancel()
@@ -146,7 +146,7 @@ class Session:
                 'handle': self.handle
             })
             
-            logger.info(f"Session {self.session_id} closed")
+            log.info(f"Session {self.session_id} closed")
 
     async def _handle_bot_line(self, line: str):
         """Handle bot-specific protocol lines."""
@@ -170,7 +170,7 @@ class Session:
                     'command': cmd
                 })
             except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON from {self.handle}: {e}")
+                log.error(f"Invalid JSON from {self.handle}: {e}")
         
         elif line.startswith('CHAT:'):
             # Botnet chat - broadcast to partyline
@@ -222,4 +222,4 @@ class Session:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Response handler error: {e}")
+                log.error(f"Response handler error: {e}")

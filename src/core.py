@@ -27,8 +27,9 @@ from .partyline import Partyline
 from .console import Console
 from .session import Session
 from .net import NetListener
+from . import __version__
 
-logger = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
 
 class Core:
@@ -91,9 +92,9 @@ class Core:
         
         # Partyline ONLY if not foreground
         if not foreground:
-            logger.info("Background mode")
+            log.info("Background mode")
         else:
-            logger.info("Foreground mode: Using console.")
+            log.info("Foreground mode: Using console.")
         
         # Botnet if enabled
         if self.config['settings']['botnet']:
@@ -105,12 +106,12 @@ class Core:
             botnet_proc.start()
             self.children.append(botnet_proc)
         
-        logger.info(f"Spawned: {[p.name for p in self.children]}")
+        log.info(f"Spawned: {[p.name for p in self.children]}")
 
     async def run(self, foreground=False):
         """Main async event loop"""
         self.foreground = foreground
-        logger.info(f"Initializing core with db_path={self.db_path}")
+        log.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
         
         if hasattr(self, 'net_listener'):
@@ -129,7 +130,7 @@ class Core:
         poller_thread = threading.Thread(target=self.event_poller, daemon=True)
         poller_thread.start()
         
-        logger.info("Core event loop running")
+        log.info("Core event loop running")
         if foreground:
             await self._main_loop_with_console()
         else:
@@ -145,7 +146,7 @@ class Core:
             event = event[1]
         
         if not isinstance(event, dict):
-            logger.error(f"Invalid event type received: {type(event)} - {event}")
+            log.error(f"Invalid event type received: {type(event)} - {event}")
             return
         
         etype = event.get('type', 'UNKNOWN')
@@ -172,7 +173,7 @@ class Core:
         if handler:
             await handler(event)
         else:
-            logger.warning(f"Unhandled event type: {etype}")
+            log.warning(f"Unhandled event type: {etype}")
     
     async def on_partyline_input(self, event: dict):
         """Forward partyline input to Partyline manager."""
@@ -186,10 +187,10 @@ class Core:
         peer = event.get('peer', 'unknown')
         dup_fd = event.get('sockfd')
         
-        logger.info(f"New bot connection: {bot_name} fd={dup_fd}")
+        log.info(f"New bot connection: {bot_name} fd={dup_fd}")
         
         if dup_fd is None:
-            logger.warning(f"No dup_fd for bot {bot_name}")
+            log.warning(f"No dup_fd for bot {bot_name}")
             return
         
         try:
@@ -221,11 +222,11 @@ class Core:
             await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS 6.0")
             asyncio.create_task(bot_session.run())
             
-            logger.info(f"Bot session {bot_id} created for {bot_name}")
+            log.info(f"Bot session {bot_id} created for {bot_name}")
             self.partyline.broadcast(f"*** {bot_name} linked to botnet")
             
         except Exception as e:
-            logger.error(f"Bot session {bot_name} failed: {e}")
+            log.error(f"Bot session {bot_name} failed: {e}")
             try:
                 os.close(dup_fd)
             except:
@@ -238,7 +239,7 @@ class Core:
         
         if session_id in self.bot_sessions:
             del self.bot_sessions[session_id]
-            logger.info(f"Bot {bot_name} disconnected")
+            log.info(f"Bot {bot_name} disconnected")
             self.partyline.broadcast(f"*** {bot_name} unlinked")
 
     async def on_partyline_connect(self, event: dict):
@@ -247,10 +248,10 @@ class Core:
         peer = event.get('peer', 'unknown')
         dup_fd = event.get('sockfd')
         
-        logger.info(f"Partyline newuser {handle} fd={dup_fd}")
+        log.info(f"Partyline newuser {handle} fd={dup_fd}")
         
         if dup_fd is None:
-            logger.warning(f"No dup_fd for {handle}")
+            log.warning(f"No dup_fd for {handle}")
             return
         
         try:
@@ -262,20 +263,20 @@ class Core:
             response_q = mp.Queue()
             session_id = self.partyline.register_remote('telnet', handle, response_q)
             
-            #logger.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
+            #log.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
             session = Session(session_id, 'telnet', handle=handle,
                               reader=reader, writer=writer,
                               core_q=self.core_q, response_q=response_q)
-            #logger.info("DEBUG Session created OK")
+            #log.info("DEBUG Session created OK")
             
             self.party_sessions[session_id] = session
             asyncio.create_task(session.run())
             
-            await session.send("Welcome to WBS partyline! Type .help")
-            logger.info(f"Remote session {session_id} (telnet) registered for {handle}")
+            #await session.send("Welcome to WBS partyline! Type .help")
+            log.info(f"Remote session {session_id} (telnet) registered for {handle}")
             
         except Exception as e:
-            logger.error(f"Session dup_fd {dup_fd} failed: {e}")
+            log.error(f"Session dup_fd {dup_fd} failed: {e}")
             # Cleanup: close dup_fd IF socket creation failed
             try:
                 os.close(dup_fd)
@@ -292,18 +293,18 @@ class Core:
                 if session.writer:
                     session.writer.close()
                     await session.writer.wait_closed()
-                logger.info(f"Party socket fd closed + session {session_id} ({getattr(session, 'handle', 'unknown')}) unregistered")
+                log.info(f"Party socket fd closed + session {session_id} ({getattr(session, 'handle', 'unknown')}) unregistered")
             except Exception as e:
-                logger.warning(f"Session {session_id} close failed: {e}")
+                log.warning(f"Session {session_id} close failed: {e}")
         
         if hasattr(self, 'partyline') and self.partyline:
             if session_id in self.partyline.sessions:
                 handle = self.partyline.sessions[session_id]['handle']
                 del self.partyline.sessions[session_id]
-                logger.info(f"Partyline unregistered {handle}#{session_id}")
+                log.info(f"Partyline unregistered {handle}#{session_id}")
                 self.partyline.broadcast(f"{handle} left the partyline", exclude_session=session_id)
         
-        logger.debug(f"Partyline disconnect complete: {session_id}")
+        log.debug(f"Partyline disconnect complete: {session_id}")
 
     def event_poller(self):
         """Thread: Poll core_q -> event buffer."""
@@ -327,7 +328,7 @@ class Core:
             
             for event in events:
                 if not isinstance(event, dict):
-                    logger.error(f"Invalid event type received: {type(event)} - {event}")
+                    log.error(f"Invalid event type received: {type(event)} - {event}")
                     continue
                     
                 if event.get('cmd') == 'quit':
@@ -377,7 +378,7 @@ class Core:
     async def _shutdown(self, message):
         self.running = False
         self.quit_event.set()
-        logger.info(f"Shutdown: {message}")
+        log.info(f"Shutdown: {message}")
         
         # Send quit to children
         quit_msg = {'cmd': 'quit', 'message': message}
@@ -406,7 +407,7 @@ class Core:
         self.seen = Seen(self.db_path)
         
         self.partyline = Partyline(self)
-        logger.info(f"Core process started. (pid={os.getpid()})")
+        log.info(f"Core process started. (pid={os.getpid()})")
 
     async def on_command(self, event):
         """
@@ -445,7 +446,7 @@ class Core:
             try:
                 await COMMANDS[cmd](self.config, self.core_q, self.irc_q, self.botnet_q, self.party_q, handle, idx, arg)
             except Exception as e:
-                logger.error(f"Command '{cmd}' error: {e}", exc_info=True)
+                log.error(f"Command '{cmd}' error: {e}", exc_info=True)
                 self.send_cmd('msg', nick, f"Error executing .{cmd}")
         else:
             self.send_cmd('msg', nick, f"Unknown command: .{cmd}")
@@ -502,11 +503,11 @@ class Core:
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
         self.connected = True
-        logger.info("IRC READY - joining channels..")
+        log.info("IRC READY - joining channels..")
         channels = await self.chan_mgr.getchans()
         for channel in channels:
             if not None:
-                logger.info(f"Joining {channel}..")
+                log.info(f"Joining {channel}..")
                 self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
                 time.sleep(0.2)
 
@@ -521,7 +522,7 @@ class Core:
     async def on_error(self, event: Dict[str, Any]):
         """IRC error occurred."""
         error_msg = event.get('data', 'Unknown error')
-        logger.error(f"IRC error: {error_msg}")
+        log.error(f"IRC error: {error_msg}")
 
     def send_cmd(self, cmd_type: str, target: str, text: str = "", **kwargs):
         """Send to IRC queue."""
@@ -529,7 +530,7 @@ class Core:
         try:
             self.irc_q.put_nowait(cmd)
         except mp.queues.Full:
-            logger.warning(f"IRC queue full, dropped: {cmd}")
+            log.warning(f"IRC queue full, dropped: {cmd}")
 
     async def _periodic_tasks(self):
         """Periodic tasks."""

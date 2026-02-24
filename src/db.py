@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 async def get_schema_sql() -> str:
@@ -49,7 +49,7 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
             await db.commit()
         
         await ensure_schema(db)
-        logger.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
+        log.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
 
 
 async def seed_db(db_path: str, config: dict):
@@ -79,7 +79,7 @@ async def seed_db(db_path: str, config: dict):
         """, (owner,))
         
         await db.commit()
-        logger.info(f"DB seeded: bot={nick}, owner={owner}")
+        log.info(f"DB seeded: bot={nick}, owner={owner}")
 
 
 @asynccontextmanager
@@ -118,7 +118,7 @@ async def init_runtime_state(db_path: str):
         )
         
         await db.commit()
-        logger.info(f"Runtime state initialized: start_time={start_time}")
+        log.info(f"Runtime state initialized: start_time={start_time}")
 
 
 async def get_runtime(key: str, db_path: str) -> Optional[int]:
