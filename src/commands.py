@@ -307,10 +307,11 @@ async def cmd_botinfo(core, handle: str, session_id: int, arg: str, respond):
     await respond(botinfo)
 
 async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
-    #if not arg:
-    #    await respond("Usage: .listusers")
-    #    return
-    #parts = arg.split()
+    if not arg:
+        await respond("Usage: .link <bot>")
+        return
+    parts = arg.split()
+    bot = parts[0]
     await respond("Not implemented yet.")  
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
