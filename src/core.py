@@ -219,7 +219,7 @@ class Core:
             self.bot_sessions[bot_id] = bot_session
             
             # Send handshake response
-            await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS 6.0")
+            await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS {__version__}")
             asyncio.create_task(bot_session.run())
             
             log.info(f"Bot session {bot_id} created for {bot_name}")

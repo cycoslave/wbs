@@ -45,13 +45,38 @@ CREATE TABLE IF NOT EXISTS user_access (
 -- Bots
 CREATE TABLE IF NOT EXISTS bots (
     handle TEXT PRIMARY KEY,
+    password TEXT DEFAULT NULL,
+    hostmasks TEXT DEFAULT '[]',
     address TEXT NOT NULL,
     port INTEGER NOT NULL DEFAULT 3333,
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
     subnet_id INTEGER,
-    share_level TEXT DEFAULT 'full', -- full/subnet/none
+    share_level TEXT DEFAULT 'subnet', -- full/subnet/none
     comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
+);
+
+-- Bot access
+CREATE TABLE IF NOT EXISTS bot_access (
+    handle TEXT NOT NULL,
+    channel TEXT DEFAULT NULL,
+    subnet_id INTEGER DEFAULT NULL,
+    has_partyline BOOLEAN DEFAULT 0,
+    is_admin BOOLEAN DEFAULT 0,
+    is_bot BOOLEAN DEFAULT 0,
+    is_op BOOLEAN DEFAULT 0,
+    is_deop BOOLEAN DEFAULT 0,
+    is_voice BOOLEAN DEFAULT 0,
+    is_devoice BOOLEAN DEFAULT 0,
+    is_friend BOOLEAN DEFAULT 0,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL,
+    
+    PRIMARY KEY(handle, channel),
+    FOREIGN KEY(handle) REFERENCES bots(handle) ON DELETE CASCADE,
     FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
 

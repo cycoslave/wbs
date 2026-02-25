@@ -48,9 +48,7 @@ class BotnetManager:
         self.my_handle = config.get('bot', {}).get('nick', 'WBS')
         self.running = True
         self.loop = None
-    
-    # ===== Connection Management =====
-    
+        
     async def connect_peer(self, link: BotLink):
         """Establish outgoing connection to peer."""
         try:
@@ -116,7 +114,7 @@ class BotnetManager:
                     log.info(f"Peer identified: {peer_name}")
                     
                     # Send handshake response
-                    response = f"BOTLINK {self.my_handle} {peer_name} 1 :WBS 6.0\n"
+                    response = f"BOTLINK {self.my_handle} {peer_name} 1 :WBS {__version__}\n"
                     writer.write(response.encode())
                     await writer.drain()
                     
@@ -135,9 +133,7 @@ class BotnetManager:
             await writer.wait_closed()
         except Exception as e:
             log.error(f"Incoming connection error: {e}")
-    
-    # ===== Message Processing =====
-    
+        
     async def process_peer_line(self, line: str, from_bot: str, writer: asyncio.StreamWriter):
         """Process message from peer."""
         
@@ -242,9 +238,7 @@ class BotnetManager:
         
         elif target == 'botnet':
             await self.broadcast_all(cmd)
-    
-    # ===== Broadcasting =====
-    
+        
     async def broadcast_chat(self, msg: str, chan: int, exclude: Optional[str] = None):
         """Broadcast chat to all peers."""
         line = f"CHAT:{chan}:{msg}\n"
@@ -280,9 +274,7 @@ class BotnetManager:
             await writer.drain()
         except Exception as e:
             log.error(f"Send failed: {e}")
-    
-    # ===== Data Sharing =====
-    
+        
     async def share_data(self, writer: asyncio.StreamWriter):
         """Share users and channels (aggressive mode)."""
         await self.share_users(writer)
@@ -338,8 +330,6 @@ class BotnetManager:
         except Exception as e:
             log.error(f"Handle share channels error: {e}")
     
-    # ===== Command Execution (from core) =====
-    
     def execute_command(self, cmd_data: dict):
         """Execute command from botnet_q (called by poller thread)."""
         if not self.loop:
@@ -390,8 +380,6 @@ class BotnetManager:
         self.running = False
         for _, writer in self.links.values():
             writer.close()
-
-# ===== Process Entry Points =====
 
 async def start_botnet_tasks(manager: BotnetManager):
     """Start all botnet tasks."""

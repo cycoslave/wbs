@@ -265,6 +265,61 @@ async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
         await respond(core.user_mgr.set_password(handle, parts[1]))
     return
 
+async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .+bot <bot> [hostmask] [address] [port]")
+        return
+    parts = arg.split()
+    bot = parts[0]
+    hostmask = parts[1] if len(parts) > 1 else None
+    address  = parts[2] if len(parts) > 2 else None
+    port     = int(parts[3]) if len(parts) > 3 else None
+    ok = await core.user_mgr.addbot(bot, hostmask, address, port)
+    if ok:
+        await respond(f"→ Bot {bot} added!")
+    else:
+        await respond(f"→ Bot {bot} NOT added!")
+
+async def cmd_delbot(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .-bot <bot>")
+        return
+    parts = arg.split()
+    if await core.user_mgr.delbot(parts[0]) == True:
+        await respond(f"→ Bot {parts[0]} deleted!")
+    else:
+        await respond(f"→ Bot {parts[0]} NOT deleted!")
+
+async def cmd_botinfo(core, handle: str, session_id: int, arg: str, respond):
+    botinfo = """
+-> Bot Info <-
+-> Pid #: 503
+-> Runs in: /home/blurr/wbs
+-> Admin: cyco <email: loco@cyco.ca>
+-> Botnet nick: blurr
+-> Perm Owner(s):
+-> Machine: armv6l
+-> Oper. System: Linux 6.12.62+rpt-rpi-v6
+-> Tcl Ver.: 8.6
+-> I currently allow remote boots from shared bots only.
+-> I am currently sorting my users...
+"""
+    await respond(botinfo)
+
+async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
+    #if not arg:
+    #    await respond("Usage: .listusers")
+    #    return
+    #parts = arg.split()
+    await respond("Not implemented yet.")  
+
+async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
+    #if not arg:
+    #    await respond("Usage: .listusers")
+    #    return
+    #parts = arg.split()
+    await respond("Not implemented yet.")          
+
 async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:
     #    await respond("Usage: .listusers")
@@ -594,7 +649,6 @@ COMMANDS = {
     'say': cmd_msg,
     'msg': cmd_msg,
     'act': cmd_act,
-    'bots': cmd_bots,
     #'quit': cmd_quit,
     'die': cmd_quit,
     # user    
@@ -613,6 +667,13 @@ COMMANDS = {
     '-chan': cmd_delchan,
     'chaninfo': cmd_showchan,
     'channels': cmd_listchans,
+    # bot
+    '+bot': cmd_addbot,
+    '-bot': cmd_delbot,
+    'botinfo': cmd_botinfo,
+    'bots': cmd_bots,
+    'link': cmd_link,
+    'unlink': cmd_unlink,
 }
 
 async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):

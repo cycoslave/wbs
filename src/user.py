@@ -74,7 +74,7 @@ class UserManager:
                         else:
                             return True
                 else:
-                    return False 
+                    return False                 
         
     async def listusers(self) -> str:
         """List all users with access summary."""
@@ -222,14 +222,76 @@ class UserManager:
             )
             return [User(**self._row_to_data(r)) for r in rows]
         
-    def exist(self, channel: str):
+    def exist(self, user: str):
+        """Check if user exists."""
         try:
             with sqlite3.connect(self.db_path) as db:
                 db.row_factory = sqlite3.Row
-                cursor = db.execute("SELECT 1 FROM channels WHERE name = ?", (channel.lower(),))
+                cursor = db.execute("SELECT 1 FROM users WHERE handle = ?", (user.lower(),))
                 return cursor.fetchone() is not None
         except sqlite3.Error:
             return False        
+
+    async def addbot(self, handle: str, hostmask: str = None, addr: str = None, port: str = None):
+        """Add bot with hostmask. Returns True if created."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT handle FROM bots WHERE handle = ?", (handle,)) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError(f"Bot {handle} already exists")
+            
+            if addr == None:
+                addr = 'NULL'
+
+            if port == None:
+                port = 'NULL'
+
+            async with db.execute(
+                """
+                INSERT INTO bots (handle, hostmasks, address, port, created_by) 
+                VALUES (?, json_array(?), ?)
+                """,
+                (handle, hostmask, addr, port, "partyline")
+            ) as cursor:
+                await db.commit()
+                if cursor.rowcount > 0:
+                    return True
+                return False
+            
+    async def delbot(self, target_handle: str) -> str:
+        """Delete user by handle. Requires admin rights."""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Check actor has admin rights
+            #actor = await db.fetchone(
+            #    "SELECT handle FROM user_access WHERE handle = ? AND is_admin = 1 AND channel = '*'",
+            #    (actor_handle,)
+            #)
+            #if not actor:
+            #    return f"{actor_handle}: Insufficient rights to delete users."
+            
+            async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
+                if await cursor.fetchone():
+                    async with db.execute("DELETE FROM bots WHERE handle = ?", (target_handle,)) as cursor:
+                        await db.commit()
+                    await db.commit()
+                    
+                    async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
+                        if await cursor.fetchone():
+                            return False
+                        else:
+                            return True
+                else:
+                    return False 
+
+
+        
+    def bot_exist(self, bot: str):
+        try:
+            with sqlite3.connect(self.db_path) as db:
+                db.row_factory = sqlite3.Row
+                cursor = db.execute("SELECT 1 FROM bots WHERE handle = ?", (bot.lower(),))
+                return cursor.fetchone() is not None
+        except sqlite3.Error:
+            return False 
 
     def _row_to_data(self, row: Dict) -> Dict:
         data = dict(row)
