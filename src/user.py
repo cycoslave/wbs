@@ -7,21 +7,84 @@ import aiosqlite
 import sqlite3
 import json
 import bcrypt
-from typing import List, Optional, Dict, Any, Tuple
-from dataclasses import dataclass, asdict
+from typing import List, Optional, Literal, Dict, Any, Tuple
+from dataclasses import dataclass, asdict, field
 from .db import get_db 
 
 @dataclass
 class User:
+    """Maps to the 'users' table."""
     handle: str
-    hostmasks: List[str]
-    comment: str = ""
-    is_locked: int = 0
+    password: Optional[str] = None      # bcrypt hash
+    hostmasks: List[str] = field(default_factory=list)
+    is_locked: bool = False
+    comment: str = ''
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
     def __post_init__(self):
-        self.hostmasks = self.hostmasks or []
-        if self.hostmasks is None:
-            self.hostmasks = []
+        # Normalize hostmasks if it comes from DB as JSON string
+        if isinstance(self.hostmasks, str):
+            self.hostmasks = json.loads(self.hostmasks) if self.hostmasks else []
+
+@dataclass
+class UserAccess:
+    """Maps to the 'user_access' table."""
+    handle: str
+    channel: Optional[str] = None
+    subnet_id: Optional[int] = None
+    has_partyline: bool = False
+    is_admin: bool = False
+    is_bot: bool = False
+    is_op: bool = False
+    is_deop: bool = False
+    is_voice: bool = False
+    is_devoice: bool = False
+    is_friend: bool = False
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
+class Bot:
+    """Maps to the 'bots' table."""
+    handle: str
+    password: Optional[str] = None
+    hostmasks: list[str] = field(default_factory=list)
+    address: str
+    port: int = 3333
+    role: Literal['hub', 'backup', 'leaf', 'none'] = 'none'
+    subnet_id: Optional[int] = None
+    share_level: str = 'subnet'
+    comment: str = ''
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+    def __post_init__(self):
+        # Normalize hostmasks if it comes from DB as JSON string
+        if isinstance(self.hostmasks, str):
+            self.hostmasks = json.loads(self.hostmasks) if self.hostmasks else []
+
+@dataclass
+class BotAccess:
+    """Maps to the 'bot_access' table."""
+    handle: str
+    channel: Optional[str] = None
+    subnet_id: Optional[int] = None
+    has_partyline: bool = False
+    is_admin: bool = False
+    is_bot: bool = False
+    is_op: bool = False
+    is_deop: bool = False
+    is_voice: bool = False
+    is_devoice: bool = False
+    is_friend: bool = False
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+
 
 class UserManager:
 
@@ -177,16 +240,6 @@ class UserManager:
                 
                 return "\n".join(result)
 
-    async def get_user(self, handle: str) -> Optional[User]:
-        async with get_db(self.db_path) as db:
-            row = await db.execute("SELECT * FROM users WHERE handle = ?", (handle,))
-            row = await row.fetchone()
-            if not row:
-                return None
-            data = dict(row)
-            data['hostmasks'] = (data.get('hostmasks', '') or '').split()
-            return User(**data)
-
     async def match_user(self, hostmask: str) -> Optional[str]:
         """Glob match hostmasks (eggdrop-style)."""
         async with get_db(self.db_path) as db:
@@ -287,6 +340,55 @@ class UserManager:
                 return cursor.fetchone() is not None
         except sqlite3.Error:
             return False 
+
+    def user_to_dict(self, user: User) -> dict:
+        """Convert User to dict for DB INSERT/UPDATE."""
+        data = asdict(user)
+        data['hostmasks'] = json.dumps(data['hostmasks'])  # List -> JSON string
+        return data
+
+    def access_to_dict(self, access: UserAccess) -> dict:
+        """Convert UserAccess to dict for DB INSERT/UPDATE."""
+        return asdict(access)
+
+    async def get_user(self, handle: str) -> Optional[User]:
+        """Fetch user from DB -> User dataclass."""
+        async with get_db(self.db_path) as db:
+            row = await db.execute(
+                "SELECT * FROM users WHERE handle = ?",
+                (handle,)
+            ).fetchone()
+            
+            if row:
+                return User(**dict(row))  # Row is dict-like -> dataclass
+            return None
+
+    async def get_bot(self, handle: str) -> Optional[Bot]:
+        async with get_db(self.db_path) as db:
+            row = await db.execute(
+                "SELECT * FROM bots WHERE handle = ?",
+                (handle,)
+            ).fetchone()
+            
+            if row:
+                return Bot(**row)
+            return None
+        
+    def bot_to_dict(self, bot: Bot) -> dict:
+        """Convert Bot to dict for DB operations."""
+        data = asdict(bot)  # dataclasses.asdict(bot)
+        data['hostmasks'] = json.dumps(data['hostmasks'])  # Convert list back to JSON
+        return data
+
+    async def save_bot(self, bot: Bot):
+        data = to_dict(bot)
+        async with get_db(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO bots (handle, password, hostmasks, address, port, 
+                                        role, subnet_id, share_level, comment, created_at)
+                VALUES (:handle, :password, :hostmasks, :address, :port,
+                        :role, :subnet_id, :share_level, :comment, :created_at)
+            """, data)
 
     def _row_to_data(self, row: Dict) -> Dict:
         data = dict(row)
