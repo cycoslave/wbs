@@ -18,11 +18,10 @@ class User:
     comment: str = ""
     is_locked: int = 0
 
-    def __post_init__(self, db_path):
+    def __post_init__(self):
         self.hostmasks = self.hostmasks or []
-        self.chan_flags = self.chan_flags or {}
-        self.xtra = self.xtra or {}
-        self.db_path = db_path
+        if self.hostmasks is None:
+            self.hostmasks = []
 
 class UserManager:
 
@@ -65,9 +64,7 @@ class UserManager:
             async with db.execute("SELECT handle FROM users WHERE handle = ?", (target_handle,)) as cursor:
                 if await cursor.fetchone():
                     async with db.execute("DELETE FROM users WHERE handle = ?", (target_handle,)) as cursor:
-                        await db.commit()
-                    await db.commit()
-                    
+                        await db.commit()                    
                     async with db.execute("SELECT handle FROM users WHERE handle = ?", (target_handle,)) as cursor:
                         if await cursor.fetchone():
                             return False
@@ -248,7 +245,7 @@ class UserManager:
             async with db.execute(
                 """
                 INSERT INTO bots (handle, hostmasks, address, port, created_by) 
-                VALUES (?, json_array(?), ?)
+                VALUES (?, json_array(?), ?, ?, ?)
                 """,
                 (handle, hostmask, addr, port, "partyline")
             ) as cursor:
@@ -271,9 +268,7 @@ class UserManager:
             async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
                 if await cursor.fetchone():
                     async with db.execute("DELETE FROM bots WHERE handle = ?", (target_handle,)) as cursor:
-                        await db.commit()
-                    await db.commit()
-                    
+                        await db.commit()                    
                     async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
                         if await cursor.fetchone():
                             return False

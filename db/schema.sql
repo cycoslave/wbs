@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS channels (
     is_news BOOLEAN DEFAULT 0,
     is_url BOOLEAN DEFAULT 0,
     is_stats BOOLEAN DEFAULT 0,
-    is_lock BOOLEAN DEFAULT 0,      -- CHANLOCK
+    is_locked BOOLEAN DEFAULT 0,      -- CHANLOCK
     lock_by TEXT DEFAULT '',
     lock_at INTEGER DEFAULT 0,
     lock_reason TEXT DEFAULT '',

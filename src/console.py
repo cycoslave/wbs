@@ -39,5 +39,3 @@ class Console:
                     log.error(f"Console error: {e}")
                     await asyncio.sleep(0.1)
         log.info("Console session ended")
-        
-        log.info("Console session ended")

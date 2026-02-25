@@ -81,11 +81,11 @@ class ChannelManager:
             """, (channel,))
             
             if not chan:
-                return f"User '{channel}' not found."
+                return f"Channel '{channel}' not found."
             
             result = [f"Channel: {chan['name']}"]
             result.append(f"  Comment: {chan['comment'] or 'None'}")
-            result.append(f"  Locked: {'Yes' if user['is_locked'] else 'No'}")
+            result.append(f"  Locked: {'Yes' if chan['is_locked'] else 'No'}")
             return "\n".join(result)
 
     async def getchans(self) -> str:
@@ -102,41 +102,6 @@ class ChannelManager:
                 channels.append(row['name'])
             return channels
 
-    async def add_ban(self, channel: str, banmask: str, creator: str = 'bot', lifetime: int = 0):
-        """
-        Add ban to channel state and send to IRC.
-        
-        Args:
-            channel: Channel name
-            banmask: Ban mask (e.g., '*!*@example.com')
-            creator: Who created the ban
-            lifetime: Ban duration in seconds (0 = permanent)
-        """
-        state = self.get_state(channel)
-        if not state:
-            log.warning(f"Cannot add ban to unknown channel {channel}")
-            return
-        
-        state.bans.add(banmask)
-        
-        if self._irc_send:
-            self._irc_send(f"MODE {channel} +b {banmask}")
-        
-        log.info(f"Banned {banmask} on {channel} by {creator} (lifetime: {lifetime}s)")
-        
-        # TODO: Store ban in DB with expiry if lifetime > 0
-
-    async def remove_ban(self, channel: str, banmask: str):
-        """Remove ban from channel."""
-        state = self.get_state(channel)
-        if state and banmask in state.bans:
-            state.bans.discard(banmask)
-            
-            if self._irc_send:
-                self._irc_send(f"MODE {channel} -b {banmask}")
-            
-            log.info(f"Unbanned {banmask} on {channel}")
-
     def exist(self, channel: str):
         try:
             with sqlite3.connect(self.db_path) as db:
@@ -145,16 +110,6 @@ class ChannelManager:
                 return cursor.fetchone() is not None
         except sqlite3.Error:
             return False
-
-    async def enforce_modes(self, channel: str):
-        """Enforce channel modes from settings."""
-        settings = await self.get_settings(channel)
-        if not settings or not settings.chanmode:
-            return
-        
-        if self._irc_send:
-            self._irc_send(f"MODE {channel} {settings.chanmode}")
-            log.debug(f"Enforcing modes {settings.chanmode} on {channel}")
 
     async def sync_from_peer(self, channel_data: Dict):
         """
@@ -194,22 +149,3 @@ class ChannelManager:
             log.info(f"Synced channel {channel} from botnet peer")
         except Exception as e:
             log.error(f"Failed to sync channel {channel}: {e}")
-
-
-# Global instance
-_channel_mgr: Optional[ChannelManager] = None
-
-
-async def init_channel_manager(db_path: str, irc_send_callback: Optional[Callable] = None):
-    """Initialize global channel manager."""
-    global _channel_mgr
-    _channel_mgr = ChannelManager(db_path, irc_send_callback)
-    await _channel_mgr.initialize()
-    log.info("Channel manager initialized")
-
-
-def get_channel_mgr() -> ChannelManager:
-    """Get the channel manager instance."""
-    if _channel_mgr is None:
-        raise RuntimeError("Channel manager not initialized - call init_channel_manager first")
-    return _channel_mgr
