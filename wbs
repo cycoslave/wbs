@@ -23,13 +23,6 @@ def parse_args():
     parser.add_argument("-d", "--db-path")
     return parser.parse_args()
 
-def load_config(config_path, db_path_override=None):
-    with open(config_path) as f:
-        config = json.load(f)
-    if db_path_override:
-        config['db']['path'] = db_path_override
-    return config
-
 def main():
     log.info(f"Launching WBS {__version__}")
     args = parse_args()

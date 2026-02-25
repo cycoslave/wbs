@@ -9,8 +9,6 @@ import time
 import logging
 import json
 import os
-import sys
-import select
 import socket
 from pathlib import Path
 from typing import Dict, Any
