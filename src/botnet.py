@@ -481,11 +481,6 @@ def start_botnet_process(config, core_q, irc_q, botnet_q):
     poller.start()
     
     log.info(f"Botnet started (pid={os.getpid()})")
-    #listen_port = manager.config['settings']['listen_port']
-    #server = asyncio.run(
-    #    asyncio.start_server(manager.handle_incoming, '0.0.0.0', listen_port)
-    #)
-    #asyncio.run(server.serve_forever())
 
 def botnet_process_launcher(config_path, core_q, irc_q, botnet_q):
     """Launcher for Botnet multiprocessing.Process."""
