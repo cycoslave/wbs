@@ -28,14 +28,14 @@ async def cmd_uptime(core, handle, session_id, arg, respond):
     # Server uptime if connected
     #if not core.config.get('limbo_hub') and hasattr(core, 'server_online_time'):
     #    server_up = str(timedelta(seconds=int(time.time() - core.server_online_time)))
-    #    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Server uptime: {server_up}")
+    #    await send_partyline(config, core_q, irc_q, botnet_q, idx, f"Server uptime: {server_up}")
     
     # System uptime for admins
-    #user_mgr = UserManager()
-    #if await user_mgr.matchattr(hand, '+A'):
+    #user = UserManager()
+    #if await user.matchattr(hand, '+A'):
     #    try:
     #        out = subprocess.check_output(['uptime'], timeout=2).decode().strip()
-    #        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"System: {out}")
+    #        await send_partyline(config, core_q, irc_q, botnet_q, idx, f"System: {out}")
     #    except:
     #        pass
     return
@@ -52,9 +52,9 @@ async def cmd_mode(core, handle, session_id, arg, respond):
     chan, modes = parts
     core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
     await respond(f"Mode set: {chan} {modes}")
-    #user_mgr = UserManager()
+    #user = UserManager()
     #
-    #if await user_mgr.matchattr(hand, 'o|o', chan):
+    #if await user.matchattr(hand, 'o|o', chan):
     #    # Queue IRC command
     #    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
     #    await respond(f"Mode set: {chan} {modes}")
@@ -123,7 +123,7 @@ async def cmd_devoice(core, handle, session_id, arg, respond):
 #async def cmd_channels(core, handle, session_id, arg, respond):
 #    """List active channels."""
 #    if core.config.get('limbo_hub'):
-#        return await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, "Limbo hub: no channels.")
+#        return await send_partyline(config, core_q, irc_q, botnet_q, idx, "Limbo hub: no channels.")
 #    
 #    lines = ["=== Active Channels ==="]
 #    for chan in core.channels:
@@ -131,7 +131,7 @@ async def cmd_devoice(core, handle, session_id, arg, respond):
 #        op_status = "op" if await bot_is_op(core, chan) else "no-op"
 #        lines.append(f"{chan} [{modes}] [{op_status}]")
 #    
-#    await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, '\n'.join(lines))
+#    await send_partyline(config, core_q, irc_q, botnet_q, idx, '\n'.join(lines))
 #    return 1
 
 async def cmd_join(core, handle: str, session_id: int, arg: str, respond):
@@ -197,7 +197,7 @@ async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .addchan <user>")
         return
     parts = arg.split()
-    if await core.chan_mgr.addchan(parts[0]) == True:
+    if await core.chan.addchan(parts[0]) == True:
         core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
         await respond(f"→ Channel {parts[0]} added!")
     else:
@@ -208,7 +208,7 @@ async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .delchan <user>")
         return
     parts = arg.split()
-    if await core.chan_mgr.delchan(parts[0]) == True:
+    if await core.chan.delchan(parts[0]) == True:
         core.irc_q.put_nowait({'cmd': 'part', 'channel': parts[0]})
         await respond(f"→ Channel {parts[0]} deleted!")
     else:
@@ -219,17 +219,17 @@ async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .showchan <user>")
         return
     parts = arg.split()
-    await respond(await core.chan_mgr.showchan(parts[0]))
+    await respond(await core.chan.showchan(parts[0]))
 
 async def cmd_listchans(core, handle: str, session_id: int, arg: str, respond):
-    await respond(await core.chan_mgr.listchans())    
+    await respond(await core.chan.listchans())    
 
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .adduser <user> [hostmask]")
         return
     parts = arg.split()
-    if await core.user_mgr.adduser(parts[0], parts[1]) == True:
+    if await core.user.adduser(parts[0], parts[1]) == True:
         await respond(f"→ User {parts[0]} added!")
     else:
         await respond(f"→ User {parts[0]} NOT added!")
@@ -239,7 +239,7 @@ async def cmd_deluser(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .deluser <user>")
         return
     parts = arg.split()
-    if await core.user_mgr.deluser(parts[0]) == True:
+    if await core.user.deluser(parts[0]) == True:
         await respond(f"→ User {parts[0]} deleted!")
     else:
         await respond(f"→ User {parts[0]} NOT deleted!")
@@ -249,7 +249,7 @@ async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .showuser <user>")
         return
     parts = arg.split()
-    await respond(await core.user_mgr.showuser(parts[0]))
+    await respond(await core.user.showuser(parts[0]))
 
 async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -257,12 +257,12 @@ async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
         return
     parts = arg.split()
     if len(parts) > 1:
-        await respond(core.user_mgr.set_password(parts[1], parts[2]))  
+        await respond(core.user.set_password(parts[1], parts[2]))  
     else:
         if handle == "console":
             await respond("ERROR: Console user don't have a password to change.")
             return
-        await respond(core.user_mgr.set_password(handle, parts[1]))
+        await respond(core.user.set_password(handle, parts[1]))
     return
 
 async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
@@ -274,7 +274,7 @@ async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
     hostmask = parts[1] if len(parts) > 1 else None
     address  = parts[2] if len(parts) > 2 else None
     port     = int(parts[3]) if len(parts) > 3 else None
-    ok = await core.user_mgr.addbot(bot, hostmask, address, port)
+    ok = await core.bot.addbot(bot, hostmask, address, port)
     if ok:
         await respond(f"→ Bot {bot} added!")
     else:
@@ -285,7 +285,7 @@ async def cmd_delbot(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .-bot <bot>")
         return
     parts = arg.split()
-    if await core.user_mgr.delbot(parts[0]) == True:
+    if await core.bot.delbot(parts[0]) == True:
         await respond(f"→ Bot {parts[0]} deleted!")
     else:
         await respond(f"→ Bot {parts[0]} NOT deleted!")
@@ -311,8 +311,29 @@ async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .link <bot>")
         return
     parts = arg.split()
-    bot = parts[0]
-    await respond("Not implemented yet.")  
+    botname = parts[0]
+    try:
+        bot = await core.bot.get(botname)
+        if not bot.address:
+            await respond(f"Please set address on {botname}")
+        if not bot.port:
+            await respond(f"Please set port on {botname}")
+        core.botnet_q.put_nowait({
+            'type': 'link',
+            'botname': botname,
+            'request_id': session_id 
+        })
+        await respond(f"Queued .link {arg} to botnetq (size: {core.botnet_q.qsize()})")
+        time.sleep(2)
+        cmd_data = core.botnet_q.get_nowait()
+        await respond(f"BOTNET RX: {cmd_data}")
+        await respond(f"Initiating link to {botname}...")
+    except ValueError as e:
+        import traceback
+        tb = traceback.format_exc()  # Full stack
+        await respond(f".link {botname} full error:\n{tb}")
+        await respond(f"Error: {type(e).__name__}: {e}")
+        #await respond(f"Bot {botname} not found!") 
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:
@@ -326,7 +347,7 @@ async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #    await respond("Usage: .listusers")
     #    return
     #parts = arg.split()
-    await respond(await core.user_mgr.listusers())                
+    await respond(await core.user.listusers())                
 
 async def cmd_chusercomment(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -675,9 +696,10 @@ COMMANDS = {
     'bots': cmd_bots,
     'link': cmd_link,
     'unlink': cmd_unlink,
+    #'chaddr': cmd_chaddr,
 }
 
-async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx: int, text: str):
+async def handle_partyline_command(config, core_q, irc_q, botnet_q, idx: int, text: str):
     """
     Dispatch partyline commands (dot-commands).
     Called from Partyline.handle_input() in core.py
@@ -694,17 +716,17 @@ async def handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx
     hand = 'console'
     
     if cmd_name in COMMANDS:
-        await COMMANDS[cmd_name](config, core_q, irc_q, botnet_q, party_q, hand, idx, cmd_arg)
+        await COMMANDS[cmd_name](config, core_q, irc_q, botnet_q, hand, idx, cmd_arg)
     else:
-        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"Unknown command: .{cmd_name} (try .help)")
+        await send_partyline(config, core_q, irc_q, botnet_q, idx, f"Unknown command: .{cmd_name} (try .help)")
 
-async def handle_dcc_chat(config, core_q, irc_q, botnet_q, party_q, nick: str, text: str):
+async def handle_dcc_chat(config, core_q, irc_q, botnet_q, nick: str, text: str):
     """Handle DCC CHAT input from IRC users (dispatched from core.py oncommand)."""
     # Pseudo-session for IRC privmsg/DCC relay
     idx = hash(nick) % 10000  # Consistent session ID
     hand = nick  # Use nick as handle (extend with user lookup)
     
     if text.startswith('.'):
-        await handle_partyline_command(config, core_q, irc_q, botnet_q, party_q, idx, text)  # Dot-command
+        await handle_partyline_command(config, core_q, irc_q, botnet_q, idx, text)  # Dot-command
     else:
-        await send_partyline(config, core_q, irc_q, botnet_q, party_q, idx, f"<{nick}> {text}")  # Relay chat
+        await send_partyline(config, core_q, irc_q, botnet_q, idx, f"<{nick}> {text}")  # Relay chat

@@ -24,7 +24,7 @@ class Partyline:
         # Console session (special case - no queue, direct output)
         self.console_session_id = None
         self.console_output_callback = None
-        self.user_mgr = UserManager(self.core.config['db']['path']) 
+        self.user = UserManager(self.core.config['db']['path']) 
         
     def register_console(self, handle: str, output_callback):
         """Register console as partyline session (main process, no multiprocessing)"""
@@ -93,7 +93,7 @@ class Partyline:
         
         #if not is_console:
         #    # Check user flags
-        #    user = await self.user_mgr.get_user(handle)
+        #    user = await self.user.get(handle)
         #    if not user or 'n' not in user.flags:
         #        self.send_to_session(session_id, "Access denied.")
         #        return

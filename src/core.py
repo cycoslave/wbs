@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Dict, Any
 from collections import deque
 
+from . import __version__
 from .db import init_db
-from .user import UserManager
-from .channel import ChannelManager
+from .channel import Channel,ChannelManager
+from .user import User,UserAccess,UserManager
+from .bot import Bot,BotAccess,BotManager
 from .seen import Seen
 from .irc import irc_process_launcher
 from .botnet import botnet_process_launcher
@@ -25,7 +27,6 @@ from .partyline import Partyline
 from .console import Console
 from .session import Session
 from .net import NetListener
-from . import __version__
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -46,7 +47,6 @@ class Core:
         self.core_q = mp.Queue()     # Core
         self.irc_q = mp.Queue()      # IRC
         self.botnet_q = mp.Queue() if self.config['settings']['botnet'] else None
-        self.party_q = mp.Queue()    # Partyline
         
         # Async queues for console (main process only)
         self.command_queue = asyncio.Queue()  # Console -> Core
@@ -58,8 +58,9 @@ class Core:
         self.quit_event = mp.Event()
         
         # Managers
-        self.user_mgr = None
-        self.chan_mgr = None
+        self.user = None
+        self.bot = None
+        self.chan = None
         self.partyline = None
         self.seen = None
         self.net_listener = NetListener(self.core_q)
@@ -82,7 +83,7 @@ class Core:
         # IRC always
         irc_proc = mp.Process(
             target=irc_process_launcher,
-            args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
+            args=(config_path, self.core_q, self.irc_q, self.botnet_q),
             daemon=True, name="IRC"
         )
         irc_proc.start()
@@ -98,7 +99,7 @@ class Core:
         if self.config['settings']['botnet']:
             botnet_proc = mp.Process(
                 target=botnet_process_launcher,
-                args=(config_path, self.core_q, self.irc_q, self.botnet_q, self.party_q),
+                args=(config_path, self.core_q, self.irc_q, self.botnet_q),
                 daemon=True, name="Botnet"
             )
             botnet_proc.start()
@@ -380,7 +381,7 @@ class Core:
         
         # Send quit to children
         quit_msg = {'cmd': 'quit', 'message': message}
-        for q in (self.irc_q, self.party_q):
+        for q in (self.irc_q):
             try:
                 q.put_nowait(quit_msg)
             except:
@@ -400,8 +401,9 @@ class Core:
         await init_db(self.db_path)
         
         # User and seen managers
-        self.user_mgr = UserManager(self.db_path)
-        self.chan_mgr = ChannelManager(self.db_path)
+        self.user = UserManager(self.db_path)
+        self.bot = BotManager(self.db_path)
+        self.chan = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         
         self.partyline = Partyline(self)
@@ -416,12 +418,12 @@ class Core:
         text = event.get('text', '').strip()
         
         # Check authorization via user manager
-        handle = await self.user_mgr.match_user(f"{nick}!*@*")  # Simplified; use full hostmask
+        handle = await self.user.match_user(f"{nick}!*@*")  # Simplified; use full hostmask
         if not handle:
             self.send_cmd('msg', nick, "You are not recognized. Contact bot owner.")
             return
         
-        user = await self.user_mgr.get_user(handle)
+        user = await self.user.get(handle)
         if not user or 'n' not in user.flags:  # Require at least basic flag
             self.send_cmd('msg', nick, "Access denied.")
             return
@@ -442,7 +444,7 @@ class Core:
                 self.dcc_sessions[idx] = {'hand': handle, 'send': lambda msg: self.send_cmd('msg', nick, msg)}
             
             try:
-                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, self.botnet_q, self.party_q, handle, idx, arg)
+                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, self.botnet_q, handle, idx, arg)
             except Exception as e:
                 log.error(f"Command '{cmd}' error: {e}", exc_info=True)
                 self.send_cmd('msg', nick, f"Error executing .{cmd}")
@@ -502,7 +504,7 @@ class Core:
         """IRC connection established: join channels."""
         self.connected = True
         log.info("IRC READY - joining channels..")
-        channels = await self.chan_mgr.getchans()
+        channels = await self.chan.getchans()
         for channel in channels:
             if not None:
                 log.info(f"Joining {channel}..")
