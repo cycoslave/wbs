@@ -323,17 +323,17 @@ async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
             'botname': botname,
             'request_id': session_id 
         })
-        await respond(f"Queued .link {arg} to botnetq (size: {core.botnet_q.qsize()})")
-        time.sleep(2)
-        cmd_data = core.botnet_q.get_nowait()
-        await respond(f"BOTNET RX: {cmd_data}")
+        #await respond(f"Queued .link {arg} to botnetq (size: {core.botnet_q.qsize()})")
+        #time.sleep(2)
+        #cmd_data = core.botnet_q.get_nowait()
+        #await respond(f"BOTNET RX: {cmd_data}")
         await respond(f"Initiating link to {botname}...")
     except ValueError as e:
-        import traceback
-        tb = traceback.format_exc()  # Full stack
-        await respond(f".link {botname} full error:\n{tb}")
-        await respond(f"Error: {type(e).__name__}: {e}")
-        #await respond(f"Bot {botname} not found!") 
+        #import traceback
+        #tb = traceback.format_exc()  # Full stack
+        #await respond(f".link {botname} full error:\n{tb}")
+        #await respond(f"Error: {type(e).__name__}: {e}")
+        await respond(f"Bot {botname} not found!") 
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:

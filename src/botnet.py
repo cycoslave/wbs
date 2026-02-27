@@ -12,6 +12,8 @@ import logging
 import queue
 import threading
 import aiosqlite
+import secrets
+import hashlib
 from typing import Dict, Optional, Any, Literal
 from dataclasses import dataclass
 
@@ -101,66 +103,9 @@ class BotnetManager:
         finally:
             writer.close()
             await writer.wait_closed()
-            if name in self.links:
-                del self.links[name]
+            if name in self.peers:
+                del self.peers[name]
             log.info(f"Peer {name} disconnected")
-    
-    async def handle_incoming(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle incoming peer connection."""
-        peer = writer.get_extra_info('peername')
-        log.info(f"Incoming botnet from {peer}")
-        
-        try:
-            # Read initial BOTLINK
-            data = await asyncio.wait_for(reader.readline(), timeout=30.0)
-            line = data.decode('utf-8', errors='ignore').strip()
-            
-            if not line.startswith('BOTLINK'):
-                log.warning(f"Invalid handshake from {peer}: {line}")
-                writer.close()
-                await writer.wait_closed()
-                return
-            
-            parts = line.split()
-            if len(parts) < 3:
-                writer.close()
-                await writer.wait_closed()
-                return
-            
-            peer_name = parts[1]  
-            log.info(f"Peer handshake: {peer_name} -> {parts[2]}")
-            
-            if peer_name not in self.peers:
-                log.warning(f"Unknown peer {peer_name} from {peer}")
-                writer.close()
-                await writer.wait_closed()
-                return
-            
-            link: BotLink = self.peers[peer_name]
-            
-            if link.password is None:
-                link.password = secrets.token_hex(16)
-                self.db.update_bot_link(peer_name, password=link.password)
-                log.info(f"Generated pw for incoming {peer_name}")
-            
-            response = f"BOTLINK {self.my_handle} {peer_name} 1 :WBS {__version__}\n"
-            writer.write(response.encode())
-            await writer.drain()
-            
-            chal_hash = hashlib.sha256(f"{self.my_handle}:{link.password}:{peer_name}".encode()).hexdigest()
-            await self._safe_send(writer, f"REPLY {chal_hash}\n")
-            
-            self.links[peer_name] = (reader, writer)
-            asyncio.create_task(self.read_peer(peer_name, reader, writer))  # Use create_task for non-blocking
-            
-        except asyncio.TimeoutError:
-            log.warning(f"Handshake timeout from {peer}")
-        except Exception as e:
-            log.error(f"Incoming error from {peer}: {e}")
-        finally:
-            if not writer.is_closing():
-                writer.close()
-                await writer.wait_closed()
         
     async def process_peer_line(self, line: str, from_bot: str, writer: asyncio.StreamWriter):
         """Process message from peer."""
@@ -175,19 +120,20 @@ class BotnetManager:
         cmd = parts[0].upper()
         
         if cmd == 'BOTLINK':
-            peer_nick = parts[1]
-            expected_peer = parts[2]
-            if peer_nick != self.my_handle or expected_peer != from_bot:
+            remote = parts[1].lower()
+            local = parts[2].lower()
+            if local != self.my_handle.lower() or remote != from_bot:
                 log.error(f"Botlink mismatch from {from_bot}: {line}")
+                log.error(f"local: {local}/{self.my_handle.lower()}  remote: {remote}/{from_bot}")
                 writer.close()
                 return
             
             if link.password is None:
                 password = secrets.token_hex(16)
                 link.password = password
-                log.info(f"Generated pw for {from_bot}: {password}")
+                log.info(f"Generated pw for {from_bot}")
             
-            chal_hash = hashlib.sha256(f"{self.my_handle}:{link.password}:{peer_nick}".encode()).hexdigest()
+            chal_hash = hashlib.sha256(f"{self.my_handle}:{link.password}:{remote}".encode()).hexdigest()
             await self._safe_send(writer, f"LINKREPLY {chal_hash}\n")
             return
         
@@ -310,7 +256,7 @@ class BotnetManager:
         """Broadcast chat to all peers."""
         line = f"CHAT:{chan}:{msg}\n"
         tasks = []
-        for name, (_, writer) in self.links.items():
+        for name, (_, writer) in self.peers.items():
             if name != exclude:
                 tasks.append(self._safe_send(writer, line))
         if tasks:
@@ -319,7 +265,7 @@ class BotnetManager:
     async def broadcast_all(self, cmd: Dict):
         """Broadcast command to all peers."""
         msg = f"CMD:{json.dumps(cmd)}\n"
-        tasks = [self._safe_send(w, msg) for _, w in self.links.values()]
+        tasks = [self._safe_send(w, msg) for _, w in self.peers.values()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -327,7 +273,7 @@ class BotnetManager:
         """Broadcast to subnet peers only."""
         msg = f"CMD:{json.dumps(cmd)}\n"
         tasks = []
-        for name, (_, writer) in self.links.items():
+        for name, (_, writer) in self.peers.items():
             peer = self.peers.get(name)
             if peer and peer.subnet_id == self.subnet_id:
                 tasks.append(self._safe_send(writer, msg))
@@ -431,11 +377,8 @@ class BotnetManager:
             
             elif cmd_type == 'unlink':
                 name = cmd_data['name']
-                if name in self.links:
-                    _, writer = self.links[name]
-                    writer.close()
-                    del self.links[name]
                 if name in self.peers:
+                    self.peers[name].writer.close()
                     del self.peers[name]
                 log.info(f"Unlinked from {name}")
         
@@ -449,28 +392,17 @@ class BotnetManager:
             writer.close()
 
 def start_botnet_process(config, core_q, irc_q, botnet_q):
-    """Botnet poller thread."""
     manager = BotnetManager(config, core_q, irc_q, botnet_q)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     manager.loop = loop
     
     def command_poller():
-        """Poll botnet_q → sync execute_command()."""
-        throttle_interval = 0.1
-        last_cmd_time = 0
-        
         while manager.running:
             try:
-                elapsed = time.time() - last_cmd_time
-                if elapsed < throttle_interval:
-                    time.sleep(throttle_interval - elapsed)
-                
                 cmd_data = botnet_q.get_nowait()
                 log.info(f"BOTNET RX: {cmd_data}")
                 manager.execute_command(cmd_data)
-                last_cmd_time = time.time()
-            
             except queue.Empty:
                 time.sleep(0.01)
             except Exception as e:
@@ -479,8 +411,14 @@ def start_botnet_process(config, core_q, irc_q, botnet_q):
     
     poller = threading.Thread(target=command_poller, daemon=True)
     poller.start()
-    
     log.info(f"Botnet started (pid={os.getpid()})")
+    
+    try:
+        loop.run_forever()  # Keep loop alive for runcoroutine_threadsafe
+    finally:
+        server.close()
+        loop.run_until_complete(server.wait_closed())
+        loop.close()
 
 def botnet_process_launcher(config_path, core_q, irc_q, botnet_q):
     """Launcher for Botnet multiprocessing.Process."""
