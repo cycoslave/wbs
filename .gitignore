@@ -1,4 +1,6 @@
 db/*.db
+db/*.db-shm
+db/*.db-wal
 logs/*
 src/__pycache__/*
 !logs/README.md
