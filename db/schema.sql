@@ -158,6 +158,18 @@ CREATE TABLE IF NOT EXISTS runtime (
     expires_at INTEGER DEFAULT 0
 );
 
+-- Ignores
+CREATE TABLE IF NOT EXISTS ignores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hostmask TEXT UNIQUE NOT NULL,
+    flags TEXT DEFAULT '',
+    comment TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    creator TEXT NOT NULL
+);
+
+
+
 -- =====================================================
 -- TRACKING & STATS
 -- =====================================================
@@ -192,6 +204,9 @@ CREATE INDEX IF NOT EXISTS idx_channels_name_subnet ON channels(name, subnet_id)
 -- Runtime
 CREATE INDEX IF NOT EXISTS idx_runtime_key ON runtime(key);
 CREATE INDEX IF NOT EXISTS idx_runtime_expires ON runtime(expires_at);
+
+-- Ignores
+CREATE INDEX IF NOT EXISTS idx_ignores_hostmask ON ignores(hostmask);
 
 -- =====================================================
 -- TRIGGERS - PERFORMANCE & INTEGRITY

@@ -1,6 +1,7 @@
 db/*.db
 db/*.db-shm
 db/*.db-wal
+db/*.bak
 logs/*
 src/__pycache__/*
 !logs/README.md
@@ -8,3 +9,4 @@ src/__pycache__/*
 *.db
 *.pid
 *.log
+*.bak

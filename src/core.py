@@ -11,6 +11,7 @@ import logging
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 from typing import Dict, Any
 from collections import deque
@@ -410,6 +411,7 @@ class Core:
                 if child.is_alive():
                     child.terminate()
                     child.join(timeout=1.0)
+        sys.exit(1)
 
     async def on_command(self, event):
         """

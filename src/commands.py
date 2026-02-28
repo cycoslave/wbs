@@ -4,10 +4,18 @@ Partyline commands for WBS
 """
 
 import time
+import os
+import sys
+import signal
+import platform
+import resource
+import asyncio
+import shutil
 from datetime import datetime, timedelta
 from typing import Optional
 
 from . import __version__
+from .db import get_db
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
@@ -27,17 +35,17 @@ async def cmd_help(core, handle, session_id, arg, respond):
    For admins:
       chattr       backup       status       die
       modules      +user        +ignore      ignores      
-      -user        -ignore      dccstat      restart
+      -user        -ignore      restart      addleaf
       +bot         botattr      chhandle     relay
       +host        -bot         link         chaddr
-      unlink       dccstat      update       channels
+      unlink       update       channels     addhub
       mnote        bots         join         part
       lock         unlock       topiclock    topicunlock
       sdns         swhois       swhowas      links 
       taskset      timers       tasks        botinfo 
       nopass       fixpass      mass         net
       baway        bback        nick         lag 
-      infoleaf     addleaf      addhub       subnet  
+      infoleaf     subnet  
 
 All commands begin with '.', and all else goes to the party line.      
 """
@@ -588,11 +596,25 @@ async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"Bot {botname} not found!") 
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
-    #if not arg:
-    #    await respond("Usage: .listusers")
-    #    return
-    #parts = arg.split()
-    await respond("Not implemented yet.")          
+    if not arg:
+        await respond("Usage: .unlink <bot>")
+        return
+    botname = arg.strip()
+    if botname not in core.botnet.peers:
+        await respond(f"Not linked to {botname}")
+        return
+    
+    link = core.botnet.peers[botname]
+    await respond(f"Unlinking from {botname}...")
+    try:
+        if link.writer:
+            link.writer.close()
+            await link.writer.wait_closed()
+        del core.botnet.peers[botname]
+        link.connected = False
+        await respond(f"Unlinked from {botname} ({link.host}:{link.port}).")
+    except Exception as e:
+        await respond(f"Unlink failed: {str(e)}")
 
 async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:
@@ -790,6 +812,108 @@ async def cmd_delhost(core, handle: str, session_id: int, arg: str, respond):
     else:
         await respond(f"Host not found: {hostmask}")       
 
+async def cmd_status(core, handle: str, session_id: int, arg: str, respond):
+    uptime = time.time() - core.start_time
+    days = int(uptime // 86400)
+    hours = int((uptime % 86400) // 3600)
+    
+    # RSS memory in KB (stdlib resource)
+    mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    users = len(core.partyline.sessions)
+    channels = await core.chan.getchans()
+    
+    await respond(f"I am {core.botname}, running wbs v0.1: {users} users (mem: {mem_kb:.0f}k).")
+    await respond(f"Online for {days} days, {hours:02d}:{int((uptime%3600)//60):02d} "
+                  f"(background) - CPU: --:--.-- - Cache hit: --%")
+    await respond(f"Config file: {core.config_path}")
+    await respond(f"OS: {platform.system()} {platform.release()}")
+    await respond(f"Process ID: {os.getpid()}")
+    #await respond(f"Online as: [{core.botname}!{core.irc_user}@auto.bots]")
+    #await respond(f"Connected to {core.server_host}:{core.server_port}")
+    await respond(f"Active channels: {', '.join(channels) if channels else 'none'}")
+
+async def cmd_backup(core, handle: str, session_id: int, arg: str, respond):
+    await respond("Backing up the channel & user files...")
+    db_path = core.db_path  # "db/wbs.db"
+    config_path = core.config_path    # "config.json"
+    
+    # Backup DB file
+    await respond("Backing up user file...")
+    db_backup = f"{db_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+    shutil.copy2(db_path, db_backup)
+    await respond(f"Database file backed up to {os.path.basename(db_backup)}")
+    
+    # Backup config
+    await respond("Backing up channel file...")
+    config_backup = f"{config_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+    shutil.copy2(config_path, config_backup)
+    await respond(f"Config file backed up to {os.path.basename(config_backup)}")
+    
+    await respond("Backup complete.")
+
+async def cmd_module(core, handle: str, session_id: int, arg: str, respond):
+    await respond("Modules not enabled yet.")
+
+async def cmd_ignores(core, handle: str, session_id: int, arg: str, respond):
+    async with get_db(core.db_path) as db:
+        ignores = await db.execute("SELECT hostmask, flags, comment FROM ignores ORDER BY hostmask")
+        count = 0
+        async for row in ignores:
+            count += 1
+            flags = row['flags'] if row['flags'] else ''
+            comment = row['comment'] or ''
+            await respond(f"{row['hostmask']} {flags}%{comment}")
+        if count == 0:
+            await respond("No ignores.")
+        else:
+            await respond(f"Total ignores: {count}")    
+
+async def cmd_addignore(core, handle: str, arg: str, respond, action: str):
+    parts = arg.split(maxsplit=2)
+    if len(parts) < 1:
+        await respond("Usage: +ignore <hostmask> [%<XyXdXhXm>] [comment]")
+        return
+    
+    hostmask = parts[0].strip()
+    flags = parts[1][1:] if len(parts) > 1 and parts[1].startswith('%') else ''  # %flags
+    comment = parts[2] if len(parts) > 2 else ''
+    
+    async with get_db(core.db_path) as db:
+        try:
+            await db.execute(
+                "INSERT INTO ignores (hostmask, flags, comment, creator) VALUES (?, ?, ?, ?)",
+                (hostmask, flags, comment, handle)
+            )
+            await respond(f"Ignoring {hostmask} {f'%{flags}' if flags else ''}")
+        except Exception:
+            await respond(f"{hostmask} already ignored.")
+
+async def cmd_delignore(core, handle: str, arg: str, respond, action: str):
+    parts = arg.split(maxsplit=2)
+    if len(parts) < 1:
+        await respond("Usage: -ignore <hostmask>")
+        return
+    
+    hostmask = parts[0].strip()
+    flags = parts[1][1:] if len(parts) > 1 and parts[1].startswith('%') else ''  # %flags
+    comment = parts[2] if len(parts) > 2 else ''
+    
+    async with get_db(core.db_path) as db:
+        result = await db.execute("DELETE FROM ignores WHERE hostmask = ?", (hostmask,))
+        if result.rowcount:
+            await respond(f"No longer ignoring {hostmask}")
+        else:
+            await respond(f"Not ignoring {hostmask}")                
+
+async def cmd_restart(core, handle: str, session_id: int, arg: str, respond):
+    if handle != core.admin_name:
+        await respond("Access denied.")
+        return
+    
+    await respond("Restarting bot...")
+    await core.shutdown("Restart via partyline")
+    sys.exit(0)
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -812,6 +936,9 @@ COMMANDS = {
     'act': cmd_act,
     'quit': cmd_quit,
     'die': cmd_quit,
+    'status': cmd_status,
+    'module': cmd_module,
+    'restart': cmd_restart,
     # user
     '+user': cmd_adduser,
     '-user': cmd_deluser,
@@ -840,4 +967,8 @@ COMMANDS = {
     'link': cmd_link,
     'unlink': cmd_unlink,
     #'chaddr': cmd_chaddr,
+    # ignores    
+    '+ignore': cmd_addignore,
+    '-ignore': cmd_delignore,
+    'ignores': cmd_ignores,
 }
