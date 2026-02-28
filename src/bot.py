@@ -187,7 +187,7 @@ class BotManager:
         return data
 
     async def save(self, bot: Bot):
-        data = to_dict(bot)
+        data = self.to_dict(bot)
         async with get_db(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO bots (handle, password, hostmasks, address, port, 

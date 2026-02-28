@@ -267,7 +267,7 @@ See also: infoleaf, addleaf
 
     else:
         help_text = f"""
-ERROR: Unknown command: {text}
+ERROR: Unknown command: {cmd}
 """
 
     for line in help_text.split('\n'):
@@ -605,7 +605,7 @@ async def cmd_chusercomment(core, handle: str, session_id: int, arg: str, respon
     if not arg:
         await respond("Usage: .chusercomment <user> <comment>")
         return
-    #parts = arg.split()
+    parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
     await respond(f"→ JOIN {parts[0]}")
 
@@ -613,7 +613,7 @@ async def cmd_addaccess(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .addaccess [options] <user> <access>")
         return
-    #parts = arg.split()
+    parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
     await respond(f"→ JOIN {parts[0]}")
 
@@ -621,7 +621,7 @@ async def cmd_delaccess(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .delaccess [options] <user> <access>")
         return
-    #parts = arg.split()
+    parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
     await respond(f"→ JOIN {parts[0]}")
 
@@ -629,7 +629,7 @@ async def cmd_lockuser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .lockuser <user>")
         return
-    #parts = arg.split()
+    parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
     await respond(f"→ JOIN {parts[0]}")
 
@@ -637,7 +637,7 @@ async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .unlockuser <user>")
         return
-    #parts = arg.split()
+    parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
     await respond(f"→ JOIN {parts[0]}")                         
 
