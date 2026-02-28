@@ -41,12 +41,11 @@ class EventType:
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
     """IRC bot instance - pure dispatcher, no business logic"""
     
-    def __init__(self, config, core_q, irc_q, botnet_q):
+    def __init__(self, config, core_q, irc_q):
         self.config = config
         self.chan = ChannelManager(self.config['db']['path'])
         self.core_q = core_q
         self.irc_q = irc_q
-        self.botnet_q = botnet_q
         self.config_id = config.get('id', 1)
         self.whois_trackers = {}  # Track pending WHOIS requests
         
@@ -303,11 +302,11 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             log.error(f"Command failed {cmd_data}: {e}")
 
 
-def start_irc_process(config, core_q, irc_q, botnet_q):
+def start_irc_process(config, core_q, irc_q):
     """
     Entry point for IRC process
     """
-    irc = WbsIrcBot(config, core_q, irc_q, botnet_q)
+    irc = WbsIrcBot(config, core_q, irc_q)
     
     def command_poller():
         """Daemon thread: poll cmd_queue and execute commands"""
@@ -339,7 +338,7 @@ def start_irc_process(config, core_q, irc_q, botnet_q):
     log.info(f"IRC process started. (pid={os.getpid()})")
     irc.start()
 
-def irc_process_launcher(config_path, core_q, irc_q, botnet_q):
+def irc_process_launcher(config_path, core_q, irc_q):
     """Launcher for IRC multiprocessing.Process."""
     config = json.load(open(config_path))
-    asyncio.run(start_irc_process(config, core_q, irc_q, botnet_q))
+    asyncio.run(start_irc_process(config, core_q, irc_q))

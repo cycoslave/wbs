@@ -30,15 +30,15 @@ class NetListener:
             data = await asyncio.wait_for(reader.readline(), 30.0)
             line = data.decode('utf-8', errors='ignore').strip()
 
-            log.info(f"RAW firstline: {repr(data)}")
-            log.info(f"LINE firstline: '{line}' (len={len(line)})")
+            #log.info(f"RAW firstline: {repr(data)}")
+            #log.info(f"LINE firstline: '{line}' (len={len(line)})")
             
             if line.startswith('BOTLINK'):
                 # Botnet link → DUP FD to core for full control
                 parts = line.split()
                 if len(parts) >= 3:
-                    remotehandle = parts[1]
-                    log.info(f"Botlink from {remotehandle}")
+                    remote_handle = parts[1]
+                    log.info(f"Botlink from {remote_handle}")
                     
                     # DUP FD → core handles link entirely
                     orig_sock = writer.transport.get_extra_info('socket')
@@ -46,10 +46,10 @@ class NetListener:
                     dup_fd = os.dup(sockfd)
                     
                     self.core_q.put_nowait({
-                        'type': 'BOTLINK_CONNECT', 
-                        'handle': remotehandle,
+                        'type': 'BOT_CONNECT', 
+                        'handle': remote_handle,
                         'peer': peer,
-                        'firstline': line,
+                        'data': line,
                         'sockfd': dup_fd
                     })
                 else:

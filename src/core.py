@@ -16,17 +16,18 @@ from collections import deque
 
 from . import __version__
 from .db import init_db
-from .channel import Channel,ChannelManager
-from .user import User,UserAccess,UserManager
-from .bot import Bot,BotAccess,BotManager
+from .net import NetListener
+from .channel import ChannelManager
+from .user import UserManager
+from .bot import BotManager
+from .botnet import BotnetManager
+from .commands import COMMANDS
+from .console import Console
+from .partyline import Partyline
+from .session import Session
 from .seen import Seen
 from .irc import irc_process_launcher
-from .botnet import botnet_process_launcher
-from .commands import COMMANDS
-from .partyline import Partyline
-from .console import Console
-from .session import Session
-from .net import NetListener
+
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -42,28 +43,20 @@ class Core:
         if db_path_override:
             self.config['db']['path'] = db_path_override
         self.db_path = self.config['db']['path'] or BASE_DIR / "db/wbs.db"
-        
-        # Queues (Core owns all communication)
-        self.core_q = mp.Queue()     # Core
-        self.irc_q = mp.Queue()      # IRC
-        self.botnet_q = mp.Queue() if self.config['settings']['botnet'] else None
-        
-        # Async queues for console (main process only)
-        self.command_queue = asyncio.Queue()  # Console -> Core
-        self.console_queue = asyncio.Queue()  # Core -> Console
-        
-        # Event buffer (thread -> async)
+        self.core_q = mp.Queue()
+        self.irc_q = mp.Queue()
         self._event_buffer = deque()
         self._buffer_lock = threading.Lock()
         self.quit_event = mp.Event()
         
         # Managers
-        self.user = None
-        self.bot = None
-        self.chan = None
-        self.partyline = None
-        self.seen = None
         self.net_listener = NetListener(self.core_q)
+        self.user = UserManager(self.db_path)
+        self.bot = BotManager(self.db_path)
+        self.botnet = BotnetManager(self)
+        self.chan = ChannelManager(self.db_path)
+        self.seen = Seen(self.db_path)
+        self.partyline = Partyline(self)
 
         # Runtime variables
         self.children = []
@@ -75,36 +68,25 @@ class Core:
         self.party_sessions = {}
         self.bot_sessions = {} 
         self.foreground = False
+        log.info(f"Core process started. (pid={os.getpid()})")
 
-    def spawn_children(self, foreground=False):
+    async def _async_init(self):
+        """One-time async initialization."""
+        # Initialize database schema
+        await init_db(self.db_path)        
+
+    def spawn_children(self):
         """Spawn daemon children - skip partyline in foreground mode."""
         config_path = self.config_path
         
         # IRC always
         irc_proc = mp.Process(
             target=irc_process_launcher,
-            args=(config_path, self.core_q, self.irc_q, self.botnet_q),
+            args=(config_path, self.core_q, self.irc_q),
             daemon=True, name="IRC"
         )
         irc_proc.start()
         self.children.append(irc_proc)
-        
-        # Partyline ONLY if not foreground
-        if not foreground:
-            log.info("Background mode")
-        else:
-            log.info("Foreground mode: Using console.")
-        
-        # Botnet if enabled
-        if self.config['settings']['botnet']:
-            botnet_proc = mp.Process(
-                target=botnet_process_launcher,
-                args=(config_path, self.core_q, self.irc_q, self.botnet_q),
-                daemon=True, name="Botnet"
-            )
-            botnet_proc.start()
-            self.children.append(botnet_proc)
-        
         log.info(f"Spawned: {[p.name for p in self.children]}")
 
     async def run(self, foreground=False):
@@ -116,14 +98,16 @@ class Core:
         if hasattr(self, 'net_listener'):
             asyncio.create_task(self.net_listener.listen(port=self.config['settings']['listen_port']))
 
-        # Register console with partyline if foreground
         if foreground:
+            log.info("Foreground mode: Using console.")
             self.console_session_id = self.partyline.register_console(
                 handle='console',
                 output_callback=self._console_output
             )
-        
-        self.spawn_children(foreground=foreground)
+        else:
+            log.info("Background mode")
+
+        self.spawn_children()
         
         # Start event poller thread
         poller_thread = threading.Thread(target=self.event_poller, daemon=True)
@@ -153,8 +137,9 @@ class Core:
             'PARTYLINE_INPUT': self.on_partyline_input,
             'PARTYLINE_CONNECT': self.on_partyline_connect,
             'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
-            'BOTLINK_CONNECT': self.on_bot_connect,
+            'BOT_CONNECT': self.on_bot_connect,
             'BOT_DISCONNECT': self.on_bot_disconnect,
+            #'BOT_COMMAND': self.on_bot_cmd,
             'COMMAND': self.on_command,
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
@@ -199,11 +184,11 @@ class Core:
             reader, writer = await asyncio.open_connection(sock=dup_sock)
             
             # Generate session ID
-            bot_id = len(self.bot_sessions) + 10000  # Offset to avoid collision
+            bot_id = len(self.bot_sessions)
             
             response_q = mp.Queue()
             
-            # Create bot session (same as telnet, just different type)
+            # Create bot session
             bot_session = Session(
                 session_id=bot_id,
                 session_type='bot',
@@ -217,12 +202,19 @@ class Core:
             
             self.bot_sessions[bot_id] = bot_session
             
+            await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
             # Send handshake response
-            await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS {__version__}")
-            asyncio.create_task(bot_session.run())
+            #await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS {__version__}")
+            #self.botnet_q.put_nowait({
+            #    'type': 'botlink',
+            #    'botname': bot_name,
+            #    'line': event['line'],
+            #    'request_id': request_id,
+            #})
+            #asyncio.create_task(bot_session.run())
             
             log.info(f"Bot session {bot_id} created for {bot_name}")
-            self.partyline.broadcast(f"*** {bot_name} linked to botnet")
+            #self.partyline.broadcast(f"*** {bot_name} linked to botnet")
             
         except Exception as e:
             log.error(f"Bot session {bot_name} failed: {e}")
@@ -232,14 +224,38 @@ class Core:
                 pass
 
     async def on_bot_disconnect(self, event: dict):
-        """Handle bot disconnection."""
-        session_id = event['session_id']
-        bot_name = event['handle']
+        """Handle bot disconnection"""
+        handle = event['handle']
+        session_id = event.get('session_id', handle)
         
+        if handle in self.botnet.peers:
+            link = self.botnet.peers.pop(handle)
+            if not link.writer.is_closing():
+                link.writer.close()
+                await link.writer.wait_closed()
         if session_id in self.bot_sessions:
             del self.bot_sessions[session_id]
-            log.info(f"Bot {bot_name} disconnected")
-            self.partyline.broadcast(f"*** {bot_name} unlinked")
+        
+        try:
+            await self.bot.seen(handle, last_seen=datetime.now())
+        except Exception as e:
+            log.error(f"DB status {handle}: {e}")
+        
+        log.info(f"Bot {handle} unlinked.")
+        self.party_q.put_nowait({
+            'type': 'botnet_status',
+            'text': f"*** {handle} unlinked",
+            'bots': [{'name': h, 'online': h in self.botnet.peers} for h in await self.bot.list()]
+        })
+        if hasattr(self, 'partyline'):
+            self.partyline.broadcast(f"*** {handle} unlinked")
+
+    async def on_bot_cmd(self, event: dict):
+        """Handle bot disconnection"""
+        handle = event['handle']
+        if handle in self.botnet.peers:
+            link = self.botnet.peers.pop(handle)
+            await self.botnet.process_incoming(handle, event['data'], link.reader, link.writer)     
 
     async def on_partyline_connect(self, event: dict):
         """Recreate socket from DUP'd FD → reader/writer."""
@@ -379,13 +395,12 @@ class Core:
         self.quit_event.set()
         log.info(f"Shutdown: {message}")
         
-        # Send quit to children
+        # Send quit to irc child
         quit_msg = {'cmd': 'quit', 'message': message}
-        for q in (self.irc_q):
-            try:
-                q.put_nowait(quit_msg)
-            except:
-                pass
+        try:
+            self.irc_q.put_nowait(quit_msg)
+        except:
+            pass
 
         # Wait for children
         for child in self.children:
@@ -394,20 +409,6 @@ class Core:
                 if child.is_alive():
                     child.terminate()
                     child.join(timeout=1.0)
-
-    async def _async_init(self):
-        """One-time async initialization."""
-        # Initialize database schema
-        await init_db(self.db_path)
-        
-        # User and seen managers
-        self.user = UserManager(self.db_path)
-        self.bot = BotManager(self.db_path)
-        self.chan = ChannelManager(self.db_path)
-        self.seen = Seen(self.db_path)
-        
-        self.partyline = Partyline(self)
-        log.info(f"Core process started. (pid={os.getpid()})")
 
     async def on_command(self, event):
         """
@@ -444,7 +445,7 @@ class Core:
                 self.dcc_sessions[idx] = {'hand': handle, 'send': lambda msg: self.send_cmd('msg', nick, msg)}
             
             try:
-                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, self.botnet_q, handle, idx, arg)
+                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, handle, idx, arg)
             except Exception as e:
                 log.error(f"Command '{cmd}' error: {e}", exc_info=True)
                 self.send_cmd('msg', nick, f"Error executing .{cmd}")

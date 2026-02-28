@@ -144,7 +144,7 @@ class BotManager:
     async def get(self, handle: str) -> Bot:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT handle, hostmasks, address, port FROM bots WHERE handle=?", (handle,)
+                "SELECT handle, hostmasks, address, port, password FROM bots WHERE handle=?", (handle,)
             ) as cursor:
                 row = await cursor.fetchone()
                 if not row:
@@ -162,8 +162,23 @@ class BotManager:
                     handle=row[0],
                     hostmasks=json.dumps(hostmasks_parsed),  # Always valid JSON array
                     address=row[2],
-                    port=row[3]
+                    port=row[3],
+                    password=row[4]
                 )
+
+    async def chpass(self, name: str, password: str):
+        """Update botlink password in database."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "UPDATE bots SET password = ? WHERE handle = ?",
+                    (password, name)
+                )
+                await db.commit()
+                log.info(f"Updated password for botlink {name}")
+                
+        except Exception as e:
+            log.error(f"Failed to update botlink {name}: {e}")
 
     def to_dict(self, bot: Bot) -> dict:
         """Convert Bot to dict for DB operations."""

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS user_access (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
+    last_seen TIMESTAMP DEFAULT NULL,
     
     PRIMARY KEY(handle, channel),
     FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,

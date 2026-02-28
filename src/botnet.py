@@ -28,33 +28,30 @@ class BotLink:
     name: str
     host: str
     port: int
-    reader: asyncio.StreamReader
-    writer: asyncio.StreamWriter
+    reader: Optional[asyncio.StreamReader] = None
+    writer: Optional[asyncio.StreamWriter] = None
     subnet_id: Optional[int] = None
     password: Optional[str] = None
+    temp_partial: Optional[str] = None  # For key exchange
     share_level: str = 'subnet'
     role: Literal['hub', 'backup', 'leaf', 'none'] = 'none'
     authed: bool = False
     connected: bool = False
 
-
 class BotnetManager:
     """Manages botnet peer connections and routing."""
     
-    def __init__(self, config, core_q, irc_q, botnet_q):
-        self.config = config
-        self.db_path = config['db']['path']
-        self.core_q = core_q      # Events to core
-        self.irc_q = irc_q        #        to IRC
-        self.botnet_q = botnet_q  #        to botnet
+    def __init__(self, core):
+        self.core = core
+        self.db_path = self.core.db_path
+        self.config = self.core.config
+        self.irc_q = self.core.irc_q
         self.bot = BotManager(self.db_path)
-        
-        # Peer connections: {name: (reader, writer)}
         self.peers: Dict[BotLink] = {}
         
         # Settings
-        self.subnet_id = config.get('botnet', {}).get('subnet_id', 1)
-        self.my_handle = config.get('bot', {}).get('nick', 'WBS')
+        self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
+        self.my_handle = self.config.get('bot', {}).get('nick', 'WBS')
         self.running = True
         self.loop = None
         
@@ -62,120 +59,188 @@ class BotnetManager:
         """Establish outgoing connection to peer."""
         try:
             bot = await self.bot.get(handle)
+            
+            # Connect first
+            reader, writer = await asyncio.open_connection(bot.address, bot.port)
+            
+            # Create link and assign streams
+            link = BotLink(
+                name=handle,
+                host=bot.address,
+                port=bot.port
+            )
+            link.reader = reader
+            link.writer = writer
+            link.subnet_id = bot.subnet_id
+            link.password = bot.password
+            
+            log.info(f"password: {link.password}")
 
-            host = bot.address
-            port = bot.port
-            if not host or not port:
-                raise ValueError(f"Bot {handle} missing address/port")
-
-            reader, writer = await asyncio.open_connection(host, port)
-            handshake = f"BOTLINK {self.my_handle} {handle} 1 :WBS {__version__}\n"
+            # If no password, generate partial key for exchange
+            if link.password is None:
+                link.temp_partial = secrets.token_hex(16)
+                handshake = f"BOTLINK {self.my_handle} {handle} 1 WBS {__version__} {link.temp_partial}\n"
+            else:
+                handshake = f"BOTLINK {self.my_handle} {handle} 1 WBS {__version__}\n"
+            
             writer.write(handshake.encode())
             await writer.drain()
-
-            link = BotLink(name=handle, host=host, port=port, reader=reader, writer=writer)
+            
             self.peers[handle] = link
-            log.info(f"Connected to peer: {handle} ({host}:{port})")
-
             asyncio.create_task(self.read_peer(handle, reader, writer))
-
+            log.info(f"Connected to peer {handle} at {bot.address}:{bot.port}")
+            
         except Exception as e:
             log.error(f"Failed to connect to {handle}: {e}")
-    
-    async def read_peer(self, name: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Read and process messages from peer."""
-        buffer = bytearray()
+
+    async def read_peer(self, handle: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Continuously read messages from a peer connection."""
         try:
             while self.running:
-                data = await reader.read(4096)
-                if not data:
+                line = await reader.readline()
+                if not line:
+                    log.info(f"Connection closed by {handle}")
                     break
                 
-                buffer.extend(data)
-                while b'\n' in buffer:
-                    line, buffer = buffer.split(b'\n', 1)
-                    line_str = line.decode('utf-8', errors='ignore').strip()
-                    if line_str:
-                        await self.process_peer_line(line_str, name, writer)
-                        
+                decoded = line.decode().strip()
+                if decoded:
+                    await self.process_incoming(handle, decoded, reader, writer)
+                    
+        except asyncio.CancelledError:
+            log.info(f"Read task cancelled for {handle}")
         except Exception as e:
-            log.error(f"Peer {name} read error: {e}")
+            log.error(f"Read error from {handle}: {e}")
         finally:
-            writer.close()
-            await writer.wait_closed()
-            if name in self.peers:
-                del self.peers[name]
-            log.info(f"Peer {name} disconnected")
-        
-    async def process_peer_line(self, line: str, from_bot: str, writer: asyncio.StreamWriter):
+            # Clean up on disconnect
+            if handle.lower() in self.peers:
+                del self.peers[handle.lower()]
+            if not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
+            log.info(f"Peer {handle} disconnected")
+
+    async def process_incoming(self, from_bot: str, line: str, reader, writer):
         """Process message from peer."""
-        
-        if from_bot not in self.peers:
-            log.error(f"Unknown peer {from_bot}")
-            return
-        
-        link: BotLink = self.peers[from_bot]
-        
         parts = line.split()
         cmd = parts[0].upper()
+
+        log.info(f"Processing from {from_bot}: {line[:100]}")
         
-        if cmd == 'BOTLINK':
-            remote = parts[1].lower()
-            local = parts[2].lower()
-            if local != self.my_handle.lower() or remote != from_bot:
-                log.error(f"Botlink mismatch from {from_bot}: {line}")
-                log.error(f"local: {local}/{self.my_handle.lower()}  remote: {remote}/{from_bot}")
+        if cmd == "BOTLINK":
+            # Incoming connection request
+            if from_bot not in self.peers:
+                bot = await self.bot.get(from_bot.lower())
+                link = BotLink(
+                    name=from_bot,
+                    host=bot.address,
+                    port=bot.port,
+                    writer=writer,
+                    reader=reader
+                )
+                link.subnet_id = bot.subnet_id
+                link.password = bot.password
+                self.peers[from_bot.lower()] = link
+            else:
+                link = self.peers[from_bot.lower()]
+
+            log.info(f"password: {link.password}")
+
+            remote = parts[1]
+            local = parts[2]
+            
+            if local.lower() != self.my_handle.lower() or remote.lower() != from_bot.lower():
+                log.error(f"Botlink mismatch from {from_bot}")
+                log.error(f"local {self.my_handle.lower()}/{local}  remote {from_bot}/{remote}")
                 writer.close()
                 return
             
             if link.password is None:
-                password = secrets.token_hex(16)
-                link.password = password
-                log.info(f"Generated pw for {from_bot}")
-            
-            chal_hash = hashlib.sha256(f"{self.my_handle}:{link.password}:{remote}".encode()).hexdigest()
-            await self._safe_send(writer, f"LINKREPLY {chal_hash}\n")
+                if len(parts) > 5:  
+                    their_partial = parts[6]
+                    our_partial = secrets.token_hex(16)
+                    log.info(f"remote {their_partial} - local {our_partial}")
+
+                    shared_password = hashlib.sha256(f"{their_partial}{our_partial}".encode()).hexdigest()
+                    link.password = shared_password
+                    log.info(f"shared pass: {shared_password}")
+                    log.info(f"Generated shared password with {from_bot}")
+                    await self.bot.chpass(from_bot.lower(), password=shared_password)
+                    ack = f"LINKACK {self.my_handle} {remote} 1 WBS {__version__} {our_partial}\n"
+                    log.info(f"Sending {ack}")
+                    await self._safe_send(writer, ack)
+                    asyncio.create_task(self.read_peer(from_bot, reader, writer))
+                else:
+                    log.error(f"No password configured for {from_bot} and no key exchange offered")
+                    writer.close()
+                    return
+            else:
+                # Password exists, ACKAUTH
+                await self._safe_send(writer, f"LINKACK {self.my_handle} {remote} 1 WBS {__version__}\n")
+                asyncio.create_task(self.read_peer(from_bot, reader, writer))
             return
         
-        elif cmd == 'LINKREPLY':
-            expected_hash = hashlib.sha256(f"{from_bot}:{link.password}:{self.my_handle}".encode()).hexdigest()
-            if len(parts) < 2 or parts[1] != expected_hash:
+        if from_bot.lower() not in self.peers:
+            log.error(f"Unknown peer {from_bot}")
+            return
+        
+        link = self.peers[from_bot.lower()]
+
+        if cmd == "LINKACK":
+            if link.password is None:
+                if len(parts) > 5:
+                    their_partial = parts[6]
+                    our_partial = link.temp_partial
+                    log.info(f"remote {their_partial} - local {our_partial}")
+
+                    shared_password = hashlib.sha256(f"{our_partial}{their_partial}".encode()).hexdigest()
+                    link.password = shared_password
+                    log.info(f"shared pass: {shared_password}")
+                    
+                    log.info(f"Generated shared password with {from_bot}")
+                    await self.bot.chpass(from_bot.lower(), password=shared_password)
+                    log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
+                    chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                    challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
+                    log.info(f"Sending authentication token {challenge}")
+                    await self._safe_send(writer, challenge)
+                else:
+                    log.error(f"Unknown LINKACK from {from_bot}")
+            else:
+                log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
+                chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
+                log.info(f"Sending authentication token {challenge}")
+                await self._safe_send(writer, challenge)
+            return
+        
+        elif cmd == "LINKAUTH":
+            # Validate authentication
+            log.info(f"auth string: {parts[1]}{link.password}{self.my_handle}")
+            expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
+            
+            log.info(f"expected: {expectedhash} - got: {parts[2]}")
+            if len(parts) < 2 or parts[2] != expectedhash:
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
                 return
             
             link.authed = True
             log.info(f"Auth success: {from_bot}")
-            await self._safe_send(writer, f"LINK {self.my_handle} :WBS {__version__}\n")
+            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet")
+            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
+            return
+        
+        elif cmd == "LINKREADY":
+            # Link established
+            link.authed = True
+            log.info(f"Link established with {from_bot}")
+            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet")
             return
         
         # BLOCK UNAUTHED
         if not link.authed:
             log.warning(f"Unauthed from {from_bot}: {line[:50]}")
             return
-        
-        if line.startswith('.'):
-            # Bot command - route to botcmds
-            cmd_parts = line[1:].split(maxsplit=1)
-            cmd_name = cmd_parts[0].lower()
-            args = cmd_parts[1] if len(cmd_parts) > 1 else ''
-            
-            from .botcmds import BOTCMDS
-            
-            if cmd_name in BOTCMDS:
-                async def respond(msg: str):
-                    """Send response back to requesting bot"""
-                    await self._safe_send(writer, f"RESPONSE:{msg}\n")
-                
-                try:
-                    await BOTCMDS[cmd_name](self, from_bot, args, respond)
-                except Exception as e:
-                    log.error(f"Bot command '{cmd_name}' error: {e}")
-                    await respond(f"Error executing .{cmd_name}")
-            else:
-                # Unknown command - maybe forward to core
-                log.warning(f"Unknown bot command from {from_bot}: {line}")
-                await respond(f"Unknown command: {cmd_name}")
         
         elif line.startswith('CMD:'):
             # JSON command (existing logic)
@@ -193,18 +258,6 @@ class BotnetManager:
             #    'from': from_bot,
             #    'text': msg
             #})
-        
-        elif line.startswith('CHAT:'):
-            # Chat message (existing logic)
-            parts = line.split(':', 2)
-            if len(parts) == 3:
-                chan = int(parts[1])
-                msg = parts[2]
-                #self.party_q.put_nowait({
-                #    'type': 'botnet_chat',
-                #    'channel': chan,
-                #    'text': f"<{from_bot}> {msg}"
-                #})
         
         elif line.startswith('SHAREUSERS:'):
             await self.handle_share_users(line[11:], from_bot)
@@ -239,12 +292,13 @@ class BotnetManager:
         
         if target in ('me', self.my_handle):
             # Local execution
-            self.core_q.put_nowait({
-                'type': 'COMMAND',
-                'text': f"{cmd['cmd']} {cmd.get('args', '')}",
-                'nick': from_bot,
-                'source': 'botnet'
-            })
+            #self.core_q.put_nowait({
+            #    'type': 'COMMAND',
+            #    'text': f"{cmd['cmd']} {cmd.get('args', '')}",
+            #    'nick': from_bot,
+            #    'source': 'botnet'
+            #})
+            pass
         
         elif target == 'subnet':
             await self.broadcast_subnet(cmd)
@@ -344,7 +398,7 @@ class BotnetManager:
             log.error(f"Handle share channels error: {e}")
     
     def execute_command(self, cmd_data: dict):
-        """Execute command from botnet_q (called by poller thread)."""
+        """Execute command (called by poller thread)."""
         if not self.loop:
             return
         
@@ -381,7 +435,12 @@ class BotnetManager:
                     self.peers[name].writer.close()
                     del self.peers[name]
                 log.info(f"Unlinked from {name}")
-        
+
+            elif cmd_type == 'botlink':                
+                parts = cmd_data['line'].split()
+                from_bot = parts[1]
+                self.process_peer_line(cmd_data['line'], from_bot)
+
         except Exception as e:
             log.error(f"Execute command failed: {e}")
     
@@ -390,37 +449,3 @@ class BotnetManager:
         self.running = False
         for _, writer in self.peers.values():
             writer.close()
-
-def start_botnet_process(config, core_q, irc_q, botnet_q):
-    manager = BotnetManager(config, core_q, irc_q, botnet_q)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    manager.loop = loop
-    
-    def command_poller():
-        while manager.running:
-            try:
-                cmd_data = botnet_q.get_nowait()
-                log.info(f"BOTNET RX: {cmd_data}")
-                manager.execute_command(cmd_data)
-            except queue.Empty:
-                time.sleep(0.01)
-            except Exception as e:
-                log.error(f"Botnet poller: {e}")
-                time.sleep(0.1)
-    
-    poller = threading.Thread(target=command_poller, daemon=True)
-    poller.start()
-    log.info(f"Botnet started (pid={os.getpid()})")
-    
-    try:
-        loop.run_forever()  # Keep loop alive for runcoroutine_threadsafe
-    finally:
-        server.close()
-        loop.run_until_complete(server.wait_closed())
-        loop.close()
-
-def botnet_process_launcher(config_path, core_q, irc_q, botnet_q):
-    """Launcher for Botnet multiprocessing.Process."""
-    config = json.load(open(config_path))
-    start_botnet_process(config, core_q, irc_q, botnet_q)

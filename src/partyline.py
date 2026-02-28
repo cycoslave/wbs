@@ -15,7 +15,6 @@ class Partyline:
     def __init__(self, core):
         self.core = core
         self.irc_q = self.core.irc_q
-        self.botnet_q = self.core.botnet_q
         
         # Session registry: session_id -> session info
         self.sessions = {}  # {session_id: {'type': 'console/telnet/dcc', 'handle': str, 'queue': Queue}}
@@ -75,12 +74,12 @@ class Partyline:
             # Broadcast chat to all local sessions (excl sender)
             self.broadcast(f"{handle}: {text}", exclude_session=session_id)
             # Forward to botnet if enabled
-            if self.botnet_q:
-                self.botnet_q.put_nowait({
-                    'type': 'PARTYLINECHAT',
-                    'from': handle,
-                    'text': text
-                })
+            #if self.botnet_q:
+            #    self.botnet_q.put_nowait({
+            #        'type': 'PARTYLINECHAT',
+            #        'from': handle,
+            #        'text': text
+            #    })
     
     async def _handle_command(self, session_id: int, handle: str, text: str):
         """Handle partyline command"""
