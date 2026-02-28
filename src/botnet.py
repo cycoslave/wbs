@@ -31,6 +31,7 @@ class BotLink:
     reader: Optional[asyncio.StreamReader] = None
     writer: Optional[asyncio.StreamWriter] = None
     subnet_id: Optional[int] = None
+    session_id: Optional[int] = None
     password: Optional[str] = None
     temp_partial: Optional[str] = None  # For key exchange
     share_level: str = 'subnet'
@@ -89,6 +90,7 @@ class BotnetManager:
             self.peers[handle] = link
             asyncio.create_task(self.read_peer(handle, reader, writer))
             log.info(f"Connected to peer {handle} at {bot.address}:{bot.port}")
+            link.connected = True
             
         except Exception as e:
             log.error(f"Failed to connect to {handle}: {e}")
@@ -140,6 +142,7 @@ class BotnetManager:
                 link.subnet_id = bot.subnet_id
                 link.password = bot.password
                 self.peers[from_bot.lower()] = link
+                link.connected = True
             else:
                 link = self.peers[from_bot.lower()]
 
@@ -224,17 +227,17 @@ class BotnetManager:
                 writer.close()
                 return
             
+            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
             log.info(f"Auth success: {from_bot}")
-            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet")
             await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
             return
         
         elif cmd == "LINKREADY":
             # Link established
+            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
             log.info(f"Link established with {from_bot}")
-            self.core.partyline.broadcast(f"*** {from_bot} linked to botnet")
             return
         
         # BLOCK UNAUTHED
@@ -242,6 +245,14 @@ class BotnetManager:
             log.warning(f"Unauthed from {from_bot}: {line[:50]}")
             return
         
+        elif cmd == "CHAT":
+            # Format: CHAT <from_bot> <message>
+            # parts[0] = "CHAT", parts[1] = from_bot, parts[2:] = message
+            from_bot_name = parts[1]
+            nick = parts[2]
+            message = ' '.join(parts[3:])
+            self.core.partyline.broadcast(f"<{from_bot_name}@{nick.rstrip(':')}> {message}", True)
+
         elif line.startswith('CMD:'):
             # JSON command (existing logic)
             try:
@@ -266,8 +277,7 @@ class BotnetManager:
             await self.handle_share_channels(line[11:], from_bot)
         
         else:
-            # Regular chat - broadcast
-            await self.broadcast_chat(f"<{from_bot}> {line}", 0, exclude=from_bot)
+            log.error(f"Invalid command {cmd} from {from_bot}")
     
     def parse_command(self, line: str) -> Dict[str, Any]:
         """Parse .command [target=X] args"""
@@ -306,13 +316,13 @@ class BotnetManager:
         elif target == 'botnet':
             await self.broadcast_all(cmd)
         
-    async def broadcast_chat(self, msg: str, chan: int, exclude: Optional[str] = None):
+    async def broadcast_chat(self, from_bot: str, msg: str, exclude: Optional[str] = None):
         """Broadcast chat to all peers."""
-        line = f"CHAT:{chan}:{msg}\n"
+        line = f"CHAT {from_bot} {msg}\n"
         tasks = []
-        for name, (_, writer) in self.peers.items():
-            if name != exclude:
-                tasks.append(self._safe_send(writer, line))
+        for name,link in self.peers.items():
+            if link.name != exclude and link.authed and link.connected and link.writer:
+                tasks.append(self._safe_send(link.writer, line))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
     

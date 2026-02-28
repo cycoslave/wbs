@@ -115,8 +115,12 @@ class Partyline:
         """Commands call this to send responses back to session"""
         self.send_to_session(session_id, message)
     
-    def broadcast(self, message: str, exclude_session: Optional[int] = None):
+    def broadcast(self, message: str, local_only=False, exclude_session: Optional[int] = None):
         """Broadcast to all sessions (console callback, remote queues)."""
+        if not local_only:
+            asyncio.create_task(
+                self.core.botnet.broadcast_chat(self.core.botname, message, exclude=self.core.botname)
+            )
         for session_id, session in self.sessions.items():
             if session_id == exclude_session:
                 continue
