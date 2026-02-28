@@ -75,7 +75,7 @@ class BotnetManager:
             link.subnet_id = bot.subnet_id
             link.password = bot.password
             
-            log.info(f"password: {link.password}")
+            #log.info(f"password: {link.password}")
 
             # If no password, generate partial key for exchange
             if link.password is None:
@@ -126,7 +126,7 @@ class BotnetManager:
         parts = line.split()
         cmd = parts[0].upper()
 
-        log.info(f"Processing from {from_bot}: {line[:100]}")
+        #log.info(f"Processing from {from_bot}: {line[:100]}")
         
         if cmd == "BOTLINK":
             # Incoming connection request
@@ -146,14 +146,14 @@ class BotnetManager:
             else:
                 link = self.peers[from_bot.lower()]
 
-            log.info(f"password: {link.password}")
+            #log.info(f"password: {link.password}")
 
             remote = parts[1]
             local = parts[2]
             
             if local.lower() != self.my_handle.lower() or remote.lower() != from_bot.lower():
                 log.error(f"Botlink mismatch from {from_bot}")
-                log.error(f"local {self.my_handle.lower()}/{local}  remote {from_bot}/{remote}")
+                #log.info(f"local {self.my_handle.lower()}/{local}  remote {from_bot}/{remote}")
                 writer.close()
                 return
             
@@ -161,11 +161,11 @@ class BotnetManager:
                 if len(parts) > 5:  
                     their_partial = parts[6]
                     our_partial = secrets.token_hex(16)
-                    log.info(f"remote {their_partial} - local {our_partial}")
+                    #log.info(f"remote {their_partial} - local {our_partial}")
 
                     shared_password = hashlib.sha256(f"{their_partial}{our_partial}".encode()).hexdigest()
                     link.password = shared_password
-                    log.info(f"shared pass: {shared_password}")
+                    #log.info(f"shared pass: {shared_password}")
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     ack = f"LINKACK {self.my_handle} {remote} 1 WBS {__version__} {our_partial}\n"
@@ -193,35 +193,35 @@ class BotnetManager:
                 if len(parts) > 5:
                     their_partial = parts[6]
                     our_partial = link.temp_partial
-                    log.info(f"remote {their_partial} - local {our_partial}")
+                    #log.info(f"remote {their_partial} - local {our_partial}")
 
                     shared_password = hashlib.sha256(f"{our_partial}{their_partial}".encode()).hexdigest()
                     link.password = shared_password
-                    log.info(f"shared pass: {shared_password}")
+                    #log.info(f"shared pass: {shared_password}")
                     
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
-                    log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
+                    #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                     chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
                     challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
-                    log.info(f"Sending authentication token {challenge}")
+                    #log.info(f"Sending authentication token {challenge}")
                     await self._safe_send(writer, challenge)
                 else:
                     log.error(f"Unknown LINKACK from {from_bot}")
             else:
-                log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
+                #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                 chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
                 challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
-                log.info(f"Sending authentication token {challenge}")
+                #log.info(f"Sending authentication token {challenge}")
                 await self._safe_send(writer, challenge)
             return
         
         elif cmd == "LINKAUTH":
             # Validate authentication
-            log.info(f"auth string: {parts[1]}{link.password}{self.my_handle}")
+            #log.info(f"auth string: {parts[1]}{link.password}{self.my_handle}")
             expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
             
-            log.info(f"expected: {expectedhash} - got: {parts[2]}")
+            #log.info(f"expected: {expectedhash} - got: {parts[2]}")
             if len(parts) < 2 or parts[2] != expectedhash:
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
@@ -229,7 +229,7 @@ class BotnetManager:
             
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
-            log.info(f"Auth success: {from_bot}")
+            #log.info(f"Auth success: {from_bot}")
             await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
             return
         
@@ -237,7 +237,7 @@ class BotnetManager:
             # Link established
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
-            log.info(f"Link established with {from_bot}")
+            #log.info(f"Link established with {from_bot}")
             return
         
         # BLOCK UNAUTHED
