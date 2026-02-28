@@ -219,6 +219,11 @@ class UserManager:
             await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
             await db.commit()
 
+    async def change_handle(self, handle: str, new_handle: str):
+            async with get_db(self.db_path) as db:
+                await db.execute("UPDATE users SET handle = ? WHERE handle = ?", (new_handle, handle))
+                await db.commit()            
+
     async def matchattr(self, handle: str, flags: str, channel: Optional[str] = None) -> bool:
         user = await self.get(handle)
         if not user:

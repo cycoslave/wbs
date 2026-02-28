@@ -230,6 +230,8 @@ class BotnetManager:
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
             #log.info(f"Auth success: {from_bot}")
+            #self.core.bot_sessions[from_bot.lower()] = link
+            #link.connected_at = time.time()
             await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
             return
         
@@ -238,6 +240,8 @@ class BotnetManager:
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
             #log.info(f"Link established with {from_bot}")
+            self.core.bot_sessions[from_bot.lower()] = link
+            #link.connected_at = time.time()
             return
         
         # BLOCK UNAUTHED

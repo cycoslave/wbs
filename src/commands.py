@@ -639,7 +639,156 @@ async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond):
         return
     parts = arg.split()
     #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")                         
+    await respond(f"→ JOIN {parts[0]}")
+
+async def cmd_who(core, handle, session_id, arg, respond):
+    """Show partyline members and connected bots."""
+    
+    await respond("Party line members:")
+    
+    # Display partyline members
+    for sid, session in core.partyline.sessions.items():
+        user_handle = session['handle']
+        session_type = session['type']
+        
+        # Determine connection info
+        if session_type == 'console':
+            conn_info = f"con:{core.botname[:7]}"
+        elif session_type == 'telnet':
+            conn_info = "telnet@localhost"
+        elif session_type == 'dcc':
+            conn_info = "dcc@localhost"
+        else:
+            conn_info = f"{session_type}@localhost"
+        
+        await respond(f"  [{sid:02d}]  {user_handle:12s} {conn_info}")
+    
+    # Display connected bots
+    await respond("Bots connected:")
+    if core.bot_sessions:
+        for idx, (bot_id, bot_session) in enumerate(core.bot_sessions.items()):
+                bot_handle = getattr(bot_session, 'handle', None) or getattr(bot_session, 'nick', None) or getattr(bot_session, 'name', None) or str(bot_id)
+                
+                # Get connection time if available
+                connect_time = getattr(bot_session, 'connected_at', None)
+                if connect_time:
+                    time_str = datetime.fromtimestamp(connect_time).strftime("%d %b %H:%M")
+                else:
+                    time_str = "Unknown"
+                
+                # Get version if available
+                version = getattr(bot_session, 'version', None) or f"WBS {__version__}"
+                
+                await respond(f"  [{idx:02d}]  ->{bot_handle:12s} ({time_str}) {version}")
+    else:
+        await respond("  (none)")
+
+async def cmd_whom(core, handle: str, session_id: int, arg: str, respond):
+    await respond(" Nick        Bot        Host")
+    await respond("----------   ---------  --------------------")
+    
+    total = 0
+    for sid, sess in core.partyline.sessions.items():
+        uhandle = sess['handle']
+        utype = sess['type']
+        marker = "*" if uhandle == handle else " "
+        
+        # Bot/host from user.py or defaults
+        botname = "*"  # Add u.bot lookup if available
+        host = utype if utype != 'console' else "localhost"
+        
+        await respond(f"{marker}{uhandle:<10} {botname:<9}  {host}")
+        total += 1
+    
+    await respond(f"Total users: {total}")
+
+async def cmd_handle(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .handle <new-handle>")
+        return
+    new_handle = arg.strip()
+    if len(new_handle) > 20:  # Sanity limit
+        await respond("Handle too long.")
+        return
+    
+    # Update own session
+    if session_id in core.partyline.sessions:
+        core.partyline.sessions[session_id]['handle'] = new_handle
+        core.user.change_handle(handle, new_handle)
+        await respond(f"Your handle is now: {new_handle}")
+    else:
+        await respond(f"Your handle was not changed.")
+    
+async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
+    if not arg or len(arg.split()) != 2:
+        await respond("Usage: .chhandle <oldhandle> <newhandle>")
+        return
+    
+    old_handle, new_handle = arg.split()
+    old_handle = old_handle.strip()
+    new_handle = new_handle.strip()
+    if len(new_handle) > 20:
+        await respond("New handle too long.")
+        return
+    
+    for sid, sess in core.partyline.sessions.items():
+        if sess['handle'].lower() == old_handle.lower():
+            sess['handle'] = new_handle
+            break
+    if core.user.exist(old_handle):
+        if core.user.exist(new_handle):
+            await respond(f"User already exist: {new_handle}")
+        else:
+            core.user.change_handle(old_handle, new_handle)
+            await respond(f"User handle changed: {old_handle} → {new_handle}")
+    else:
+        await respond(f"User not found: {old_handle}")
+
+async def cmd_addhost(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: +host <user> <hostmask>")
+        return
+    
+    hostmask = arg.strip()
+    if not hostmask.startswith('!') and '@' not in hostmask:
+        await respond("Invalid hostmask (use nick!user@host)")
+        return
+    user = core.user.get(handle)
+    if not user:
+        await respond("User not found.")
+        return
+    
+    hosts = user.hostmasks  # List[str]
+
+    if hostmask not in hosts:
+        hosts.append(hostmask)
+        core.userdb.save_user(user)
+        await respond(f"Added host: {hostmask}")
+    else:
+        await respond(f"Host already exists: {hostmask}")
+
+async def cmd_delhost(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: -host <user> <hostmask>")
+        return
+    
+    hostmask = arg.strip()
+    if not hostmask.startswith('!') and '@' not in hostmask:
+        await respond("Invalid hostmask (use nick!user@host)")
+        return
+    user = core.user.get(handle)
+    if not user:
+        await respond("User not found.")
+        return
+    
+    hosts = user.hostmasks  # List[str]
+
+    if hostmask in hosts:
+        hosts.remove(hostmask)
+        core.userdb.save_user(user)
+        await respond(f"Removed host: {hostmask}")
+    else:
+        await respond(f"Host not found: {hostmask}")       
 
 # Command registry
 COMMANDS = {
@@ -649,6 +798,8 @@ COMMANDS = {
     'whoami': cmd_whoami,
     'uptime': cmd_uptime,
     'version': cmd_version,
+    'who': cmd_who,
+    'whom': cmd_whom,
     'mode': cmd_mode,
     'op': cmd_op,
     'deop': cmd_deop,
@@ -659,9 +810,9 @@ COMMANDS = {
     'say': cmd_msg,
     'msg': cmd_msg,
     'act': cmd_act,
-    #'quit': cmd_quit,
+    'quit': cmd_quit,
     'die': cmd_quit,
-    # user    
+    # user
     '+user': cmd_adduser,
     '-user': cmd_deluser,
     'userinfo': cmd_showuser,
@@ -672,6 +823,10 @@ COMMANDS = {
     'lockuser': cmd_lockuser,
     'unlockuser': cmd_unlockuser,
     'chpass': cmd_passwd,
+    'handle': cmd_handle,
+    'chhandle': cmd_chhandle,
+    '+host': cmd_addhost,
+    '-host': cmd_delhost,
     # channel    
     '+chan': cmd_addchan,
     '-chan': cmd_delchan,
