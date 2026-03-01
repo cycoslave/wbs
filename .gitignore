@@ -4,6 +4,8 @@ db/*.db-wal
 db/*.bak
 logs/*
 src/__pycache__/*
+src/plugins/__pycache__/*
+src/games/__pycache__/*
 !logs/README.md
 *.json
 *.db
