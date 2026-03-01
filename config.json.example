@@ -37,6 +37,7 @@
     "level": "INFO",
     "file": "logs/wbs.log"
   },
+  "plugins": [],
   "settings": {
     "botnet": false,
     "listen_port": 3333,

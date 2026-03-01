@@ -30,6 +30,7 @@ class BotLink:
     port: int
     reader: Optional[asyncio.StreamReader] = None
     writer: Optional[asyncio.StreamWriter] = None
+    nick: str = None
     subnet_id: Optional[int] = None
     session_id: Optional[int] = None
     password: Optional[str] = None
@@ -68,7 +69,8 @@ class BotnetManager:
             link = BotLink(
                 name=handle,
                 host=bot.address,
-                port=bot.port
+                port=bot.port,
+                nick=handle
             )
             link.reader = reader
             link.writer = writer
@@ -91,6 +93,11 @@ class BotnetManager:
             asyncio.create_task(self.read_peer(handle, reader, writer))
             log.info(f"Connected to peer {handle} at {bot.address}:{bot.port}")
             link.connected = True
+            self.core.irc_q.put({
+                'type': 'BOTLINK_LINK', 
+                'handle': link.handle,
+                'nick': link.handle
+            })
             
         except Exception as e:
             log.error(f"Failed to connect to {handle}: {e}")
@@ -101,6 +108,10 @@ class BotnetManager:
                 self.peer_socket.close()
                 self.peer_socket = None
                 del self.connected_bots[botname]
+                self.core.irc_q.put({
+                    'type': 'BOTLINK_UNLINK', 
+                    'handle': botname
+                })
 
     async def read_peer(self, handle: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Continuously read messages from a peer connection."""
@@ -150,6 +161,11 @@ class BotnetManager:
                 link.password = bot.password
                 self.peers[from_bot.lower()] = link
                 link.connected = True
+                self.core.irc_q.put({
+                    'type': 'BOTLINK_LINK', 
+                    'handle': link.handle,
+                    'nick': link.handle
+                })
             else:
                 link = self.peers[from_bot.lower()]
 
@@ -417,7 +433,22 @@ class BotnetManager:
             # TODO: Merge with conflict resolution
         except Exception as e:
             log.error(f"Handle share channels error: {e}")
-    
+
+    async def request_needop(self, chan: str, type: str = 'op'):
+        """wckneed - broadcast needop"""
+        msg = {'cmd': 'NEEDOP', 'chan': chan, 'type': type}
+        await self.send_to_subnet(msg)
+
+    async def request_needop_from(self, target_bot: str, nick: str, chan: str):
+        """wckbot $vhand needop "$nick $chan" """
+        msg = {'cmd': 'NEEDOP', 'target': target_bot, 'nick': nick, 'chan': chan}
+        await self.send_to_peer(target_bot, msg)
+
+    async def sugop(self, chan: str):
+        """wckbot - sugop "$chan $chan" """
+        msg = {'cmd': 'SUGOP', 'chan': chan}
+        await self.send_to_subnet(msg)
+
     def execute_command(self, cmd_data: dict):
         """Execute command (called by poller thread)."""
         if not self.loop:

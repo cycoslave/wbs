@@ -11,6 +11,7 @@ import platform
 import resource
 import asyncio
 import shutil
+import glob
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -1012,6 +1013,86 @@ async def cmd_topicunlock(core, handle: str, session_id: int, arg: str, respond)
         """, (chan,))
         await respond(f"Topic unlocked {chan}")            
 
+async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .plugins  → list loaded / auto-load / available (src/plugins/*.py)
+    """
+    # Loaded (runtime)
+    loaded = sorted(core.plugins.plugins.keys())
+
+    # Auto-load from config.json
+    auto_load = sorted(core.config.get('plugins', []))
+
+    # Available .py in src/plugins (excluding __init__.py)
+    plugins_dir = os.path.join("src", "plugins")
+    if os.path.isdir(plugins_dir):
+        all_files = glob.glob(os.path.join(plugins_dir, "*.py"))
+        avail = [
+            os.path.splitext(os.path.basename(p))[0]
+            for p in all_files
+            if os.path.basename(p) != "__init__.py"
+        ]
+    else:
+        avail = []
+
+    # Available-but-not-loaded helper
+    available_not_loaded = sorted(set(avail) - set(loaded))
+
+    msg_lines = [
+        f"Loaded ({len(loaded)}): {loaded or 'none'}",
+        f"Auto-load ({len(auto_load)}): {auto_load or 'none'}",
+        f"On disk ({len(avail)}): {avail or 'none'}",
+        f"Available to load: {available_not_loaded or 'none'}",
+    ]
+    await respond("\n".join(msg_lines))
+
+async def cmd_load(core, handle: str, session_id: int, arg: str, respond):
+    """load <plugin> - Load plugin from src/plugins/"""
+    args = arg.strip().split()
+    if not args:
+        await respond("Usage: .load <plugin>")
+        return
+    
+    name = args[0]
+    if name in core.plugins.plugins:
+        await respond(f"{name} already loaded")
+        return
+    
+    # Verify .py exists in src/plugins/
+    plugin_path = f"src/plugins/{name}.py"
+    if not os.path.exists(plugin_path):
+        await respond(f"{name}.py not found in src/plugins/")
+        return
+    
+    try:
+        await core.plugins.load_plugin(name)
+        await respond(f"Loaded {name}")
+    except Exception as e:
+        await respond(f"Failed to load {name}: {e}")
+
+async def cmd_unload(core, handle: str, session_id: int, arg: str, respond):
+    """unload <plugin> - Unload plugin"""
+    args = arg.strip().split()
+    if not args:
+        await respond("Usage: .unload <plugin>")
+        return
+    
+    name = args[0]
+    if name not in core.plugins.plugins:
+        await respond(f"{name} not loaded")
+        return
+    
+    try:
+        plugin = core.plugins.plugins.pop(name)
+        await plugin.unload()
+        # Remove from auto-load config
+        if name in core.config.get('plugins', []):
+            core.config['plugins'].remove(name)
+            core.save_config()
+        await respond(f"Unloaded {name}")
+    except Exception as e:
+        await respond(f"Failed to unload {name}: {e}")
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -1075,4 +1156,8 @@ COMMANDS = {
     '+ignore': cmd_addignore,
     '-ignore': cmd_delignore,
     'ignores': cmd_ignores,
+    # plugins
+    'plugins': cmd_plugins,
+    'load': cmd_load,
+    'unload': cmd_unload
 }

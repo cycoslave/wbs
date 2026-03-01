@@ -29,6 +29,7 @@ from .partyline import Partyline
 from .session import Session
 from .seen import Seen
 from .irc import irc_process_launcher
+from .plugins import PluginManager
 
 
 log = logging.getLogger("wbs.core")
@@ -59,6 +60,7 @@ class Core:
         self.chan = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         self.partyline = Partyline(self)
+        self.plugins = PluginManager(self)
 
         # Runtime variables
         self.children = []
@@ -69,6 +71,8 @@ class Core:
         self.dcc_sessions = {}
         self.party_sessions = {}
         self.bot_sessions = {} 
+        self.event_handlers = {}  # type → [plugins]
+        self.timers = {}  # name → task
         self.foreground = False
         log.info(f"Core process started. (pid={os.getpid()})")
 
@@ -97,6 +101,14 @@ class Core:
         log.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
         
+        log.info("Loading configured plugins...")
+        for plugin_name in self.config.get('plugins', []):
+            try:
+                await self.plugins.load_plugin(plugin_name)
+                log.info(f"Auto-loaded plugin: {plugin_name}")
+            except Exception as e:
+                log.error(f"Failed auto-load {plugin_name}: {e}")
+
         if hasattr(self, 'net_listener'):
             asyncio.create_task(self.net_listener.listen(port=self.config['settings']['listen_port']))
 
@@ -134,6 +146,8 @@ class Core:
             log.error(f"Invalid event type received: {type(event)} - {event}")
             return
         
+        await self.plugins.dispatch(type(event), event)
+
         etype = event.get('type', 'UNKNOWN')
         handlers = {
             'PARTYLINE_INPUT': self.on_partyline_input,
@@ -145,6 +159,7 @@ class Core:
             'COMMAND': self.on_command,
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
+            'ON_INVITE': self.on_invite,
             'JOIN': self.on_join,
             'PART': self.on_part,
             'KICK': self.on_kick,
@@ -153,6 +168,8 @@ class Core:
             'NICK': self.on_nick,
             'READY': self.on_ready,
             'DISCONNECT': self.on_disconnect,
+            'IRC_TIMER_FIRED': self.on_irc_timer_fired,
+            'REQUEST_BOTLINKS': self.request_botlinks,
             'ERROR': self.on_error,
         }
         handler = handlers.get(etype)
@@ -248,6 +265,10 @@ class Core:
             'type': 'botnet_status',
             'text': f"*** {handle} unlinked",
             'bots': [{'name': h, 'online': h in self.botnet.peers} for h in await self.bot.list()]
+        })
+        self.core.irc_q.put({
+            'type': 'BOTLINK_UNLINK', 
+            'handle': handle
         })
         if hasattr(self, 'partyline'):
             self.partyline.broadcast(f"*** {handle} unlinked")
@@ -469,6 +490,13 @@ class Core:
         event['type'] = 'COMMAND'
         await self.on_command(event)
 
+    async def on_invite(self, event: dict):
+        """Forward invite notice to partyline."""
+        channel = event['channel']
+        inviter_nick = event['inviter_nick']
+        solicitation = event['solicitation']
+        self.partyline.broadcast(f"{solicitation} invite to join {channel} by {inviter_nick}")
+
     async def on_join(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
         nick = event.get('nick', '')
@@ -519,6 +547,15 @@ class Core:
         """IRC connection dropped."""
         self.connected = False       
 
+    async def request_botlinks(self, event: dict):
+        """Merge botnet.peers + user flags"""
+        botnet_peers = self.botnet.peers  # Dict[BotLink]
+        
+        linked_bots = {}
+        for link in botnet_peers.values():
+            linked_bots[link.name] = link.nick
+        self.irc_q.put({'cmd': 'UPDATE_BOTLINK', 'botlinks': linked_bots})
+
     async def on_null(self, event: Dict[str, Any]):
         """Just do nothing."""
         pass              
@@ -540,3 +577,39 @@ class Core:
         """Periodic tasks."""
         if hasattr(self, 'botnet_mgr') and self.botnet_mgr:
             await self.botnet_mgr.poll_queues()
+
+    async def register_timer(self, name: str, callback, interval: float, random: bool = False):
+        """Register repeating timer"""
+        async def timer_loop():
+            while True:
+                try:
+                    await callback()
+                except Exception as e:
+                    log.error(f"Timer {name} error: {e}")
+                if random:
+                    interval += random.randint(-30, 30)
+                await asyncio.sleep(interval)
+        
+        self.timers[name] = asyncio.create_task(timer_loop())
+        log.debug(f"Registered timer {name}: {interval}s")
+    
+    def unregister_timer(self, name: str):
+        if name in self.timers:
+            self.timers[name].cancel()
+            del self.timers[name]
+    
+    async def call_later(self, delay: float, callback):
+        """One-shot timer"""
+        await asyncio.sleep(delay)
+        await callback()
+
+    async def on_irc_timer_fired(self, event):
+        """Forward IRC timer + full context to plugins"""
+        timer_name = event['timer_name']
+        irc_data = event['irc_data']
+        
+        # Dispatch to plugins: on_irc_timer_<name>
+        await self.plugins.dispatch(f"IRC_TIMER_{timer_name.upper()}", {
+            'type': f"IRC_TIMER_{timer_name.upper()}",
+            'irc_data': irc_data
+        })

@@ -11,6 +11,8 @@ import logging
 import json
 import asyncio
 import irc.bot
+from datetime import datetime, timedelta
+
 from typing import Optional
 from irc.client import ServerConnectionError
 
@@ -49,17 +51,21 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         self.irc_q = irc_q
         self.config_id = config.get('id', 1)
         self.whois_trackers = {}  # Track pending WHOIS requests
-        
-        # Parse server list
+        self.maintenance_state = {
+            'last_rejoin': {},         # channel -> timestamp
+            'last_nick': 0,            # timestamp
+            'linked_bots': {}          # handle -> current_nick
+        }
+        self.irc_timers = {}  # name → task
         servers = self._parse_servers(config)
-        bot_config = config.get('bot', {})
-        
+        bot_config = config.get('bot', {})        
         super().__init__(
             servers,
             bot_config.get('nick', 'wbs'),
             bot_config.get('realname', 'WBS Bot')
         )
-        
+        self._emit_event({'type': 'REQUEST_BOTLINKS'})
+
     def _parse_servers(self, config: dict) -> list[tuple[str, int]]:
         """Extract server list from config (supports multiple formats)"""
         try:
@@ -79,9 +85,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             self.core_q.put(event_data, block=False)
         except queue.Full:
             log.error(f"Event queue full, dropping: {event_data['type']}")
-    
-    # === Connection Lifecycle ===
-    
+        
     def _connect(self):
         """Override to handle connection errors gracefully"""
         try:
@@ -93,7 +97,38 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'data': 'connect_fail',
                 'error': str(e)
             })
+
+    def is_op(self, chan: str, nick: str) -> bool:
+        """Check if nick is op on channel"""
+        if chan in self.connection.channels:
+            return self.connection.channels[chan].is_oper(nick)
+        return False
+
+    def on_chan(self, chan: str, nick: str) -> bool:
+        """Check if nick is present in channel"""
+        if chan in self.connection.channels:
+            return self.connection.channels[chan].has_user(nick)
+        return False
+
+    def is_bot_op(self, chan: str) -> bool:
+        """Check if bot is op on channel"""
+        return self.is_op(chan, self.connection.get_nickname())
     
+    def is_voice(self, chan: str, nick: str) -> bool:
+        """Check if nick is voiced on channel"""
+        if chan in self.connection.channels:
+            return self.connection.channels[chan].is_voiced(nick)
+        return False
+
+    def is_online(self, nick: str) -> bool:
+        """Check if nick is online anywhere (global users)"""
+        return any(nick in chan.users for chan in self.connection.channels.values())
+
+    @property 
+    def is_connected(self) -> bool:
+        """Connected to IRC server?"""
+        return self.connection.is_connected()
+
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
         log.info(f"Connected as {conn.get_nickname()}")
@@ -111,9 +146,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'data': 'disconnect'
         })
         self._emit_event({'type': EventType.DISCONNECT})
-    
-    # === IRC Event Handlers ===
-    
+        
     def on_pubmsg(self, conn, event):
         """Public channel message"""
         text = event.arguments[0]
@@ -125,7 +158,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'text': text
         })
         
-        # Detect bot-addressed commands (e.g., "wbs: .help")
         prefix = f"{conn.get_nickname()}:"
         if text.startswith(prefix):
             cmd_text = text[len(prefix):].strip()
@@ -148,6 +180,18 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         })
     
     def on_join(self, conn, event):
+        nick = event.source.nick
+        chan = event.target
+        if nick == conn.get_nickname():
+            if self.config.get('botnet', {}).get('enabled', False):
+                self._emit_event({
+                    'type': 'NEEDOP',
+                    'chan': chan,
+                    'nick': conn.get_nickname(),
+                    'requester': conn.get_nickname()
+                })
+        if nick in self.maintenance_state['linked_bots'].values():
+            pass
         self._emit_event({
             'type': EventType.JOIN,
             'channel': event.target,
@@ -195,14 +239,15 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         })
     
     def on_mode(self, conn, event):
-        modes = event.arguments[0] if event.arguments else ''
-        args = event.arguments[1:] if len(event.arguments) > 1 else []
+        chan = event.target.lower()
+        modes = event.arguments[0].lower() if event.arguments else ''
+        mode_args = event.arguments[1:] if len(event.arguments) > 1 else []
         self._emit_event({
             'type': EventType.MODE,
-            'target': event.target,
+            'chan': chan,
             'modes': modes,
-            'args': args,
-            'by': event.source.nick
+            'args': mode_args,
+            'nick': event.source.nick
         })
     
     def on_ctcp(self, conn, event):
@@ -223,17 +268,23 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         inviter_nick = event.source.nick
         channel = event.arguments[0]
         
-        # Check DB synchronously (exist() is sync)
         if self.chan.exist(channel):
             conn.join(channel)
-            log.info(f"Joined {channel} on invite from {inviter_nick} (DB tracked)")
+            log.info(f"Joined {channel} on invite from {inviter_nick}")
             self._emit_event({
-                'type': 'INVITE_JOIN',
+                'type': 'ON_INVITE',
                 'channel': channel,
-                'inviter': inviter_nick
+                'inviter': inviter_nick,
+                'solicitation': 'Solicited'
             })
         else:
-            log.debug(f"Ignored invite to {channel} from {inviter_nick} (not in DB)")
+            log.debug(f"Ignored invite to {channel} from {inviter_nick}")
+            self._emit_event({
+                'type': 'ON_INVITE',
+                'channel': channel,
+                'inviter': inviter_nick,
+                'solicitation': 'Unsolicited'
+            })
 
     def on_whoisuser(self, conn, event):
         """WHOIS response (311 numeric)"""
@@ -261,74 +312,259 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'type': EventType.WHOIS_END,
                 'nick': nick
             })
-    
-    # === Command Execution ===
-    
+        
     def execute_command(self, cmd_data: dict):
         """Execute command from cmd_queue (called by poller thread)"""
-        if not self.connection.is_connected():
-            log.error(f"Not connected, dropping command: {cmd_data}")
-            return
-        
         cmd = cmd_data.get('cmd')
         
         try:
-            if cmd == 'msg':
-                self.connection.privmsg(cmd_data['target'], cmd_data['text'])
-            
-            elif cmd == 'notice':
-                self.connection.notice(cmd_data['target'], cmd_data['text'])
-            
-            elif cmd == 'action':
-                self.connection.action(cmd_data['target'], cmd_data['text'])
-            
-            elif cmd == 'join':
-                self.connection.join(cmd_data['channel'])
-            
-            elif cmd == 'part':
-                reason = cmd_data.get('reason', '')
-                self.connection.part(cmd_data['channel'], reason)
-            
-            elif cmd == 'mode':
-                self.connection.mode(cmd_data['channel'], cmd_data['modes'])
+            if cmd == 'UPDATE_BOTLINK':
+                self.maintenance_state['linked_bots'] = cmd_data['botlinks']   
 
-            elif cmd == 'quit':
-                self.connection.quit(cmd_data['message'])
-                time.sleep(2.0)
-                self.core_q.put_nowait({'cmd': 'quit', 'message': cmd_data['message']})
-            
-            elif cmd == 'kick':
-                reason = cmd_data.get('reason', 'Kicked')
-                self.connection.kick(
-                    cmd_data['channel'],
-                    cmd_data['nick'],
-                    reason
-                )
-            
-            elif cmd == 'whois':
+            elif cmd == 'BOTLINK_LINK':
+                handle = cmd_data['handle']
                 nick = cmd_data['nick']
-                req_id = hash(nick)
-                self.whois_trackers[req_id] = {'nick': nick}
-                self.connection.whois(nick)
+                self.maintenance_state['linked_bots'][handle] = nick
+
+            elif cmd == 'BOTLINK_UNLINK':
+                handle = cmd_data['handle']
+                if handle in self.maintenance_state['linked_bots']:
+                    del self.maintenance_state['linked_bots'][handle]
+
+            elif cmd == 'REGISTER_IRC_TIMER':
+                name = cmd_data['name']
+                interval = cmd_data['interval']
+                self.loop.call_soon_threadsafe(self._schedule_register_timer, name, interval)
             
-            elif cmd == 'raw':
-                self.connection.send_raw(cmd_data['line'])
-            
+            elif cmd == 'UNREGISTER_IRC_TIMER':
+                name = cmd_data['name']
+                self.loop.call_soon_threadsafe(self._schedule_unregister_timer, name)
+
             else:
-                log.error(f"[IRC] Unknown command: {cmd}")
+                if not self.connection.is_connected():
+                    log.error(f"Not connected, dropping command: {cmd}")
+                    return
+
+                if cmd == 'msg':
+                    self.connection.privmsg(cmd_data['target'], cmd_data['text'])
+                
+                elif cmd == 'notice':
+                    self.connection.notice(cmd_data['target'], cmd_data['text'])
+                
+                elif cmd == 'action':
+                    self.connection.action(cmd_data['target'], cmd_data['text'])
+                
+                elif cmd == 'join':
+                    self.connection.join(cmd_data['channel'])
+                
+                elif cmd == 'part':
+                    reason = cmd_data.get('reason', '')
+                    self.connection.part(cmd_data['channel'], reason)
+                
+                elif cmd == 'mode':
+                    self.connection.mode(cmd_data['channel'], cmd_data['modes'])
+
+                elif cmd == 'quit':
+                    self.connection.quit(cmd_data['message'])
+                    time.sleep(2.0)
+                    self.core_q.put_nowait({'cmd': 'quit', 'message': cmd_data['message']})
+                
+                elif cmd == 'kick':
+                    reason = cmd_data.get('reason', 'Kicked')
+                    self.connection.kick(
+                        cmd_data['channel'],
+                        cmd_data['nick'],
+                        reason
+                    )
+                
+                elif cmd == 'whois':
+                    nick = cmd_data['nick']
+                    req_id = hash(nick)
+                    self.whois_trackers[req_id] = {'nick': nick}
+                    self.connection.whois(nick)
+
+                elif cmd == 'raw':
+                    self.connection.send_raw(cmd_data['line'])
+                
+                else:
+                    log.error(f"[IRC] Unknown command: {cmd}")
         
         except Exception as e:
             log.error(f"Command failed {cmd_data}: {e}")
 
+    async def maintenance_loop(self):
+        """Maintenance every 30s (uncommented _enforce_settings later)"""
+        while True:  # Add while True
+            try:
+                if self.is_connected:  # Check first
+                    # Clean timers
+                    for name, task in list(self.irc_timers.items()):
+                        if task.done():
+                            del self.irc_timers[name]
+                    
+                    await self._check_channels()
+                    await self._check_nick()
+                    # await self._enforce_settings()
+                
+                await asyncio.sleep(30)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error(f"Maintenance error: {e}")
+                await asyncio.sleep(60) 
+
+    async def _check_channels(self):
+        """Rejoin active channels if missing"""
+        try:
+            if not self.is_connected:
+                return
+            
+            active_chans = await self.chan.getchans() or []
+            now = datetime.now()
+            
+            # Fix: self.channels (dict str -> Channel), not self.connection.channels
+            current_chans = {chan_name.lower(): chan for chan_name, chan in self.channels.items()}
+            
+            log.debug(f"Active: {active_chans}, Current: {list(current_chans)}")
+            
+            for chan in active_chans:
+                chan_lower = chan.lower()
+                if chan_lower not in current_chans:
+                    last_try = self.maintenance_state['last_rejoin'].get(chan, datetime.min)
+                    if now - last_try > timedelta(minutes=1):
+                        self.connection.join(chan)
+                        self.maintenance_state['last_rejoin'][chan] = now
+                        log.info(f"Rejoined {chan}")
+                        
+        except Exception as e:
+            log.error(f"_check_channels error: {e}", exc_info=True)
+
+    async def _check_nick(self):
+        """Enforce bot nick if taken"""
+        current_nick = self.connection.get_nickname()
+        desired_nick = self.config['bot'].get('nick', 'wbs')
+
+        if self.is_connected:
+            if current_nick != desired_nick:
+                now = datetime.now()
+                attempts = self.maintenance_state['last_nick']
+                last = attempts.get('last', now)
+                
+                if now - last > timedelta(minutes=1):
+                    self.connection.nick(desired_nick)
+                    attempts['last'] = now
+                    log.info(f"Regaining nick: {desired_nick}")
+
+    async def _enforce_settings(self):
+        """Apply locks/limits/topiclock from DB"""
+        if self.is_connected:
+            channels = await self.chan.get_all_channels()
+            for chan_obj in channels:
+                if chan_obj.name not in self.connection.channels:
+                    continue
+                    
+                now = datetime.now()
+                
+                # Channel lock
+                #if chan_obj.is_locked and now - datetime.fromtimestamp(chan_obj.lock_at) > timedelta(minutes=1):
+                #    irc_q.put({'cmd': 'part', 'channel': chan_obj.name, 'reason': f'Locked by {chan_obj.lock_by}'})
+                
+                # Topic lock
+                #if chan_obj.is_topiclock and now - datetime.fromtimestamp(chan_obj.topiclock_at) > timedelta(minutes=1):
+                #    irc_q.put({'cmd': 'topic', 'channel': chan_obj.name, 'topic': chan_obj.topiclock})
+                #    self.maintenance_state['last_topic'][chan_obj.name] = now
+                
+                # Limit
+                #if chan_obj.is_limit and now - datetime.fromtimestamp(chan_obj.limit_at) > timedelta(minutes=2):
+                #    modes = f"+l {chan_obj.limit_add}"
+                #    irc_q.put({'cmd': 'mode', 'channel': chan_obj.name, 'modes': modes})
+                #    self.maintenance_state['last_limit'][chan_obj.name] = now 
+
+    def _register_irc_timer(self, name: str, interval: float):
+        """Register repeating timer"""
+        if name in self.irc_timers:
+            self.irc_timers[name].cancel()
+        task = asyncio.create_task(self._irc_timer_loop(name, interval))
+        self.irc_timers[name] = task
+        log.info(f"Registered IRC timer: {name} ({interval}s)")
+
+    def _unregister_irc_timer(self, name: str):
+        """Cancel timer"""
+        if name in self.irc_timers:
+            self.irc_timers[name].cancel()
+            del self.irc_timers[name]
+            log.info(f"Unregistered IRC timer: {name}") 
+
+    def _schedule_register_timer(self, name: str, interval: float):
+        """Run on main event loop"""
+        asyncio.create_task(self._register_irc_timer_task(name, interval))
+
+    def _schedule_unregister_timer(self, name: str):
+        """Run on main event loop"""
+        asyncio.create_task(self._unregister_irc_timer_task(name))
+
+    async def _register_irc_timer_task(self, name: str, interval: float):
+        """Async timer registration"""
+        if name in self.irc_timers:
+            self.irc_timers[name].cancel()
+        
+        task = asyncio.create_task(self._irc_timer_loop(name, interval))
+        self.irc_timers[name] = task
+        log.info(f"Registered IRC timer: {name} ({interval}s)")
+
+    async def _unregister_irc_timer_task(self, name: str):
+        """Async timer unregistration"""
+        if name in self.irc_timers:
+            self.irc_timers[name].cancel()
+            del self.irc_timers[name]
+            log.info(f"Unregistered IRC timer: {name}")    
+
+    async def _irc_timer_loop(self, name: str, interval: float):
+        while True:
+            await asyncio.sleep(interval)
+            
+            snapshot = {
+                'connected': self.is_connected,
+                'botnick': self.connection.get_nickname() if self.connection else None,
+                'channels': {}
+            }
+            
+            try:
+                for chan_name in list(self.connection.channels.keys()):
+                    chan_obj = self.connection.channels.get(chan_name)
+                    if chan_obj:
+                        snapshot['channels'][chan_name] = {
+                            'users': len(chan_obj.users),
+                            'user_list': list(chan_obj.users),
+                            'bot_op': chan_obj.is_oper(snapshot['botnick']),
+                            'ops': [nick for nick in chan_obj.opers()],
+                            'mode': getattr(chan_obj, 'mode', ''),
+                            'mode_params': getattr(chan_obj, 'mode_params', {})
+                        }
+            except Exception as e:
+                log.debug(f"Channel snapshot error: {e}")
+            
+            event = {
+                'type': 'IRC_TIMER_FIRED',
+                'timer_name': name,
+                'irc_data': snapshot
+            }
+            self._emit_event(event)                 
 
 def start_irc_process(config, core_q, irc_q):
     """
     Entry point for IRC process
     """
     irc = WbsIrcBot(config, core_q, irc_q)
+
+    # Start async maintenance
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     def command_poller():
         """Daemon thread: poll cmd_queue and execute commands"""
+        irc.loop = loop
         throttle_interval = 0.1  # 100ms between commands (anti-flood)
         last_cmd_time = 0
         
@@ -354,8 +590,22 @@ def start_irc_process(config, core_q, irc_q):
     poller = threading.Thread(target=command_poller, daemon=True)
     poller.start()
 
+    # Async maintenance in event loop thread
+    def event_loop_thread():
+        irc.maintenance_task = loop.create_task(irc.maintenance_loop())
+        try:
+            loop.run_forever()
+        finally:
+            irc.maintenance_task.cancel()
+            loop.close()
+    
+    event_loop = threading.Thread(target=event_loop_thread, daemon=True)
+    event_loop.start()
+
     log.info(f"IRC process started. (pid={os.getpid()})")
     irc.start()
+
+    #irc.maintenance_task.cancel()
 
 def irc_process_launcher(config_path, core_q, irc_q):
     """Launcher for IRC multiprocessing.Process."""
