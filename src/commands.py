@@ -28,7 +28,7 @@ async def cmd_help(core, handle, session_id, arg, respond):
       help
       date         time         uptime       version
       who          quit         whom         chpass
-      handle       whoami       -host        note         
+      handle       whoami       -host         
    For ops:
       mode         say          msg          op
       deop         voice        devoice
@@ -39,13 +39,12 @@ async def cmd_help(core, handle, session_id, arg, respond):
       +bot         botattr      chhandle     relay
       +host        -bot         link         chaddr
       unlink       update       channels     addhub
-      mnote        bots         join         part
+      bots         join         part         subnet
       lock         unlock       topiclock    topicunlock
-      sdns         swhois       swhowas      links 
       taskset      timers       tasks        botinfo 
       nopass       fixpass      mass         net
       baway        bback        nick         lag 
-      infoleaf     subnet  
+      infoleaf       
 
 All commands begin with '.', and all else goes to the party line.      
 """
@@ -392,19 +391,30 @@ async def cmd_devoice(core, handle, session_id, arg, respond):
     await respond(f"Took voice from {nick} on {chan}")
     return 1
 
-#async def cmd_channels(core, handle, session_id, arg, respond):
-#    """List active channels."""
-#    if core.config.get('limbo_hub'):
-#        return await send_partyline(config, core_q, irc_q, idx, "Limbo hub: no channels.")
-#    
-#    lines = ["=== Active Channels ==="]
-#    for chan in core.channels:
-#        modes = await get_channel_modes(core, chan)
-#        op_status = "op" if await bot_is_op(core, chan) else "no-op"
-#        lines.append(f"{chan} [{modes}] [{op_status}]")
-#    
-#    await send_partyline(config, core_q, irc_q, idx, '\n'.join(lines))
-#    return 1
+async def cmd_channels(core, handle: str, session_id: int, arg: str, respond):
+    async with get_db(core.db_path) as db:
+        chans = await db.execute("""
+            SELECT name, modes, limit, is_inactive 
+            FROM channels 
+            WHERE is_inactive = 0 
+            ORDER BY name
+        """)
+        
+        if not chans:
+            await respond("No channels.")
+            return
+        
+        await respond(" ---- List of Channels ----")
+        total = 0
+        async for row in chans:
+            chan = row['name']
+            modes = row['modes'] or '+n'  # Default modes
+            limit = row['limit'] or 0
+            lim_str = f" {limit}" if limit else ""
+            await respond(f"--> {chan} ({modes}{lim_str})")
+            total += 1
+        
+        await respond(f"TOTAL CHANNELS: {total}")
 
 async def cmd_join(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -493,9 +503,6 @@ async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split()
     await respond(await core.chan.showchan(parts[0]))
 
-async def cmd_listchans(core, handle: str, session_id: int, arg: str, respond):
-    await respond(await core.chan.listchans())    
-
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
         await respond("Usage: .adduser <user> [hostmask]")
@@ -563,20 +570,18 @@ async def cmd_delbot(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"→ Bot {parts[0]} NOT deleted!")
 
 async def cmd_botinfo(core, handle: str, session_id: int, arg: str, respond):
-    botinfo = """
--> Bot Info <-
--> Pid #: 503
--> Runs in: /home/blurr/wbs
--> Admin: cyco <email: loco@cyco.ca>
--> Botnet nick: blurr
--> Perm Owner(s):
--> Machine: armv6l
--> Oper. System: Linux 6.12.62+rpt-rpi-v6
--> Tcl Ver.: 8.6
--> I currently allow remote boots from shared bots only.
--> I am currently sorting my users...
-"""
-    await respond(botinfo)
+    pid = os.getpid()
+    cwd = os.getcwd()
+    machine = platform.machine()
+    os_version = platform.platform()
+    await respond("-> Bot Info <-")
+    await respond(f"-> Pid #: {pid}")
+    await respond(f"-> Runs in: {cwd}")
+    #await respond(f"-> Admin: {core.admin_name} <email: {core.admin_email}>")
+    await respond(f"-> Botnet nick: {core.botname}")
+    #await respond(f"-> Perm Owner(s): {owner_count}")
+    await respond(f"-> Machine: {machine}")
+    await respond(f"-> Oper. System: {os_version}")
 
 async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -914,6 +919,99 @@ async def cmd_restart(core, handle: str, session_id: int, arg: str, respond):
     await core.shutdown("Restart via partyline")
     sys.exit(0)
 
+async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
+    parts = arg.split()
+    if len(parts) < 2:
+        await respond("Usage: .chaddr <bot> <address> [port]")
+        return
+    
+    botname = parts[0]
+    address = parts[1]
+    port = int(parts[2]) if len(parts) > 2 else 3333
+    
+    async with get_db(core.db_path) as db:
+        # Verify bot exists
+        bot = await db.fetchone("SELECT * FROM bots WHERE handle = ?", (botname,))
+        if not bot:
+            await respond(f"Bot {botname} not found!")
+            return
+        
+        # Update address/port
+        await db.execute(
+            "UPDATE bots SET address = ?, port = ? WHERE handle = ?",
+            (address, port, botname)
+        )
+        
+        await respond(f"Updated {botname}: {address}:{port}")
+
+async def cmd_lockchan(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .lock <channel>")
+        return
+    
+    chan = arg.strip().lstrip('#')
+    now = int(time.time())
+    
+    async with get_db(core.db_path) as db:
+        await db.execute("""
+            UPDATE channels SET 
+            is_locked = 1, lock_by = ?, lock_at = ?, lock_reason = ?
+            WHERE name = ?
+        """, (handle, now, f"Locked by {handle}", chan))
+        await respond(f"Locked channel {chan}")
+
+async def cmd_unlockchan(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: .unlock <channel>")
+        return
+    
+    chan = arg.strip().lstrip('#')
+    now = int(time.time())
+    
+    async with get_db(core.db_path) as db:
+        await db.execute("""
+            UPDATE channels SET 
+            is_locked = 0, lock_by = NULL, lock_at = 0, lock_reason = NULL
+            WHERE name = ?
+        """, (chan,))
+        await respond(f"Unlocked channel {chan}")
+
+async def cmd_topiclock(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: [topicun]lock <channel> [topic]")
+        return
+    
+    parts = arg.split(maxsplit=1)
+    chan = parts[0].strip().lstrip('#')
+    topic = parts[1] if len(parts) > 1 else ''
+    now = int(time.time())
+    
+    async with get_db(core.db_path) as db:
+        await db.execute("""
+            UPDATE channels SET 
+            is_topiclock = 1, topiclock = ?, topiclock_by = ?, topiclock_at = ?
+            WHERE name = ?
+        """, (topic, handle, now, chan))
+        await respond(f"Topiclock {chan} {f'to: {topic}' if topic else ''}")
+
+async def cmd_topicunlock(core, handle: str, session_id: int, arg: str, respond):
+    if not arg:
+        await respond("Usage: [topicun]lock <channel> [topic]")
+        return
+    
+    parts = arg.split(maxsplit=1)
+    chan = parts[0].strip().lstrip('#')
+    topic = parts[1] if len(parts) > 1 else ''
+    now = int(time.time())
+    
+    async with get_db(core.db_path) as db:
+        await db.execute("""
+            UPDATE channels SET 
+            is_topiclock = 0, topiclock = NULL, topiclock_by = NULL, topiclock_at = 0
+            WHERE name = ?
+        """, (chan,))
+        await respond(f"Topic unlocked {chan}")            
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -956,9 +1054,15 @@ COMMANDS = {
     '-host': cmd_delhost,
     # channel    
     '+chan': cmd_addchan,
+    'join': cmd_addchan,
     '-chan': cmd_delchan,
+    'part': cmd_delchan,
     'chaninfo': cmd_showchan,
-    'channels': cmd_listchans,
+    'channels': cmd_channels,
+    'lockchan': cmd_lockchan,
+    'unlockchan': cmd_unlockchan,
+    'topiclock': cmd_topiclock,
+    'topicunlock': cmd_topicunlock,
     # bot
     '+bot': cmd_addbot,
     '-bot': cmd_delbot,
@@ -966,7 +1070,7 @@ COMMANDS = {
     'bots': cmd_bots,
     'link': cmd_link,
     'unlink': cmd_unlink,
-    #'chaddr': cmd_chaddr,
+    'chaddr': cmd_chaddr,
     # ignores    
     '+ignore': cmd_addignore,
     '-ignore': cmd_delignore,

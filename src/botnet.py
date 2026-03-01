@@ -95,6 +95,13 @@ class BotnetManager:
         except Exception as e:
             log.error(f"Failed to connect to {handle}: {e}")
 
+    async def disconnect_peer(self, botname: str):
+            """Disconnect specific bot"""
+            if self.peer_socket and self.connected_bots.get(botname):
+                self.peer_socket.close()
+                self.peer_socket = None
+                del self.connected_bots[botname]
+
     async def read_peer(self, handle: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Continuously read messages from a peer connection."""
         try:

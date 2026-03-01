@@ -44,6 +44,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def __init__(self, config, core_q, irc_q):
         self.config = config
         self.chan = ChannelManager(self.config['db']['path'])
+        self.user = UserManager(self.config['db']['path'])
         self.core_q = core_q
         self.irc_q = irc_q
         self.config_id = config.get('id', 1)
@@ -216,6 +217,23 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         else:
             super().on_ctcp(conn, event)
     
+    def on_invite(self, conn, event):
+        """Join channel on invite if tracked in DB"""
+        inviter_nick = event.source.nick
+        channel = event.arguments[0]
+        
+        # Check DB synchronously (exist() is sync)
+        if self.chan.exist(channel):
+            conn.join(channel)
+            log.info(f"Joined {channel} on invite from {inviter_nick} (DB tracked)")
+            self._emit_event({
+                'type': 'INVITE_JOIN',
+                'channel': channel,
+                'inviter': inviter_nick
+            })
+        else:
+            log.debug(f"Ignored invite to {channel} from {inviter_nick} (not in DB)")
+
     def on_whoisuser(self, conn, event):
         """WHOIS response (311 numeric)"""
         # event.arguments = [mynick, nick, user, host, *, realname]
