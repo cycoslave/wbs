@@ -97,6 +97,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
         log.info(f"Connected as {conn.get_nickname()}")
+        conn.mode(conn.get_nickname(), "+i-ws")
         self._emit_event({
             'type': EventType.READY,
             'botname': conn.get_nickname()
