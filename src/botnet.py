@@ -95,8 +95,8 @@ class BotnetManager:
             link.connected = True
             self.core.irc_q.put({
                 'type': 'BOTLINK_LINK', 
-                'handle': link.handle,
-                'nick': link.handle
+                'handle': link.name,
+                'nick': link.name
             })
             
         except Exception as e:
@@ -163,8 +163,8 @@ class BotnetManager:
                 link.connected = True
                 self.core.irc_q.put({
                     'type': 'BOTLINK_LINK', 
-                    'handle': link.handle,
-                    'nick': link.handle
+                    'handle': link.name,
+                    'nick': link.name
                 })
             else:
                 link = self.peers[from_bot.lower()]
