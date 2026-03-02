@@ -150,24 +150,15 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_pubmsg(self, conn, event):
         """Public channel message"""
         text = event.arguments[0]
-        self._emit_event({
+        event_data = {
             'type': EventType.PUBMSG,
             'channel': event.target,
             'nick': event.source.nick,
             'host': str(event.source),
             'text': text
-        })
-        
-        prefix = f"{conn.get_nickname()}:"
-        if text.startswith(prefix):
-            cmd_text = text[len(prefix):].strip()
-            self._emit_event({
-                'type': EventType.COMMAND,
-                'channel': event.target,
-                'nick': event.source.nick,
-                'host': str(event.source),
-                'text': cmd_text
-            })
+        }
+        log.debug(f"[IRC] Emitting PUBMSG: {event_data}")
+        self._emit_event(event_data)
     
     def on_privmsg(self, conn, event):
         """Private message"""

@@ -13,6 +13,9 @@ dependencies = [
   "aiosqlite",
   "prompt_toolkit>=3.0",
   "bcrypt",
+  "aiohttp>=3.9.0",
+  "aiodns>=3.0.0",
+  "feedparser>=6.0.10",
 ]
 
 [project.optional-dependencies]

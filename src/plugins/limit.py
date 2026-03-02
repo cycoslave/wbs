@@ -1,4 +1,4 @@
-# plugins/limit.py
+# src/plugins/limit.py
 """
 WBS Plugin: limit.py 
 version: 0.1.0
@@ -38,7 +38,10 @@ class Plugin(Plugin):
             'name': 'limit'
         })
         log.info("Limit plugin unloaded")
-    
+
+    async def on_UNKNOWN(self, event):
+        pass
+
     async def on_IRC_TIMER_LIMIT(self, event):
         """ALL limit logic runs here - direct access to IRC.channels data"""
         irc_data = event['irc_data']

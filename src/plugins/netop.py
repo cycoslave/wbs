@@ -1,4 +1,4 @@
-# plugins/netop.py
+# src/plugins/netop.py
 """
 WBS Plugin: netop.py 
 version: 0.1.0
@@ -34,6 +34,9 @@ class Plugin(Plugin):
             'name': 'netop'
         })
         log.info("Netop plugin unloaded")
+
+    async def on_UNKNOWN(self, event):
+        pass        
     
     async def on_IRC_TIMER_NETOP(self, event):
         """Periodic op enforcement - FULL IRC access via event"""

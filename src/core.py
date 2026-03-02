@@ -146,9 +146,9 @@ class Core:
             log.error(f"Invalid event type received: {type(event)} - {event}")
             return
         
-        await self.plugins.dispatch(type(event), event)
-
         etype = event.get('type', 'UNKNOWN')
+        await self.plugins.dispatch(etype, event)
+        
         handlers = {
             'PARTYLINE_INPUT': self.on_partyline_input,
             'PARTYLINE_CONNECT': self.on_partyline_connect,
