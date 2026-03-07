@@ -19,11 +19,13 @@ from . import Plugin
 
 log = logging.getLogger("wbs.plugins.pubcom")
 
-class Plugin(Plugin):
+class pubcomPlugin(Plugin):
     """Public commands plugin - provides IRC channel commands"""
     
     def __init__(self, core):
         super().__init__(core)
+        self.name = 'pubcom'
+        self.version = '0.1.0'
         self.auth_sessions = {}  # nick -> timestamp
         self.auth_timeout = 43200  # 12 hours
         self.http_session = None
@@ -34,7 +36,7 @@ class Plugin(Plugin):
             timeout=aiohttp.ClientTimeout(total=10),
             headers={'User-Agent': 'WBS/6.0'}
         )
-        log.info("Pubcom plugin loaded")
+        log.info(f"Plugin {self.name} {self.version} loaded")
     
     async def unload(self):
         """Cleanup"""
@@ -42,9 +44,6 @@ class Plugin(Plugin):
         if self.http_session:
             await self.http_session.close()
         log.info("Pubcom plugin unloaded")
-    
-    async def on_UNKNOWN(self, event):
-        pass
 
     # Helper methods
     def check_auth(self, nick: str) -> bool:

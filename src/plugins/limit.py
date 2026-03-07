@@ -14,9 +14,11 @@ from . import Plugin
 
 log = logging.getLogger("wbs.core")
 
-class Plugin(Plugin):
+class limitPlugin(Plugin):
     def __init__(self, core):
         super().__init__(core)
+        self.name = 'limit'
+        self.version = '0.1.0'
         self.limit_last_change: Dict[str, float] = {}
         self.LIMITADD = 15
         self.LIMITTOL = 2
@@ -29,7 +31,7 @@ class Plugin(Plugin):
             'name': 'limit',
             'interval': 300
         })
-        log.info("Limit plugin loaded")
+        log.info(f"Plugin {self.name} {self.version} loaded")
     
     async def unload(self):
         """Unregister IRC timer"""
@@ -38,9 +40,6 @@ class Plugin(Plugin):
             'name': 'limit'
         })
         log.info("Limit plugin unloaded")
-
-    async def on_UNKNOWN(self, event):
-        pass
 
     async def on_IRC_TIMER_LIMIT(self, event):
         """ALL limit logic runs here - direct access to IRC.channels data"""
@@ -85,6 +84,6 @@ class Plugin(Plugin):
     
     async def on_MODE(self, event):
         """Track manual +l changes"""
-        chan = event['chan']
+        chan = event['channel']
         if '+l' in event['modes']:
             self.limit_last_change[chan] = time.time()

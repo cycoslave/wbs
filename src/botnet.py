@@ -14,7 +14,7 @@ import threading
 import aiosqlite
 import secrets
 import hashlib
-from typing import Dict, Optional, Any, Literal
+from typing import Dict, Optional, Any, Literal, Callable
 from dataclasses import dataclass
 
 from . import __version__
@@ -40,6 +40,12 @@ class BotLink:
     authed: bool = False
     connected: bool = False
 
+@dataclass(frozen=True)
+class BotCommand:
+    """Minimal botnet command key."""
+    name: str
+    plugin: str = 'core'    
+
 class BotnetManager:
     """Manages botnet peer connections and routing."""
     
@@ -50,6 +56,7 @@ class BotnetManager:
         self.irc_q = self.core.irc_q
         self.bot = BotManager(self.db_path)
         self.peers: Dict[BotLink] = {}
+        self.cmds: Dict[BotCommand, Callable] = {}
         
         # Settings
         self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
@@ -57,6 +64,12 @@ class BotnetManager:
         self.running = True
         self.loop = None
         
+    def stop(self):
+        """Shutdown."""
+        self.running = False
+        for _, writer in self.peers.values():
+            writer.close()
+
     async def connect_peer(self, handle: str):
         """Establish outgoing connection to peer."""
         try:
@@ -144,7 +157,7 @@ class BotnetManager:
         parts = line.split()
         cmd = parts[0].upper()
 
-        #log.info(f"Processing from {from_bot}: {line[:100]}")
+        log.debug(f"Processing from {from_bot}: {line[:100]}")
         
         if cmd == "BOTLINK":
             # Incoming connection request
@@ -275,73 +288,41 @@ class BotnetManager:
         elif cmd == "CHAT":
             # Format: CHAT <from_bot> <message>
             # parts[0] = "CHAT", parts[1] = from_bot, parts[2:] = message
-            from_bot_name = parts[1]
+            from_bot = parts[1]
             nick = parts[2]
             message = ' '.join(parts[3:])
-            self.core.partyline.broadcast(f"<{from_bot_name}@{nick.rstrip(':')}> {message}", True)
+            self.core.partyline.broadcast(f"<{from_bot}@{nick.rstrip(':')}> {message}", True)
 
-        elif line.startswith('CMD:'):
-            # JSON command (existing logic)
-            try:
-                cmd = json.loads(line[4:])
-                await self.route_command(cmd, from_bot)
-            except json.JSONDecodeError as e:
-                log.error(f"Invalid CMD from {from_bot}: {e}")
+        elif cmd == "CMD":
+            # Format: CMD <command> [args]
+            if len(parts) < 2:
+                return
+            name = parts[1].lower()
+            args = parts[2:]
+            
+            for pluginkey, handler in self.cmds.items():
+                if pluginkey.name == name:
+                    await handler(pluginkey, args, from_bot)  # Add frombot parameter
+                    return
+            log.warning(f"No handler for CMD {name}")
         
-        elif line.startswith('RESPONSE:'):
-            # Command response from another bot
-            msg = line[9:]
-            #self.party_q.put_nowait({
-            #    'type': 'botnet_response',
-            #    'from': from_bot,
-            #    'text': msg
-            #})
+        #elif line.startswith('RESPONSE:'):
+        #    # Command response from another bot
+        #    msg = line[9:]
+        #    #self.party_q.put_nowait({
+        #    #    'type': 'botnet_response',
+        #    #    'from': from_bot,
+        #    #    'text': msg
+        #    #})
         
-        elif line.startswith('SHAREUSERS:'):
-            await self.handle_share_users(line[11:], from_bot)
+        #elif line.startswith('SHAREUSERS:'):
+        #    await self.handle_share_users(line[11:], from_bot)
         
-        elif line.startswith('SHARECHANS:'):
-            await self.handle_share_channels(line[11:], from_bot)
+        #elif line.startswith('SHARECHANS:'):
+        #    await self.handle_share_channels(line[11:], from_bot)
         
         else:
             log.error(f"Invalid command {cmd} from {from_bot}")
-    
-    def parse_command(self, line: str) -> Dict[str, Any]:
-        """Parse .command [target=X] args"""
-        parts = line[1:].split(maxsplit=1)
-        cmd_name = parts[0]
-        args = parts[1] if len(parts) > 1 else ''
-        
-        target = 'me'
-        if 'target=' in args:
-            idx = args.index('target=') + 7
-            rest = args[idx:]
-            if ' ' in rest:
-                target, args = rest.split(maxsplit=1)
-            else:
-                target, args = rest, ''
-        
-        return {'cmd': cmd_name, 'args': args, 'target': target}
-    
-    async def route_command(self, cmd: Dict, from_bot: str):
-        """Route command to appropriate destination."""
-        target = cmd.get('target', 'me')
-        
-        if target in ('me', self.my_handle):
-            # Local execution
-            #self.core_q.put_nowait({
-            #    'type': 'COMMAND',
-            #    'text': f"{cmd['cmd']} {cmd.get('args', '')}",
-            #    'nick': from_bot,
-            #    'source': 'botnet'
-            #})
-            pass
-        
-        elif target == 'subnet':
-            await self.broadcast_subnet(cmd)
-        
-        elif target == 'botnet':
-            await self.broadcast_all(cmd)
         
     async def broadcast_chat(self, from_bot: str, msg: str, exclude: Optional[str] = None):
         """Broadcast chat to all peers."""
@@ -353,13 +334,13 @@ class BotnetManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
     
-    async def broadcast_all(self, cmd: Dict):
+    async def broadcast_all(self, cmd: str):
         """Broadcast command to all peers."""
-        msg = f"CMD:{json.dumps(cmd)}\n"
-        tasks = [self._safe_send(w, msg) for _, w in self.peers.values()]
+        msg = f"CMD {cmd}\n"
+        tasks = [self._safe_send(peer.writer, msg) for peer in self.peers.values()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     async def broadcast_subnet(self, cmd: Dict):
         """Broadcast to subnet peers only."""
         msg = f"CMD:{json.dumps(cmd)}\n"
@@ -378,7 +359,45 @@ class BotnetManager:
             await writer.drain()
         except Exception as e:
             log.error(f"Send failed: {e}")
-        
+
+    def register(self, plugin: str, name: str, handler: Callable):
+        key = BotCommand(name.lower(), plugin.lower())
+        if key in self.cmds:
+            log.warning(f"Skipping duplicate {plugin}:{name} (existing)")
+            return
+        self.cmds[key] = handler
+        log.info(f"Registered {plugin}:{name}")
+
+    async def dispatch(self, plugin: str, name: str, **kwargs):
+        """Find handler, pass cmd_key + kwargs."""
+        key = BotCommand(plugin.lower(), name.lower())
+        handler = self.cmds.get(key)
+        if handler:
+            await handler(key, **kwargs)
+        else:
+            log.warning(f"No handler for {plugin}:{name}")
+
+    def unregister(self, plugin: str, name: str):
+        """Unregister handler."""
+        key = BotCommand(plugin.lower(), name.lower())
+        if key in self.cmds:
+            del self.cmds[key]
+            log.info(f"Unregistered {plugin}:{name}")
+            return True
+        log.warning(f"No handler for {plugin}:{name}")
+        return False
+
+    def unregister_plugin(self, plugin: str):
+        """Unregister all handlers for plugin."""
+        removed = 0
+        to_remove = [k for k in self.cmds if k.plugin == plugin.lower()]
+        for key in to_remove:
+            del self.cmds[key]
+            removed += 1
+        log.info(f"Unregistered {removed} cmds for {plugin}")
+        return removed            
+
+    ## To be reviewed.
     async def share_data(self, writer: asyncio.StreamWriter):
         """Share users and channels (aggressive mode)."""
         await self.share_users(writer)
@@ -433,71 +452,3 @@ class BotnetManager:
             # TODO: Merge with conflict resolution
         except Exception as e:
             log.error(f"Handle share channels error: {e}")
-
-    async def request_needop(self, chan: str, type: str = 'op'):
-        """wckneed - broadcast needop"""
-        msg = {'cmd': 'NEEDOP', 'chan': chan, 'type': type}
-        await self.send_to_subnet(msg)
-
-    async def request_needop_from(self, target_bot: str, nick: str, chan: str):
-        """wckbot $vhand needop "$nick $chan" """
-        msg = {'cmd': 'NEEDOP', 'target': target_bot, 'nick': nick, 'chan': chan}
-        await self.send_to_peer(target_bot, msg)
-
-    async def sugop(self, chan: str):
-        """wckbot - sugop "$chan $chan" """
-        msg = {'cmd': 'SUGOP', 'chan': chan}
-        await self.send_to_subnet(msg)
-
-    def execute_command(self, cmd_data: dict):
-        """Execute command (called by poller thread)."""
-        if not self.loop:
-            return
-        
-        try:
-            cmd_type = cmd_data.get('type')
-            
-            if cmd_type == 'chat':
-                asyncio.run_coroutine_threadsafe(
-                    self.broadcast_chat(
-                        f"<{cmd_data.get('user', 'core')}> {cmd_data['text']}",
-                        cmd_data.get('channel', 0)
-                    ),
-                    self.loop
-                )
-            
-            elif cmd_type == 'cmd':
-                parsed = self.parse_command(f".{cmd_data['cmd']}")
-                asyncio.run_coroutine_threadsafe(
-                    self.route_command(parsed, 'core'),
-                    self.loop
-                )
-            
-            elif cmd_type == 'link':
-                botname = cmd_data['botname']
-                log.info(f"link request to {botname}")
-                asyncio.run_coroutine_threadsafe(
-                    self.connect_peer(botname),
-                    self.loop
-                )
-            
-            elif cmd_type == 'unlink':
-                name = cmd_data['name']
-                if name in self.peers:
-                    self.peers[name].writer.close()
-                    del self.peers[name]
-                log.info(f"Unlinked from {name}")
-
-            elif cmd_type == 'botlink':                
-                parts = cmd_data['line'].split()
-                from_bot = parts[1]
-                self.process_peer_line(cmd_data['line'], from_bot)
-
-        except Exception as e:
-            log.error(f"Execute command failed: {e}")
-    
-    def stop(self):
-        """Shutdown."""
-        self.running = False
-        for _, writer in self.peers.values():
-            writer.close()

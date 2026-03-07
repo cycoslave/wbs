@@ -27,7 +27,7 @@ from .commands import COMMANDS
 from .console import Console
 from .partyline import Partyline
 from .session import Session
-from .seen import Seen
+from .plugins.seen import Seen
 from .irc import irc_process_launcher
 from .plugins import PluginManager
 
@@ -60,7 +60,7 @@ class Core:
         self.chan = ChannelManager(self.db_path)
         self.seen = Seen(self.db_path)
         self.partyline = Partyline(self)
-        self.plugins = PluginManager(self)
+        self.plugin = PluginManager(self)
 
         # Runtime variables
         self.children = []
@@ -104,7 +104,7 @@ class Core:
         log.info("Loading configured plugins...")
         for plugin_name in self.config.get('plugins', []):
             try:
-                await self.plugins.load_plugin(plugin_name)
+                await self.plugin.load_plugin(plugin_name)
                 log.info(f"Auto-loaded plugin: {plugin_name}")
             except Exception as e:
                 log.error(f"Failed auto-load {plugin_name}: {e}")
@@ -147,7 +147,8 @@ class Core:
             return
         
         etype = event.get('type', 'UNKNOWN')
-        await self.plugins.dispatch(etype, event)
+        log.debug(f"Dispatching: {etype} - {event}")
+        await self.plugin.dispatch(etype, event)
         
         handlers = {
             'PARTYLINE_INPUT': self.on_partyline_input,
@@ -609,7 +610,7 @@ class Core:
         irc_data = event['irc_data']
         
         # Dispatch to plugins: on_irc_timer_<name>
-        await self.plugins.dispatch(f"IRC_TIMER_{timer_name.upper()}", {
+        await self.plugin.dispatch(f"IRC_TIMER_{timer_name.upper()}", {
             'type': f"IRC_TIMER_{timer_name.upper()}",
             'irc_data': irc_data
         })

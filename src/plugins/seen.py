@@ -5,7 +5,7 @@ Seen tracking for all users (like gseen.mod).
 
 import time
 from typing import List, Optional, Dict, Any
-from .db import get_db 
+from ..db import get_db 
 
 class Seen:
     EXPIRE_DAYS = 60

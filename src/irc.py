@@ -173,20 +173,12 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_join(self, conn, event):
         nick = event.source.nick
         chan = event.target
-        if nick == conn.get_nickname():
-            if self.config.get('botnet', {}).get('enabled', False):
-                self._emit_event({
-                    'type': 'NEEDOP',
-                    'chan': chan,
-                    'nick': conn.get_nickname(),
-                    'requester': conn.get_nickname()
-                })
         if nick in self.maintenance_state['linked_bots'].values():
             pass
         self._emit_event({
             'type': EventType.JOIN,
-            'channel': event.target,
-            'nick': event.source.nick,
+            'channel': chan,
+            'nick': nick,
             'host': str(event.source)
         })
     
@@ -230,12 +222,12 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         })
     
     def on_mode(self, conn, event):
-        chan = event.target.lower()
+        channel = event.target.lower()
         modes = event.arguments[0].lower() if event.arguments else ''
         mode_args = event.arguments[1:] if len(event.arguments) > 1 else []
         self._emit_event({
             'type': EventType.MODE,
-            'chan': chan,
+            'channel': channel,
             'modes': modes,
             'args': mode_args,
             'nick': event.source.nick
@@ -335,7 +327,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 if not self.connection.is_connected():
                     log.error(f"Not connected, dropping command: {cmd}")
                     return
-
+                
                 if cmd == 'msg':
                     self.connection.privmsg(cmd_data['target'], cmd_data['text'])
                 
@@ -378,7 +370,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     self.connection.send_raw(cmd_data['line'])
                 
                 else:
-                    log.error(f"[IRC] Unknown command: {cmd}")
+                    if cmd is not None:
+                        log.error(f"[IRC] Unknown command: {cmd}")
         
         except Exception as e:
             log.error(f"Command failed {cmd_data}: {e}")
@@ -566,10 +559,10 @@ def start_irc_process(config, core_q, irc_q):
                     time.sleep(throttle_interval - elapsed)
                 
                 cmd_data = irc_q.get_nowait()
-                log.debug(f"Executing: {cmd_data}")
-                
-                irc.execute_command(cmd_data)
-                last_cmd_time = time.time()
+                if cmd_data is not None:
+                    log.debug(f"Executing: {cmd_data}")
+                    irc.execute_command(cmd_data)
+                    last_cmd_time = time.time()
             
             except queue.Empty:
                 time.sleep(0.01) 
