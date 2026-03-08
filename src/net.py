@@ -24,7 +24,7 @@ class NetListener:
     async def handle_connection(self, reader, writer):
         """Detect botlink vs partyline → route to core_q with DUP FD or picklable data."""
         peer = writer.get_extra_info('peername')
-        log.info(f"Incoming {peer}")
+        log.debug(f"Incoming {peer}")
         
         try:
             data = await asyncio.wait_for(reader.readline(), 30.0)

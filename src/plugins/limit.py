@@ -57,7 +57,7 @@ class limitPlugin(Plugin):
                 continue
             
             chan_obj = await self.core.chan.get_channel(chan)
-            if not chan_obj or not chan_obj.is_limit:
+            if not chan_obj or not chan_obj.get('is_limit', False):
                 continue
             
             user_count = chan_data['users']

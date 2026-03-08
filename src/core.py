@@ -193,7 +193,7 @@ class Core:
         peer = event.get('peer', 'unknown')
         dup_fd = event.get('sockfd')
         
-        log.info(f"New bot connection: {bot_name} fd={dup_fd}")
+        log.debug(f"New bot connection: {bot_name} fd={dup_fd}")
         
         if dup_fd is None:
             log.warning(f"No dup_fd for bot {bot_name}")
@@ -235,7 +235,7 @@ class Core:
             #})
             #asyncio.create_task(bot_session.run())
             
-            log.info(f"Bot session {bot_id} created for {bot_name}")
+            log.debug(f"Bot session {bot_id} created for {bot_name}")
             #self.partyline.broadcast(f"*** {bot_name} linked to botnet")
             
         except Exception as e:
@@ -505,7 +505,7 @@ class Core:
         nick = event.get('nick', '')
         modes = event.get('modes', '')
         channel = event.get('channel', '')
-        args = event.get('args', '')
+        args = event.get('args', [])
         # Update channel mode tracking
         chan = self.channels.get(channel)
         if chan:
@@ -523,6 +523,10 @@ class Core:
                 elif char == 'o':  # Op mode
                     if arg_index < len(args):
                         target_nick = args[arg_index]
+                        if adding and target_nick.lower() == self.botname.lower():
+                            chan.bot_op = True
+                        elif not adding and target_nick.lower() == self.botname.lower():
+                            chan.bot_op = False
                         if adding and target_nick not in chan.ops:
                             chan.ops.append(target_nick)
                         elif not adding and target_nick in chan.ops:
@@ -537,7 +541,8 @@ class Core:
                             chan.voiced.remove(target_nick)
                         arg_index += 1
                 elif char in 'lkbeI':  # Modes with parameters
-                    arg_index += 1
+                    if adding or char in 'kbeI':
+                        arg_index += 1
 
     async def on_newchan(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
@@ -572,7 +577,7 @@ class Core:
         host = event.get('host', '')
         channel = event.get('channel', '')
         await self.seen.update_seen(nick, host, channel, 'PART')
-        if nick == self.irc_botnick:
+        if nick == self.botname:
             if channel in self.channels:
                 del self.channels[channel]
                 log.info(f"Bot parted {channel}, removed from channels database")
@@ -594,7 +599,7 @@ class Core:
         channel = event.get('channel', '')
         await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
         # If bot was kicked, remove channel entirely
-        if kicked_nick == self.irc_botnick:
+        if kicked_nick == self.botname:
             if channel in self.channels:
                 del self.channels[channel]
             return
@@ -613,7 +618,7 @@ class Core:
         """User quit IRC."""
         nick = event.get('nick', '')
         await self.seen.update_seen(nick, '', '', 'QUIT')
-        if nick == self.irc_botnick:
+        if nick == self.botname:
             if channel in self.channels:
                 del self.channels[channel]
             return
@@ -748,3 +753,90 @@ class Core:
             'type': f"IRC_TIMER_{timer_name.upper()}",
             'irc_data': irc_data
         })
+
+    def on_chan(self, channel: str) -> bool:
+        """Check if the bot is on a channel.
+        
+        Args:
+            channel: Channel name (with or without # prefix)
+        
+        Returns:
+            True if bot is on the channel, False otherwise
+        """
+        if not channel.startswith('#'):
+            channel = f'#{channel}'
+        return channel in self.channels
+
+    def bot_isop(self, channel: str) -> bool:
+        """Check if the bot has op status on a channel.
+        
+        Args:
+            channel: Channel name (with or without # prefix)
+        
+        Returns:
+            True if bot is opped, False otherwise
+        """
+        if not channel.startswith('#'):
+            channel = f'#{channel}'
+        
+        chan = self.channels.get(channel)
+        if not chan:
+            return False
+        
+        return self.botname in chan.ops
+
+    def nick_isop(self, nick: str, channel: str) -> bool:
+        """Check if a nick has op status on a channel.
+        
+        Args:
+            nick: Nickname to check
+            channel: Channel name (with or without # prefix)
+        
+        Returns:
+            True if nick is opped, False otherwise
+        """
+        if not channel.startswith('#'):
+            channel = f'#{channel}'
+        
+        chan = self.channels.get(channel)
+        if not chan:
+            return False
+        
+        return nick in chan.ops
+
+    def nick_isvoice(self, nick: str, channel: str) -> bool:
+        """Check if a nick has voice status on a channel.
+        
+        Args:
+            nick: Nickname to check
+            channel: Channel name (with or without # prefix)
+        
+        Returns:
+            True if nick has voice, False otherwise
+        """
+        if not channel.startswith('#'):
+            channel = f'#{channel}'
+        
+        chan = self.channels.get(channel)
+        if not chan:
+            return False
+        
+        return nick in chan.voiced
+
+    def chan_modes(self, channel: str) -> str:
+        """Get current channel mode string.
+        
+        Args:
+            channel: Channel name (with or without # prefix)
+        
+        Returns:
+            Mode string (e.g., '+nt') or empty string if channel not found
+        """
+        if not channel.startswith('#'):
+            channel = f'#{channel}'
+        
+        chan = self.channels.get(channel)
+        if not chan:
+            return ''
+        
+        return chan.mode

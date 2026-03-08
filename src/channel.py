@@ -385,16 +385,17 @@ class ChannelManager:
         data['exempts'] = json.dumps(data['exempts'])
         return data
 
-    async def get_channel(self, name: str) -> Optional[Channel]:
-        """Fetch channel from DB -> Channel dataclass."""
+    async def get_channel(self, name: str) -> Optional[dict]:
+        """Fetch channel from DB -> dict."""
         async with get_db(self.db_path) as db:
-            row = await db.execute(
+            async with db.execute(
                 "SELECT * FROM channels WHERE name = ?",
                 (name,)
-            ).fetchone()
+            ) as cursor:
+                row = await cursor.fetchone()
             
             if row:
-                return Channel(**dict(row))
+                return dict(row)
             return None
 
     async def get_all_channels(self) -> list[Channel]:
