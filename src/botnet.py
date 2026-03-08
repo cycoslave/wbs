@@ -3,14 +3,9 @@
 Botnet peer manager for WBS.
 Handles bot-to-bot linking, command routing, and data sharing.
 """
-
-import os
-import time
 import asyncio
 import json
 import logging
-import queue
-import threading
 import aiosqlite
 import secrets
 import hashlib

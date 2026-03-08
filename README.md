@@ -27,10 +27,15 @@ options:
 - Launch your bot in foreground mode (./wbs -f)
 - .adduser yourname *!ident@your.hostname.or.ip
 - .addaccess yourname admin
-- .die
+- .die 
 
 ## Todo
-- recode the WBS TCL scripts into python
+- Complete seen plugin
+- Complete channel + topic locking features
+- News plugin creation/migration from WBS 5
+- Complete data sharing between bot
+- Create nick database (keeps track of user, host and nick, data useful for hand2nick or host matching)
 
 ## Bugs
-- 
+- Some channel sync issues, probably missing some irc numerics
+- Background mode is not totally going to background.

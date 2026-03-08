@@ -2,13 +2,12 @@
 """
 Handles user management for WBS IRC bot.
 """
-
 import aiosqlite
 import sqlite3
 import json
 import bcrypt
 import time
-from typing import List, Optional, Literal, Dict, Any, Tuple
+from typing import List, Optional, Dict
 from dataclasses import dataclass, asdict, field
 from .db import get_db 
 

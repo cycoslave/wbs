@@ -5,9 +5,7 @@ version: 0.1.0
 by: cyco
 Description: Set and watch channel limit
 """
-import asyncio
 import time
-import random
 import logging
 from typing import Dict
 from . import Plugin

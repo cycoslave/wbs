@@ -1,10 +1,10 @@
 # src/partyline.py
-"""Partyline hub - coordinates chat between console, telnet, DCC, and botnet"""
-
+"""
+Partyline hub - coordinates chat between console, telnet, DCC, and botnet
+"""
 import asyncio
-import multiprocessing as mp
 import logging
-from typing import Dict, Optional
+from typing import Optional
 from .user import UserManager
 
 log = logging.getLogger(__name__)

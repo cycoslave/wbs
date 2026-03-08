@@ -1,7 +1,6 @@
 # plugins/example.py
-import asyncio
 import logging
-from typing import Optional
+
 from . import Plugin
 
 log = logging.getLogger("wbs.core")

@@ -2,11 +2,9 @@
 """
 Handles IRC channel management for WBS.
 """
-
 import aiosqlite
 import sqlite3
 import logging
-import time
 import json
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field, asdict

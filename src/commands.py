@@ -2,18 +2,14 @@
 """
 Partyline commands for WBS
 """
-
 import time
 import os
 import sys
-import signal
 import platform
 import resource
-import asyncio
 import shutil
 import glob
 from datetime import datetime, timedelta
-from typing import Optional
 
 from . import __version__
 from .db import get_db
@@ -1018,7 +1014,7 @@ async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
     .plugins  → list loaded / auto-load / available (src/plugins/*.py)
     """
     # Loaded (runtime)
-    loaded = sorted(core.plugins.plugins.keys())
+    loaded = sorted(core.plugin.plugins.keys())
 
     # Auto-load from config.json
     auto_load = sorted(core.config.get('plugins', []))
@@ -1054,7 +1050,7 @@ async def cmd_load(core, handle: str, session_id: int, arg: str, respond):
         return
     
     name = args[0]
-    if name in core.plugins.plugins:
+    if name in core.plugin.plugins:
         await respond(f"{name} already loaded")
         return
     
@@ -1065,7 +1061,7 @@ async def cmd_load(core, handle: str, session_id: int, arg: str, respond):
         return
     
     try:
-        await core.plugins.load_plugin(name)
+        await core.plugin.load_plugin(name)
         await respond(f"Loaded {name}")
     except Exception as e:
         await respond(f"Failed to load {name}: {e}")
@@ -1078,12 +1074,12 @@ async def cmd_unload(core, handle: str, session_id: int, arg: str, respond):
         return
     
     name = args[0]
-    if name not in core.plugins.plugins:
+    if name not in core.plugin.plugins:
         await respond(f"{name} not loaded")
         return
     
     try:
-        plugin = core.plugins.plugins.pop(name)
+        plugin = core.plugin.plugins.pop(name)
         await plugin.unload()
         # Remove from auto-load config
         if name in core.config.get('plugins', []):

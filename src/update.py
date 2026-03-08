@@ -2,14 +2,9 @@
 """
 Update Manager
 """
-
 import aiohttp
-import asyncio
-import json
-import os
 import shutil
 import tarfile
-import tempfile
 from pathlib import Path
 from packaging import version
 from typing import List, Optional, Dict

@@ -16,13 +16,11 @@ import random
 import aiodns
 import ipaddress
 import whoisit
-import ipinfo
-import pyasn
 import aiohttp
 import aiohttp.client_exceptions
 import urllib.parse
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 from bs4 import BeautifulSoup
 
 from . import Plugin

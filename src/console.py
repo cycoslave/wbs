@@ -1,9 +1,7 @@
 # src/console.py
 """Non-blocking console for asyncio main process"""
-
 import asyncio
 import sys
-import select
 import logging
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout

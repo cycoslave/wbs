@@ -3,7 +3,6 @@
 IRC client process
 """
 import os
-import multiprocessing as mp
 import queue
 import threading
 import time
@@ -11,10 +10,7 @@ import logging
 import json
 import asyncio
 import irc.bot
-import irc.modes
 from datetime import datetime, timedelta
-
-from typing import Optional
 from irc.client import ServerConnectionError
 
 from .user import UserManager
