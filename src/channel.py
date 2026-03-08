@@ -5,11 +5,10 @@ Handles IRC channel management for WBS.
 
 import aiosqlite
 import sqlite3
-import asyncio
 import logging
 import time
 import json
-from typing import Dict, Optional, Callable, List, Literal
+from typing import Dict, Optional, List
 from dataclasses import dataclass, field, asdict
 
 from .db import get_db
@@ -18,83 +17,268 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Channel:
-    """Maps to the 'channels' table."""
+    """Live IRC channel state + lazy-loaded DB config"""
     name: str
-    subnet_id: Optional[int] = None
     
-    # Channel lists (JSON arrays in DB)
-    modes: str = ''
-    bans: List[str] = field(default_factory=list)
-    invites: List[str] = field(default_factory=list)
-    exempts: List[str] = field(default_factory=list)
+    users: int = 0
+    user_list: List[str] = field(default_factory=list)
+    bot_op: bool = False
+    ops: List[str] = field(default_factory=list)
+    voiced: List[str] = field(default_factory=list)
+    mode: str = ''
+    mode_params: dict = field(default_factory=dict)
+    
+    _db_config: Optional[dict] = None
+    _db_loaded: bool = False
+    _chan_mgr = None
+    
+    def update_irc_state(self, irc_data: dict):
+        """Update live IRC data from timer event"""
+        self.users = irc_data.get('users', 0)
+        self.user_list = irc_data.get('user_list', [])
+        self.bot_op = irc_data.get('bot_op', False)
+        self.ops = irc_data.get('ops', [])
+        self.voiced = irc_data.get('voiced', [])
+        self.mode = irc_data.get('mode', '')
+        self.mode_params = irc_data.get('mode_params', {})
+    
+    async def _load_db_config(self):
+        """Lazy load channel settings from DB"""
+        if not self._db_loaded and self._chan_mgr:
+            self._db_config = await self._chan_mgr.get_raw(self.name)
+            self._db_loaded = True
+    
+    # Lazy-loaded DB properties
+    async def get_subnet_id(self) -> Optional[int]:
+        await self._load_db_config()
+        return self._db_config.get('subnet_id') if self._db_config else None
+    
+    async def get_modes(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('modes', '') if self._db_config else ''
+    
+    async def get_bans(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            bans = self._db_config.get('bans', '[]')
+            return json.loads(bans) if isinstance(bans, str) else bans
+        return []
+    
+    async def get_invites(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            invites = self._db_config.get('invites', '[]')
+            return json.loads(invites) if isinstance(invites, str) else invites
+        return []
+    
+    async def get_exempts(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            exempts = self._db_config.get('exempts', '[]')
+            return json.loads(exempts) if isinstance(exempts, str) else exempts
+        return []
     
     # Flood protection
-    flood_pub: int = 15
-    flood_pub_time: int = 60
-    flood_ctcp: int = 3
-    flood_ctcp_time: int = 60
-    flood_join: int = 5
-    flood_join_time: int = 60
-    flood_kick: int = 3
-    flood_kick_time: int = 10
-    flood_deop: int = 3
-    flood_deop_time: int = 10
-    flood_nick: int = 5
-    flood_nick_time: int = 60
+    async def get_flood_pub(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_pub', 15) if self._db_config else 15
     
-    # Channel flags (booleans)
-    is_bitch: bool = False
-    is_autoop: bool = False
-    is_autovoice: bool = False
-    is_revenge: bool = False
-    is_revengebots: bool = False
-    is_protectfriends: bool = False
-    is_protectops: bool = False
-    is_dontkickops: bool = False
-    is_inactive: bool = False
-    is_enforcebans: bool = False
-    is_dynamicbans: bool = False
-    is_dynamicexempts: bool = False
-    is_dynamicinvites: bool = False
-    is_pubcom: bool = False
-    is_news: bool = False
-    is_url: bool = False
-    is_stats: bool = False
-    is_locked: bool = False
-    is_topiclock: bool = False
-    is_limit: bool = False
+    async def get_flood_pub_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_pub_time', 60) if self._db_config else 60
+    
+    async def get_flood_ctcp(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_ctcp', 3) if self._db_config else 3
+    
+    async def get_flood_ctcp_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_ctcp_time', 60) if self._db_config else 60
+    
+    async def get_flood_join(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_join', 5) if self._db_config else 5
+    
+    async def get_flood_join_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_join_time', 60) if self._db_config else 60
+    
+    async def get_flood_kick(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_kick', 3) if self._db_config else 3
+    
+    async def get_flood_kick_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_kick_time', 10) if self._db_config else 10
+    
+    async def get_flood_deop(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_deop', 3) if self._db_config else 3
+    
+    async def get_flood_deop_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_deop_time', 10) if self._db_config else 10
+    
+    async def get_flood_nick(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_nick', 5) if self._db_config else 5
+    
+    async def get_flood_nick_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_nick_time', 60) if self._db_config else 60
+    
+    # Channel flags
+    async def is_bitch(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_bitch', False) if self._db_config else False
+    
+    async def is_autoop(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_autoop', False) if self._db_config else False
+    
+    async def is_autovoice(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_autovoice', False) if self._db_config else False
+    
+    async def is_revenge(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_revenge', False) if self._db_config else False
+    
+    async def is_revengebots(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_revengebots', False) if self._db_config else False
+    
+    async def is_protectfriends(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_protectfriends', False) if self._db_config else False
+    
+    async def is_protectops(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_protectops', False) if self._db_config else False
+    
+    async def is_dontkickops(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_dontkickops', False) if self._db_config else False
+    
+    async def is_inactive(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_inactive', False) if self._db_config else False
+    
+    async def is_enforcebans(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_enforcebans', False) if self._db_config else False
+    
+    async def is_dynamicbans(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_dynamicbans', False) if self._db_config else False
+    
+    async def is_dynamicexempts(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_dynamicexempts', False) if self._db_config else False
+    
+    async def is_dynamicinvites(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_dynamicinvites', False) if self._db_config else False
+    
+    async def is_pubcom(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_pubcom', False) if self._db_config else False
+    
+    async def is_news(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_news', False) if self._db_config else False
+    
+    async def is_url(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_url', False) if self._db_config else False
+    
+    async def is_stats(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_stats', False) if self._db_config else False
+    
+    async def is_locked(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_locked', False) if self._db_config else False
+    
+    async def is_topiclock(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_topiclock', False) if self._db_config else False
+    
+    async def is_limit(self) -> bool:
+        await self._load_db_config()
+        return self._db_config.get('is_limit', False) if self._db_config else False
     
     # Lock state
-    lock_by: Optional[str] = None
-    lock_at: int = 0
-    lock_reason: str = ''
+    async def get_lock_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('lock_by') if self._db_config else None
+    
+    async def get_lock_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('lock_at', 0) if self._db_config else 0
+    
+    async def get_lock_reason(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('lock_reason', '') if self._db_config else ''
     
     # Topic lock
-    topiclock: str = ''
-    topiclock_by: Optional[str] = None
-    topiclock_at: int = 0
-    topiclock_reason: str = ''
+    async def get_topiclock(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('topiclock', '') if self._db_config else ''
+    
+    async def get_topiclock_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('topiclock_by') if self._db_config else None
+    
+    async def get_topiclock_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('topiclock_at', 0) if self._db_config else 0
+    
+    async def get_topiclock_reason(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('topiclock_reason', '') if self._db_config else ''
     
     # Channel limits
-    limit_add: int = 15
-    limit_rand: int = 200
-    limit_tolerance: int = 2
-    limit_delta: int = 300
-    limit_at: int = 0
+    async def get_limit_add(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('limit_add', 15) if self._db_config else 15
+    
+    async def get_limit_rand(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('limit_rand', 200) if self._db_config else 200
+    
+    async def get_limit_tolerance(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('limit_tolerance', 2) if self._db_config else 2
+    
+    async def get_limit_delta(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('limit_delta', 300) if self._db_config else 300
+    
+    async def get_limit_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('limit_at', 0) if self._db_config else 0
     
     # Metadata
-    comment: str = ''
-    created_at: int = field(default_factory=lambda: int(time.time()))
-    updated_at: int = field(default_factory=lambda: int(time.time()))
-    created_by: Optional[str] = None
-    updated_by: Optional[str] = None
-
-    def __post_init__(self):
-        # Normalize JSON lists from DB
-        for field_name in ['bans', 'invites', 'exempts']:
-            field_value = getattr(self, field_name)
-            if isinstance(field_value, str):
-                setattr(self, field_name, json.loads(field_value) if field_value else [])
+    async def get_comment(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('comment', '') if self._db_config else ''
+    
+    async def get_created_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('created_at', 0) if self._db_config else 0
+    
+    async def get_updated_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('updated_at', 0) if self._db_config else 0
+    
+    async def get_created_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('created_by') if self._db_config else None
+    
+    async def get_updated_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('updated_by') if self._db_config else None
 
 class ChannelManager:
 

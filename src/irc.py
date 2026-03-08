@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 class EventType:
     PUBMSG = 'PUBMSG'
     PRIVMSG = 'PRIVMSG'
+    NEWCHAN = 'NEWCHAN'
     JOIN = 'JOIN'
     PART = 'PART'
     NICK = 'NICK'
@@ -100,14 +101,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
     def is_op(self, chan: str, nick: str) -> bool:
         """Check if nick is op on channel"""
-        if chan in self.connection.channels:
-            return self.connection.channels[chan].is_oper(nick)
+        if chan in self.channels:
+            return self.channels[chan].is_oper(nick)
         return False
 
     def on_chan(self, chan: str, nick: str) -> bool:
         """Check if nick is present in channel"""
-        if chan in self.connection.channels:
-            return self.connection.channels[chan].has_user(nick)
+        if chan in self.channels:
+            return self.channels[chan].has_user(nick)
         return False
 
     def is_bot_op(self, chan: str) -> bool:
@@ -116,8 +117,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def is_voice(self, chan: str, nick: str) -> bool:
         """Check if nick is voiced on channel"""
-        if chan in self.connection.channels:
-            return self.connection.channels[chan].is_voiced(nick)
+        if chan in self.channels:
+            return self.channels[chan].is_voiced(nick)
         return False
 
     def is_online(self, nick: str) -> bool:
@@ -175,12 +176,39 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         chan = event.target
         if nick in self.maintenance_state['linked_bots'].values():
             pass
-        self._emit_event({
-            'type': EventType.JOIN,
-            'channel': chan,
-            'nick': nick,
-            'host': str(event.source)
-        })
+        if nick.lower() ==  conn.get_nickname().lower():
+            chan_obj = self.channels.get(chan)
+            if chan_obj:
+                log.info(f"Building snapshot for {chan}")
+                    
+                try:
+                    snapshot = {
+                        'users': len(chan_obj.users()),
+                        'user_list': list(chan_obj.users()),
+                        'bot_op': self.is_bot_op(chan),  # Use your existing helper method
+                        'ops': list(chan_obj.opers()),
+                        'voiced': list(chan_obj.voiced()),
+                        'mode': getattr(chan_obj, 'mode', ''),
+                        'mode_params': getattr(chan_obj, 'mode_params', {})
+                    }
+                    log.debug(f"Successfully added {chan} to snapshot")
+                    
+                except Exception as inner_e:
+                    log.error(f"Error building snapshot for {chan}: {inner_e}", exc_info=True)
+            self._emit_event({
+                'type': EventType.NEWCHAN,
+                'channel': chan,
+                'nick': nick,
+                'host': str(event.source),
+                'irc_data': snapshot
+            })
+        else:
+            self._emit_event({
+                'type': EventType.JOIN,
+                'channel': chan,
+                'nick': nick,
+                'host': str(event.source)
+            })
     
     def on_part(self, conn, event):
         reason = event.arguments[0] if event.arguments else ''
@@ -510,25 +538,34 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             
             snapshot = {
                 'connected': self.is_connected,
-                'botnick': self.connection.get_nickname() if self.connection else None,
+                'botname': self.connection.get_nickname() if self.connection else None,
                 'channels': {}
             }
             
-            try:
-                for chan_name in list(self.connection.channels.keys()):
-                    chan_obj = self.connection.channels.get(chan_name)
-                    if chan_obj:
+            #log.info(f"self.channels type: {type(self.channels)}")
+            #log.info(f"self.channels content: {self.channels}")
+            #log.info(f"self.channels.keys(): {list(self.channels.keys())}")
+            for chan_name in list(self.channels.keys()):
+                chan_obj = self.channels.get(chan_name)
+                
+                if chan_obj:
+                    log.debug(f"Building snapshot for {chan_name}")
+                    
+                    try:
                         snapshot['channels'][chan_name] = {
-                            'users': len(chan_obj.users),
-                            'user_list': list(chan_obj.users),
-                            'bot_op': chan_obj.is_oper(snapshot['botnick']),
-                            'ops': [nick for nick in chan_obj.opers()],
+                            'users': len(chan_obj.users()),
+                            'user_list': list(chan_obj.users()),
+                            'bot_op': self.is_bot_op(chan_name),  # Use your existing helper method
+                            'ops': list(chan_obj.opers()),
+                            'voiced': list(chan_obj.voiced()),
                             'mode': getattr(chan_obj, 'mode', ''),
                             'mode_params': getattr(chan_obj, 'mode_params', {})
                         }
-            except Exception as e:
-                log.debug(f"Channel snapshot error: {e}")
-            
+                        log.debug(f"Successfully added {chan_name} to snapshot")
+                        
+                    except Exception as inner_e:
+                        log.error(f"Error building snapshot for {chan_name}: {inner_e}", exc_info=True)
+                        
             event = {
                 'type': 'IRC_TIMER_FIRED',
                 'timer_name': name,

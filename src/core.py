@@ -19,7 +19,7 @@ from collections import deque
 from . import __version__
 from .db import init_db
 from .net import NetListener
-from .channel import ChannelManager
+from .channel import ChannelManager, Channel
 from .user import UserManager
 from .bot import BotManager
 from .botnet import BotnetManager
@@ -68,6 +68,7 @@ class Core:
         self.running = True
         self.connected = False
         self.botname = self.config['bot']['nick']
+        self.channels = {} # chan_name -> Channel object
         self.dcc_sessions = {}
         self.party_sessions = {}
         self.bot_sessions = {} 
@@ -161,11 +162,12 @@ class Core:
             'PUBMSG': self.on_pubmsg,
             'PRIVMSG': self.on_privmsg,
             'ON_INVITE': self.on_invite,
+            'NEWCHAN': self.on_newchan,
             'JOIN': self.on_join,
             'PART': self.on_part,
             'KICK': self.on_kick,
             'QUIT': self.on_quit,
-            'MODE': self.on_null,
+            'MODE': self.on_mode,
             'NICK': self.on_nick,
             'READY': self.on_ready,
             'DISCONNECT': self.on_disconnect,
@@ -498,44 +500,153 @@ class Core:
         solicitation = event['solicitation']
         self.partyline.broadcast(f"{solicitation} invite to join {channel} by {inviter_nick}")
 
+    async def on_mode(self, event: Dict[str, Any]):
+        """User joined channel: update seen DB."""
+        nick = event.get('nick', '')
+        modes = event.get('modes', '')
+        channel = event.get('channel', '')
+        args = event.get('args', '')
+        # Update channel mode tracking
+        chan = self.channels.get(channel)
+        if chan:
+            # Mode will be updated on next IRC timer
+            # But we can process op/voice changes immediately
+            mode_str = modes
+            arg_index = 0
+            adding = True
+            
+            for char in mode_str:
+                if char == '+':
+                    adding = True
+                elif char == '-':
+                    adding = False
+                elif char == 'o':  # Op mode
+                    if arg_index < len(args):
+                        target_nick = args[arg_index]
+                        if adding and target_nick not in chan.ops:
+                            chan.ops.append(target_nick)
+                        elif not adding and target_nick in chan.ops:
+                            chan.ops.remove(target_nick)
+                        arg_index += 1
+                elif char == 'v':  # Voice mode
+                    if arg_index < len(args):
+                        target_nick = args[arg_index]
+                        if adding and target_nick not in chan.voiced:
+                            chan.voiced.append(target_nick)
+                        elif not adding and target_nick in chan.voiced:
+                            chan.voiced.remove(target_nick)
+                        arg_index += 1
+                elif char in 'lkbeI':  # Modes with parameters
+                    arg_index += 1
+
+    async def on_newchan(self, event: Dict[str, Any]):
+        """User joined channel: update seen DB."""
+        nick = event.get('nick', '')
+        host = event.get('host', '')
+        channel = event.get('channel', '')
+        chan_data = event.get('irc_data', '')
+        await self.seen.update_seen(nick, host, channel, 'JOIN')
+        # Update channel user list
+        if channel not in self.channels:
+            chan = Channel(name=channel)
+            chan._chan_mgr = self.chan
+            self.channels[channel] = chan
+        
+        self.channels[channel].update_irc_state(chan_data)
+
     async def on_join(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
         nick = event.get('nick', '')
         host = event.get('host', '')
         channel = event.get('channel', '')
-        
         await self.seen.update_seen(nick, host, channel, 'JOIN')
+        # Update channel user list
+        chan = self.channels.get(channel)
+        if chan and nick not in chan.user_list:
+            chan.user_list.append(nick)
+            chan.users = len(chan.user_list)
 
     async def on_part(self, event: Dict[str, Any]):
         """User left channel: update seen DB."""
         nick = event.get('nick', '')
         host = event.get('host', '')
         channel = event.get('channel', '')
-        
         await self.seen.update_seen(nick, host, channel, 'PART')
+        if nick == self.irc_botnick:
+            if channel in self.channels:
+                del self.channels[channel]
+                log.info(f"Bot parted {channel}, removed from channels database")
+            return
+        # Update channel user list
+        chan = self.channels.get(channel)
+        if chan and nick in chan.user_list:
+            chan.user_list.remove(nick)
+            chan.users = len(chan.user_list)
+            # Remove from ops/voiced if present
+            if nick in chan.ops:
+                chan.ops.remove(nick)
+            if nick in chan.voiced:
+                chan.voiced.remove(nick)
 
     async def on_kick(self, event: Dict[str, Any]):
         """User kicked from channel."""
         kicked_nick = event.get('kicked_nick', '')
         channel = event.get('channel', '')
-        
         await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
+        # If bot was kicked, remove channel entirely
+        if kicked_nick == self.irc_botnick:
+            if channel in self.channels:
+                del self.channels[channel]
+            return
+        # Update channel user list
+        chan = self.channels.get(channel)
+        if chan and kicked_nick in chan.user_list:
+            chan.user_list.remove(kicked_nick)
+            chan.users = len(chan.user_list)
+            # Remove from ops/voiced if present
+            if kicked_nick in chan.ops:
+                chan.ops.remove(kicked_nick)
+            if kicked_nick in chan.voiced:
+                chan.voiced.remove(kicked_nick)
 
     async def on_quit(self, event: Dict[str, Any]):
         """User quit IRC."""
         nick = event.get('nick', '')
         await self.seen.update_seen(nick, '', '', 'QUIT')
+        if nick == self.irc_botnick:
+            if channel in self.channels:
+                del self.channels[channel]
+            return
+        for chan in self.channels.values():
+            if nick in chan.user_list:
+                chan.user_list.remove(nick)
+                chan.users = len(chan.user_list)
+            if nick in chan.ops:
+                chan.ops.remove(nick)
+            if nick in chan.voiced:
+                chan.voiced.remove(nick)
 
     async def on_nick(self, event: Dict[str, Any]):
         """User changed nick."""
         old_nick = event.get('old_nick', '')
         new_nick = event.get('new_nick', '')
-        
         await self.seen.update_seen(old_nick, '', '', 'NICK')
+        # Update nick in all channels
+        for chan in self.channels.values():
+            if old_nick in chan.user_list:
+                chan.user_list.remove(old_nick)
+                chan.user_list.append(new_nick)
+            if old_nick in chan.ops:
+                chan.ops.remove(old_nick)
+                chan.ops.append(new_nick)
+            if old_nick in chan.voiced:
+                chan.voiced.remove(old_nick)
+                chan.voiced.append(new_nick)
 
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
         self.connected = True
+        self.botname = event.get('botname')
         log.info("IRC READY - joining channels..")
         channels = await self.chan.getchans()
         for channel in channels:
@@ -609,7 +720,30 @@ class Core:
         timer_name = event['timer_name']
         irc_data = event['irc_data']
         
-        # Dispatch to plugins: on_irc_timer_<name>
+        # Update core's IRC state
+        self.connected = irc_data.get('connected', False)
+        self.botname = irc_data.get('botname')
+        
+        # Update channel objects
+        channels_data = irc_data.get('channels', {})
+        for chan_name, chan_data in channels_data.items():
+            if chan_name not in self.channels:
+                chan = Channel(name=chan_name)
+                chan._chan_mgr = self.chan
+                self.channels[chan_name] = chan
+            
+            self.channels[chan_name].update_irc_state(chan_data)
+        
+        # Remove channels we're no longer in
+        current_chans = set(channels_data.keys())
+        for chan_name in list(self.channels.keys()):
+            if chan_name not in current_chans:
+                del self.channels[chan_name]
+        
+        log.debug(f"Core state: connected={self.connected}, "
+                f"botname={self.botname}, channels={list(self.channels.keys())}")
+        
+        # Dispatch to plugins
         await self.plugin.dispatch(f"IRC_TIMER_{timer_name.upper()}", {
             'type': f"IRC_TIMER_{timer_name.upper()}",
             'irc_data': irc_data
