@@ -11,6 +11,7 @@ import logging
 import json
 import asyncio
 import irc.bot
+import irc.modes
 from datetime import datetime, timedelta
 
 from typing import Optional
@@ -59,7 +60,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         }
         self.irc_timers = {}  # name → task
         servers = self._parse_servers(config)
-        bot_config = config.get('bot', {})        
+        bot_config = config.get('bot', {})
         super().__init__(
             servers,
             bot_config.get('nick', 'wbs'),
@@ -134,6 +135,19 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         """Connected and registered - join channels"""
         log.info(f"Connected as {conn.get_nickname()}")
         conn.mode(conn.get_nickname(), "+i-ws")
+        numerics = {
+            '332': self.on_332,    # RPL_TOPIC
+            '324': self.on_324,    # RPL_CHANNELMODEIS
+            '329': self.on_329,    # RPL_CHANNELCREATETIME
+            '367': self.on_367,    # RPL_BANLIST
+            '346': self.on_346,    # RPL_INVITELIST
+            '348': self.on_348,    # RPL_EXCEPTLIST
+            '368': self.on_368,    # RPL_ENDOFBANLIST etc.
+            '347': self.on_347,    # RPL_ENDOFINVITELIST
+            '349': self.on_349,    # RPL_ENDOFEXCEPTLIST
+        }
+        for numeric, handler in numerics.items():
+            conn.add_global_handler(numeric, handler, -20)
         self._emit_event({
             'type': EventType.READY,
             'botname': conn.get_nickname()
@@ -296,6 +310,78 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'inviter': inviter_nick,
                 'solicitation': 'Unsolicited'
             })
+
+    def on_332(self, conn, event):  # RPL_TOPIC
+        chan_name = event.arguments[1]
+        topic = event.arguments[2]
+        self._emit_event({
+            'type': 'CHANNEL_TOPIC',
+            'channel': chan_name,
+            'topic': topic
+        })
+
+    def on_324(self, conn, event):  # RPL_CHANNELMODEIS
+        chan_name = event.arguments[1]
+        modes_str = ' '.join(event.arguments[2:])
+        self._emit_event({
+            'type': 'CHANNEL_MODES',
+            'channel': chan_name,
+            'modes_str': modes_str
+        })
+
+    def on_329(self, conn, event):  # RPL_CHANNELCREATIONTIME
+        chan_name = event.arguments[1]
+        created_ts = int(event.arguments[2])
+        self._emit_event({
+            'type': 'CHANNEL_CREATED',
+            'channel': chan_name,
+            'created': created_ts
+        })
+
+    def on_367(self, conn, event):  # RPL_BANLIST
+        chan_name, ban_mask = event.arguments[1:3]
+        self._emit_event({
+            'type': 'BANLIST_ADD',
+            'channel': chan_name,
+            'ban': ban_mask
+        })
+
+    def on_346(self, conn, event):  # RPL_INVITELIST
+        chan_name, invite_mask = event.arguments[1:3]
+        self._emit_event({
+            'type': 'INVITELIST_ADD',
+            'channel': chan_name,
+            'invite': invite_mask
+        })
+
+    def on_348(self, conn, event):  # RPL_EXCEPTLIST
+        chan_name, exempt_mask = event.arguments[1:3]
+        self._emit_event({
+            'type': 'EXEMPTLIST_ADD',
+            'channel': chan_name,
+            'exempt': exempt_mask
+        })
+
+    def on_368(self, conn, event):  # RPL_ENDOFBANLIST
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'BANLIST_END',
+            'channel': chan_name
+        })
+
+    def on_347(self, conn, event):  # RPL_ENDOFINVITELIST
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'INVITELIST_END',
+            'channel': chan_name
+        })
+
+    def on_349(self, conn, event):  # RPL_ENDOFEXCEPTLIST
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'EXCEPTLIST_END',
+            'channel': chan_name
+        })                
 
     def on_whoisuser(self, conn, event):
         """WHOIS response (311 numeric)"""
@@ -558,7 +644,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                             'bot_op': self.is_bot_op(chan_name),  # Use your existing helper method
                             'ops': list(chan_obj.opers()),
                             'voiced': list(chan_obj.voiced()),
-                            'mode': getattr(chan_obj, 'mode', ''),
+                            'mode': ''.join(f"{k}{v}" if v else k for k, v in chan_obj.modes.items()),
                             'mode_params': getattr(chan_obj, 'mode_params', {})
                         }
                         log.debug(f"Successfully added {chan_name} to snapshot")

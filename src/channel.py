@@ -20,27 +20,59 @@ class Channel:
     """Live IRC channel state + lazy-loaded DB config"""
     name: str
     
-    users: int = 0
-    user_list: List[str] = field(default_factory=list)
-    bot_op: bool = False
+    users: List[str] = field(default_factory=list)
     ops: List[str] = field(default_factory=list)
     voiced: List[str] = field(default_factory=list)
-    mode: str = ''
-    mode_params: dict = field(default_factory=dict)
+    bot_op: bool = False
+    # Bool modes (no param)
+    modes_n: bool = False
+    modes_t: bool = False
+    modes_p: bool = False
+    modes_s: bool = False
+    modes_i: bool = False
+    modes_m: bool = False
+    # Param modes
+    limit: Optional[int] = 0
+    key: Optional[str] = ''
+    bans: List[str] = field(default_factory=list)
+    invites: List[str] = field(default_factory=list)
+    exempts: List[str] = field(default_factory=list)
+    topic: Optional[str] = ''
+    created: Optional[int] = 0
     
-    _db_config: Optional[dict] = None
-    _db_loaded: bool = False
     _chan_mgr = None
     
+    def _parse_and_set_modes(self, modes_str: str):
+        """Parse RPL_324 or MODE msg"""
+        modes = irc.modes.parse_channel_modes(modes_str)
+        for sign, mode, param in modes:
+            setter = {'+': self._set_mode, '-': self._clear_mode}
+            setter[sign](mode, param)
+
+    def _set_mode(self, mode: str, param: Optional[str] = None):
+        bool_modes = 'ntpsim'
+        if mode in bool_modes:
+            setattr(self, f'modes_{mode}', True)
+        elif mode == 'l':
+            self.limit = int(param) if param else None
+        elif mode == 'k':
+            self.key = param
+
+    def _clear_mode(self, mode: str, param: Optional[str] = None):
+        bool_modes = 'ntpsim'
+        if mode in bool_modes:
+            setattr(self, f'modes_{mode}', False)
+        elif mode == 'l':
+            self.limit = None
+        elif mode == 'k':
+            self.key = None
+
     def update_irc_state(self, irc_data: dict):
-        """Update live IRC data from timer event"""
-        self.users = irc_data.get('users', 0)
-        self.user_list = irc_data.get('user_list', [])
+        self.users = irc_data.get('user_list', [])  # Use full list
         self.bot_op = irc_data.get('bot_op', False)
         self.ops = irc_data.get('ops', [])
         self.voiced = irc_data.get('voiced', [])
-        self.mode = irc_data.get('mode', '')
-        self.mode_params = irc_data.get('mode_params', {})
+        # Bool/param now live-updated via handlers; no need for raw mode str
     
     async def _load_db_config(self):
         """Lazy load channel settings from DB"""

@@ -174,6 +174,15 @@ class Core:
             'IRC_TIMER_FIRED': self.on_irc_timer_fired,
             'REQUEST_BOTLINKS': self.request_botlinks,
             'ERROR': self.on_error,
+            'CHANNEL_TOPIC': self.on_332,
+            'CHANNEL_MODES': self.on_324,
+            'CHANNEL_CREATED': self.on_329,
+            'BANLIST_ADD': self.on_367,
+            'INVITELIST_ADD': self.on_346,
+            'EXEMPTLIST_ADD': self.on_348,
+            'BANLIST_END': self.on_null,
+            'INVITELIST_END': self.on_null,
+            'EXCEPTLIST_END': self.on_null,
         }
         handler = handlers.get(etype)
         if handler:
@@ -501,49 +510,56 @@ class Core:
         self.partyline.broadcast(f"{solicitation} invite to join {channel} by {inviter_nick}")
 
     async def on_mode(self, event: Dict[str, Any]):
-        """User joined channel: update seen DB."""
-        nick = event.get('nick', '')
-        modes = event.get('modes', '')
+        """Process MODE events - update channel tracking including limits"""
         channel = event.get('channel', '')
+        modes = event.get('modes', '')
         args = event.get('args', [])
-        # Update channel mode tracking
+        
         chan = self.channels.get(channel)
-        if chan:
-            # Mode will be updated on next IRC timer
-            # But we can process op/voice changes immediately
-            mode_str = modes
-            arg_index = 0
-            adding = True
+        if not chan:
+            return
             
-            for char in mode_str:
-                if char == '+':
-                    adding = True
-                elif char == '-':
-                    adding = False
-                elif char == 'o':  # Op mode
-                    if arg_index < len(args):
-                        target_nick = args[arg_index]
-                        if adding and target_nick.lower() == self.botname.lower():
-                            chan.bot_op = True
-                        elif not adding and target_nick.lower() == self.botname.lower():
-                            chan.bot_op = False
-                        if adding and target_nick not in chan.ops:
-                            chan.ops.append(target_nick)
-                        elif not adding and target_nick in chan.ops:
-                            chan.ops.remove(target_nick)
-                        arg_index += 1
-                elif char == 'v':  # Voice mode
-                    if arg_index < len(args):
-                        target_nick = args[arg_index]
-                        if adding and target_nick not in chan.voiced:
-                            chan.voiced.append(target_nick)
-                        elif not adding and target_nick in chan.voiced:
-                            chan.voiced.remove(target_nick)
-                        arg_index += 1
-                elif char in 'lkbeI':  # Modes with parameters
-                    if adding or char in 'kbeI':
-                        arg_index += 1
-
+        mode_str = modes
+        arg_index = 0
+        adding = True
+        
+        for char in mode_str:
+            if char == '+':
+                adding = True
+            elif char == '-':
+                adding = False
+            elif char == 'o':  # Op mode
+                if arg_index < len(args):
+                    target_nick = args[arg_index]
+                    if target_nick.lower() == self.botname.lower():
+                        chan.bot_op = adding
+                    if adding and target_nick not in chan.ops:
+                        chan.ops.append(target_nick)
+                    elif not adding and target_nick in chan.ops:
+                        chan.ops.remove(target_nick)
+                    arg_index += 1
+            elif char == 'v':  # Voice mode
+                if arg_index < len(args):
+                    target_nick = args[arg_index]
+                    if adding and target_nick not in chan.voiced:
+                        chan.voiced.append(target_nick)
+                    elif not adding and target_nick in chan.voiced:
+                        chan.voiced.remove(target_nick)
+                    arg_index += 1
+            elif char == 'l':  # Limit mode
+                if adding and arg_index < len(args):
+                    try:
+                        chan.limit = int(args[arg_index])
+                    except (ValueError, TypeError):
+                        chan.limit = 0
+                    arg_index += 1
+                elif not adding:
+                    # -l removes limit
+                    chan.limit = 0
+            elif char in 'kbeI':  # Other modes with parameters
+                if adding or char in 'kbeI':
+                    arg_index += 1
+        
     async def on_newchan(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
         nick = event.get('nick', '')
@@ -567,9 +583,8 @@ class Core:
         await self.seen.update_seen(nick, host, channel, 'JOIN')
         # Update channel user list
         chan = self.channels.get(channel)
-        if chan and nick not in chan.user_list:
-            chan.user_list.append(nick)
-            chan.users = len(chan.user_list)
+        if chan and nick not in chan.users:
+            chan.users.append(nick)
 
     async def on_part(self, event: Dict[str, Any]):
         """User left channel: update seen DB."""
@@ -584,9 +599,8 @@ class Core:
             return
         # Update channel user list
         chan = self.channels.get(channel)
-        if chan and nick in chan.user_list:
-            chan.user_list.remove(nick)
-            chan.users = len(chan.user_list)
+        if chan and nick in chan.users:
+            chan.users.remove(nick)
             # Remove from ops/voiced if present
             if nick in chan.ops:
                 chan.ops.remove(nick)
@@ -605,9 +619,8 @@ class Core:
             return
         # Update channel user list
         chan = self.channels.get(channel)
-        if chan and kicked_nick in chan.user_list:
-            chan.user_list.remove(kicked_nick)
-            chan.users = len(chan.user_list)
+        if chan and kicked_nick in chan.users:
+            chan.users.remove(kicked_nick)
             # Remove from ops/voiced if present
             if kicked_nick in chan.ops:
                 chan.ops.remove(kicked_nick)
@@ -623,9 +636,8 @@ class Core:
                 del self.channels[channel]
             return
         for chan in self.channels.values():
-            if nick in chan.user_list:
-                chan.user_list.remove(nick)
-                chan.users = len(chan.user_list)
+            if nick in chan.users:
+                chan.users.remove(nick)
             if nick in chan.ops:
                 chan.ops.remove(nick)
             if nick in chan.voiced:
@@ -638,9 +650,9 @@ class Core:
         await self.seen.update_seen(old_nick, '', '', 'NICK')
         # Update nick in all channels
         for chan in self.channels.values():
-            if old_nick in chan.user_list:
-                chan.user_list.remove(old_nick)
-                chan.user_list.append(new_nick)
+            if old_nick in chan.users:
+                chan.users.remove(old_nick)
+                chan.users.append(new_nick)
             if old_nick in chan.ops:
                 chan.ops.remove(old_nick)
                 chan.ops.append(new_nick)
@@ -662,7 +674,47 @@ class Core:
 
     async def on_disconnect(self, event: Dict[str, Any]):
         """IRC connection dropped."""
-        self.connected = False       
+        self.connected = False
+
+    async def on_332(self, event):  # CHANNEL_TOPIC
+        """Update topic from RPL_TOPIC"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan.topic = event['topic']
+            log.debug(f"Topic updated for {event['channel']}")
+
+    async def on_324(self, event):  # CHANNEL_MODES
+        """Parse/set modes from RPL_CHANNELMODEIS"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan._parse_and_set_modes(event['modes_str'])
+            log.info(f"{event['channel']} modes: n={chan.modes_n} t={chan.modes_t} l={chan.limit}")
+
+    async def on_329(self, event):  # CHANNEL_CREATED
+        """Set creation timestamp"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan.created = event['created']
+            log.debug(f"{event['channel']} created: {event['created']}")
+
+    async def on_367(self, event):  # BANLIST_ADD
+        """Add ban to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan.bans.append(event['ban'])
+            log.debug(f"Ban added to {event['channel']}: {event['ban']}")
+
+    async def on_346(self, event):  # INVITELIST_ADD
+        """Add invite to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan.invites.append(event['invite'])
+
+    async def on_348(self, event):  # EXEMPTLIST_ADD
+        """Add exempt to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            chan.exempts.append(event['exempt'])        
 
     async def request_botlinks(self, event: dict):
         """Merge botnet.peers + user flags"""
