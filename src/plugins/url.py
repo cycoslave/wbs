@@ -60,10 +60,12 @@ class urlPlugin(Plugin):
     async def is_exempt(self, uhost: str, nick: str) -> bool:  # Add nick param from event
         """Exempt if user has 'U' flag or is linked bot by nick/host."""
         # Check linked bots (botnet.py)
-        if hasattr(self.core, 'botnet') and self.core.botnet.peers:
-            for peer in self.core.botnet.peers:
-                if peer.nick == nick:
+        for peer in self.core.botnet.peers.values():
+            if isinstance(peer, str):
+                if peer == nick:
                     return True
+            elif hasattr(peer, 'nick') and peer.nick == nick:
+                return True
         
         return False
     
