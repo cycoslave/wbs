@@ -44,7 +44,7 @@ class limitPlugin(Plugin):
     async def on_IRC_TIMER_LIMIT(self, event):
         """Periodic op enforcement - FULL IRC access via event"""
         irc_data = event['irc_data']
-        log.info(f"data: {irc_data}")
+        #log.info(f"data: {irc_data}")
         
         if not irc_data['connected']:
             return
@@ -63,14 +63,14 @@ class limitPlugin(Plugin):
                     continue
                 
                 # Extract current limit from mode string and params
-                current_limit = self._get_current_limit(chan_data)
+                current_limit = self.core.channels[chan].limit
                 newlimit = chan_data['users'] + self.LIMITADD
                 
                 # Skip if current limit is within tolerance
                 if abs(current_limit - newlimit) <= self.LIMITTOL:
                     continue
                 
-                log.info(f"Setting limit on {chan} from {self.core.channels[chan].limit} to {newlimit}")
+                log.info(f"Setting limit on {chan} from {current_limit} to {newlimit}")
                 
                 self.core.irc_q.put_nowait({
                     'cmd': 'mode',
