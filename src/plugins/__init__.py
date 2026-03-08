@@ -38,6 +38,32 @@ class Plugin:
         peer = self.core.botnet.peers.get(botname.lower())
         if peer and peer.connected:
             await self.core.botnet._safe_send(peer.writer, f"CMD {command}\n")
+            
+    # Helper methods for IRC communication
+    async def send_privmsg(self, target, message):
+        """Send message to channel/user"""
+        self.core.irc_q.put({
+            'cmd': 'msg',
+            'target': target,
+            'text': message
+        })
+    
+    async def send_notice(self, target, message):
+        """Send notice to user"""
+        self.core.irc_q.put({
+            'cmd': 'notice',
+            'target': target,
+            'text': message
+        })
+    
+    async def send_mode(self, channel, mode, target):
+        """Send mode command"""
+        self.core.irc_q.put({
+            'cmd': 'mode',
+            'channel': channel,
+            'mode': mode,
+            'target': target
+        })            
 
 class PluginManager:
     def __init__(self, core):

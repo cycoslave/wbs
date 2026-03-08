@@ -67,6 +67,7 @@ class Core:
         self.start_time = time.time()
         self.running = True
         self.connected = False
+        self.connected_on = None
         self.botname = self.config['bot']['nick']
         self.channels = {} # chan_name -> Channel object
         self.dcc_sessions = {}
@@ -663,6 +664,7 @@ class Core:
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
         self.connected = True
+        self.connected_on = time.time()
         self.botname = event.get('botname')
         log.info("IRC READY - joining channels..")
         channels = await self.chan.getchans()

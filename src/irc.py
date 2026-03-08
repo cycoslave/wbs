@@ -672,7 +672,7 @@ def start_irc_process(config, core_q, irc_q):
     def command_poller():
         """Daemon thread: poll cmd_queue and execute commands"""
         irc.loop = loop
-        throttle_interval = 0.1  # 100ms between commands (anti-flood)
+        throttle_interval = 0.5  # 500ms between commands (anti-flood)
         last_cmd_time = 0
         
         while True:

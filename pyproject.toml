@@ -16,6 +16,12 @@ dependencies = [
   "aiohttp>=3.9.0",
   "aiodns>=3.0.0",
   "feedparser>=6.0.10",
+  "psutil>=5.9.0",
+  "beautifulsoup4>=4.12.0",
+  "requests>=2.32.0",
+  "whoisit",
+  "ipinfo",
+  "pyasn",
 ]
 
 [project.optional-dependencies]
