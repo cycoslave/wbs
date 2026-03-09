@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from . import __version__
 from .db import get_db
 
+log = logging.getLogger("wbs.commands")
+
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
     # Extract the command (second word)

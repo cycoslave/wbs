@@ -7,7 +7,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.history import InMemoryHistory
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.console")
 
 class Console:
     def __init__(self, partyline, session_id, handle='console'):

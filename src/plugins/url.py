@@ -14,7 +14,7 @@ import logging
 from . import Plugin
 from .. import __version__
 
-log = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.plugins.url")
 URL_PATTERN = re.compile(r'(https?://[^\s<>"{}|\\^`\[\]]+)', re.IGNORECASE)
 
 class urlPlugin(Plugin):

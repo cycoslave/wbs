@@ -8,7 +8,7 @@ import logging
 import json
 from typing import Optional
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.session")
 
 class Session:
     """partyline session - handles console/telnet/DCC"""

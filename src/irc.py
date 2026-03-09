@@ -17,7 +17,7 @@ from .user import UserManager
 from .channel import ChannelManager
 from . import __version__
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.irc")
 
 # Event type constants
 class EventType:

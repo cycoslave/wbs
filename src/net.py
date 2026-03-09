@@ -7,7 +7,7 @@ import os
 import multiprocessing as mp
 import logging
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.net")
 
 class NetListener:
     def __init__(self, core_q: mp.Queue):  # core_q direct!

@@ -8,7 +8,7 @@ import logging
 import asyncio
 from typing import Any
 
-log = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.plugins")
 
 class Plugin:
     """Base plugin interface"""

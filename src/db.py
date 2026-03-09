@@ -10,11 +10,9 @@ from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
-
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-log = logging.getLogger(__name__)
-
+log = logging.getLogger("wbs.db")
 
 async def get_schema_sql() -> str:
     """Load schema.sql."""

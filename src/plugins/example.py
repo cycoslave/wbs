@@ -3,7 +3,7 @@ import logging
 
 from . import Plugin
 
-log = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.plugins.example")
 
 class Plugin(Plugin):
     """Example plugin with core and IRC timers"""

@@ -11,7 +11,7 @@ from typing import Dict
 from . import Plugin
 from ..botnet import BotCommand
 
-log = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.plugins.netop")
 
 class netopPlugin(Plugin):
     def __init__(self, core):

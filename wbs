@@ -14,7 +14,7 @@ from src.core import Core
 from src import __version__
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs")
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="wbs")

@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict, field
 
 from .db import get_db 
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.bot")
 
 @dataclass
 class Bot:

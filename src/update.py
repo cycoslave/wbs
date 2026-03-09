@@ -12,7 +12,7 @@ import logging
 
 from . import __version__
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.update")
 
 class UpdateManager:
     def __init__(self, config: Dict):

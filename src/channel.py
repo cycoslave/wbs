@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, asdict
 
 from .db import get_db
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.channel")
 
 @dataclass
 class Channel:

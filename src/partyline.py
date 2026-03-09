@@ -7,7 +7,7 @@ import logging
 from typing import Optional
 from .user import UserManager
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("wbs.partyline")
 
 class Partyline:
     """Central partyline hub - runs in core process, manages all sessions"""

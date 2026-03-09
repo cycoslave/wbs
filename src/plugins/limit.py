@@ -10,7 +10,7 @@ import logging
 from typing import Dict
 from . import Plugin
 
-log = logging.getLogger("wbs.core")
+log = logging.getLogger("wbs.plugins.limit")
 
 class limitPlugin(Plugin):
     def __init__(self, core):

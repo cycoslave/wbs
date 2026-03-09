@@ -9,7 +9,10 @@ import bcrypt
 import time
 from typing import List, Optional, Dict
 from dataclasses import dataclass, asdict, field
+
 from .db import get_db 
+
+log = logging.getLogger("wbs.user")
 
 @dataclass
 class User:
