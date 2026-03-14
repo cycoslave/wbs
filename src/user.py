@@ -7,6 +7,7 @@ import sqlite3
 import json
 import bcrypt
 import time
+import logging
 from typing import List, Optional, Dict
 from dataclasses import dataclass, asdict, field
 

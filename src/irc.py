@@ -55,6 +55,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'linked_bots': {}          # handle -> current_nick
         }
         self.irc_timers = {}  # name → task
+        self.last_connect_attempt = 0
         servers = self._parse_servers(config)
         bot_config = config.get('bot', {})
         super().__init__(
@@ -614,6 +615,33 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             del self.irc_timers[name]
             log.info(f"Unregistered IRC timer: {name}")    
 
+    def connect_now(self):
+        """Force reconnect if throttled cooldown passed."""
+        now = time.time()
+        if now - self.last_connect_attempt < 300:
+            log.debug(f"Connect throttled {int(now - self.last_connect_attempt)}s ago")
+            return False
+        self.last_connect_attempt = now
+        if not self.is_connected:  # property, no ()
+            self.jump_server("Timer reconnect")
+            log.info("Timer forced jump_server()")
+            return True
+        return False
+
+    def _check_connection_health(self):
+        """Detect stale conn: socket error or no PONG in 5min."""
+        if self.is_connected:
+            try:
+                # Test socket
+                sock = self.connection.socket
+                sock.settimeout(3)
+                sock.send(b'\n')  # minimal probe (no-op)
+                return True
+            except (socket.error, OSError, BrokenPipeError):
+                log.warning("Socket probe failed")
+                return False
+        return False
+
     async def _irc_timer_loop(self, name: str, interval: float):
         while True:
             await asyncio.sleep(interval)
@@ -647,7 +675,12 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                         
                     except Exception as inner_e:
                         log.error(f"Error building snapshot for {chan_name}: {inner_e}", exc_info=True)
-                        
+
+            if not self._check_connection_health():
+                if self.connect_now():  # throttled
+                    log.info("Forced reconnect via timer")
+
+            # Sending event to core            
             event = {
                 'type': 'IRC_TIMER_FIRED',
                 'timer_name': name,

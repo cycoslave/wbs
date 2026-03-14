@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 
 from . import Plugin
 from .. import __version__
+from ..helper import clean_message
 
 log = logging.getLogger("wbs.plugins.pubcom")
 
@@ -158,11 +159,17 @@ class pubcomPlugin(Plugin):
             '!jump': self.cmd_jump,
         }
         
-        for cmd, handler in cmd_map.items():
-            if text.startswith(cmd):
-                arg = text[len(cmd):].strip()
-                await handler(nick, uhost, channel, arg)
-                break
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        handler = cmd_map.get(cmd)
+        if handler:
+            await handler(nick, uhost, channel, arg)
+        #for cmd, handler in cmd_map.items():
+        #    if text.startswith(cmd):
+        #        arg = text[len(cmd):].strip()
+        #        await handler(nick, uhost, channel, arg)
+        #        break
     
     # Command implementations
     async def cmd_info(self, nick, uhost, channel, arg):
@@ -940,7 +947,8 @@ class pubcomPlugin(Plugin):
                 # Fallback to details if no desc
                 cve_title = cve.get('details', 'No description available')
             
-            await self.send_privmsg(channel, f"{cve_id}: {cve_title}")
+            msg = f"{cve_id}: {cve_title}"
+            await self.send_privmsg(channel, clean_message(msg))
             count += 1
         
         if count == 0:

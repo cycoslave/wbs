@@ -9,7 +9,10 @@ import platform
 import resource
 import shutil
 import glob
+import logging
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict
 
 from . import __version__
 from .db import get_db
@@ -1091,6 +1094,185 @@ async def cmd_unload(core, handle: str, session_id: int, arg: str, respond):
     except Exception as e:
         await respond(f"Failed to unload {name}: {e}")
 
+def _games_dir() -> Path:
+    return Path("src") / "games"
+
+def _game_files() -> list[str]:
+    games_dir = _games_dir()
+    if not games_dir.is_dir():
+        return []
+
+    return sorted(
+        p.stem
+        for p in games_dir.glob("*.py")
+        if p.name != "__init__.py"
+    )
+
+def _parse_kv(tokens: list[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+
+    for token in tokens:
+        if "=" not in token:
+            continue
+
+        k, v = token.split("=", 1)
+        k = k.strip().lower()
+        v = v.strip()
+
+        if not k:
+            continue
+
+        if v.lower() in {"true", "yes", "on"}:
+            out[k] = True
+        elif v.lower() in {"false", "no", "off"}:
+            out[k] = False
+        else:
+            try:
+                out[k] = int(v)
+            except ValueError:
+                try:
+                    out[k] = float(v)
+                except ValueError:
+                    out[k] = v
+                    
+    return out
+
+async def cmd_games(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .games -> list loaded / auto-load / available games
+    """
+    loaded = sorted(core.game.games.keys())
+    auto_load = sorted(core.config.get("games", []))
+    avail = _game_files()
+    available_not_loaded = sorted(set(avail) - set(loaded))
+
+    msg_lines = [
+        f"Loaded ({len(loaded)}): {loaded or 'none'}",
+        f"Auto-load ({len(auto_load)}): {auto_load or 'none'}",
+        f"On disk ({len(avail)}): {avail or 'none'}",
+        f"Available to load: {available_not_loaded or 'none'}",
+    ]
+    await respond("\n".join(msg_lines))
+
+async def cmd_gload(core, handle: str, session_id: int, arg: str, respond):
+    """gload <game> - Load game from src/games/"""
+    args = arg.strip().split()
+    if not args:
+        await respond("Usage: .gload <game>")
+        return
+
+    name = args[0].lower()
+
+    if name in core.game.games:
+        await respond(f"{name} already loaded")
+        return
+
+    if name not in _game_files():
+        await respond(f"{name}.py not found in src/games/")
+        return
+
+    try:
+        await core.game.load_game(name)
+
+        core.config.setdefault("games", [])
+        if name not in core.config["games"]:
+            core.config["games"].append(name)
+            core.config["games"] = sorted(set(core.config["games"]))
+
+        await respond(f"Loaded game {name}")
+    except Exception as e:
+        await respond(f"Failed to load {name}: {e}")
+
+async def cmd_gunload(core, handle: str, session_id: int, arg: str, respond):
+    """gunload <game> - Unload game"""
+    args = arg.strip().split()
+    if not args:
+        await respond("Usage: .gunload <game>")
+        return
+
+    name = args[0].lower()
+
+    if name not in core.game.games:
+        await respond(f"{name} not loaded")
+        return
+
+    try:
+        await core.game.unload_game(name)
+
+        if name in core.config.get("games", []):
+            core.config["games"].remove(name)
+
+        await respond(f"Unloaded game {name}")
+    except Exception as e:
+        await respond(f"Failed to unload {name}: {e}")
+
+
+async def cmd_gstart(core, handle: str, session_id: int, arg: str, respond):
+    """
+    gstart <game> <scope> <target> [k=v ...]
+    Example: .gstart duckhunt channel #wbs min_delay=15 max_delay=45
+    """
+    args = arg.strip().split()
+    if len(args) < 3:
+        await respond("Usage: .gstart <game> <scope> <target> [k=v ...]")
+        return
+
+    game_name = args[0].lower()
+    scope = args[1].lower()
+    target = args[2]
+    kwargs = _parse_kv(args[3:])
+
+    try:
+        session = await core.game.start_game(
+            game_name,
+            scope,
+            target,
+            owner=handle,
+            **kwargs,
+        )
+        await respond(
+            f"Started {session.game_name} in {session.scope}:{session.target} "
+            f"(state={session.state})"
+        )
+    except Exception as e:
+        await respond(f"Failed to start {game_name}: {e}")
+
+
+async def cmd_gstop(core, handle: str, session_id: int, arg: str, respond):
+    """gstop <game> <scope> <target>"""
+    args = arg.strip().split()
+    if len(args) < 3:
+        await respond("Usage: .gstop <game> <scope> <target>")
+        return
+
+    game_name = args[0].lower()
+    scope = args[1].lower()
+    target = args[2]
+
+    try:
+        await core.game.stop_game(game_name, scope, target)
+        await respond(f"Stopped {game_name} in {scope}:{target}")
+    except Exception as e:
+        await respond(f"Failed to stop {game_name}: {e}")
+
+
+async def cmd_gsessions(core, handle: str, session_id: int, arg: str, respond):
+    """gsessions - List active game sessions"""
+    lines = []
+
+    for game_name, game in sorted(core.game.games.items()):
+        for key, session in sorted(game.sessions.items()):
+            lines.append(
+                f"{game_name} {key} state={session.state} "
+                f"players={len(session.players)} owner={session.owner or '-'}"
+            )
+
+    if not lines:
+        await respond("No active game sessions")
+        return
+
+    await respond("\n".join(lines))
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -1157,5 +1339,12 @@ COMMANDS = {
     # plugins
     'plugins': cmd_plugins,
     'load': cmd_load,
-    'unload': cmd_unload
+    'unload': cmd_unload,
+    # games
+    'games': cmd_games,
+    'gload': cmd_gload,
+    'gunload': cmd_gunload,
+    'gstart': cmd_gstart,
+    'gstop': cmd_gstop,
+    'gsessions': cmd_gsessions
 }

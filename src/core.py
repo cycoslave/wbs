@@ -30,7 +30,7 @@ from .session import Session
 from .plugins.seen import Seen
 from .irc import irc_process_launcher
 from .plugins import PluginManager
-
+from .games import GameManager
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -61,6 +61,7 @@ class Core:
         self.seen = Seen(self.db_path)
         self.partyline = Partyline(self)
         self.plugin = PluginManager(self)
+        self.game = GameManager(self)
 
         # Runtime variables
         self.children = []
@@ -493,14 +494,17 @@ class Core:
         """Public message: update seen DB, flood protection checks (future)."""
         nick = event.get('nick', '')
         host = event.get('host', '')
+        text = event.get('text', '')
         channel = event.get('channel', '')
-        
+        await self.game.dispatch_pubmsg(channel, nick, text, event=event)
         await self.seen.update_seen(nick, host, channel, 'PUBMSG')
 
     async def on_privmsg(self, event: Dict[str, Any]):
         """Private message: treat as potential command from authorized user."""
-        # Transform to COMMAND event and re-dispatch
         event['type'] = 'COMMAND'
+        nick = event.get('nick', '')
+        text = event.get('text', '')
+        await self.game.dispatch_privmsg(nick, text, event=event)
         await self.on_command(event)
 
     async def on_invite(self, event: dict):
@@ -633,8 +637,7 @@ class Core:
         nick = event.get('nick', '')
         await self.seen.update_seen(nick, '', '', 'QUIT')
         if nick == self.botname:
-            if channel in self.channels:
-                del self.channels[channel]
+            self.channels.clear()
             return
         for chan in self.channels.values():
             if nick in chan.users:
