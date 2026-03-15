@@ -9,10 +9,25 @@ import asyncio
 import importlib
 import inspect
 import logging
+import json
+import aiosqlite
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 log = logging.getLogger("wbs.games")
+_UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
+
+@asynccontextmanager
+async def _db(db_path):
+    db = await aiosqlite.connect(db_path)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield db
+        await db.commit()
+    finally:
+        await db.close()
 
 @dataclass
 class GameContext:
@@ -42,6 +57,7 @@ class Game:
     name = "base"
     scopes = {"channel"}
     allow_multiple_sessions = False
+    TABLE_SQL: List[str] = []
 
     def __init__(self, core):
         self.core = core
@@ -49,14 +65,25 @@ class Game:
         self.sessions: Dict[str, GameSession] = {}
 
     async def load(self):
-        pass
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "INSERT INTO loaded_modules(name, type, autoload) VALUES(?,?,1) "
+                "ON CONFLICT(name, type) DO UPDATE SET "
+                "owner=excluded.owner, loaded_at=strftime('%s','now')",
+                (self.name, "game")
+            )
 
     async def unload(self):
-        for key in list(self.sessions.keys()):
-            await self.stop_session(key)
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "DELETE FROM loaded_modules WHERE name=? AND type='game'",
+                (self.name)
+            )
 
     async def start_session(self, session: GameSession):
+        await self.session_save(session)
         session.state = "running"
+        #session.task = asyncio.create_task(self.game_loop(session))
 
     async def stop_session(self, key: str):
         session = self.sessions.pop(key, None)
@@ -71,12 +98,7 @@ class Game:
                 pass
 
         session.state = "stopped"
-
-    async def on_pubmsg(self, session: GameSession, nick: str, text: str, event=None):
-        pass
-
-    async def on_privmsg(self, nick: str, text: str, event=None):
-        pass
+        await self.session_clear(session)
 
     def get_session(self, scope: str, target: str):
         return self.sessions.get(f"{scope}:{target}".lower())
@@ -97,7 +119,68 @@ class Game:
         self.sessions[key] = session
         return session
     
-    # Helper methods for IRC communication
+    async def session_save(self, session: GameSession):
+        if not session.scope or not session.target:
+            return 
+        safe = {k: v for k, v in session.data.items()
+                if not callable(v) and not isinstance(v, self._UNSERIALIZABLE)}
+        
+        async with _db(self.core.db_path) as db:
+            # Auto-create if missing
+            try:
+                await db.execute("""
+                    INSERT INTO game_sessions(game_name, scope, target, owner, state, data) 
+                    VALUES(?,?,?,?,?,?) 
+                    ON CONFLICT(game_name, scope, target) DO UPDATE SET 
+                    state = excluded.state, 
+                    data = excluded.data, 
+                    saved_at = strftime('%s','now')
+                """, (self.name, session.scope, session.target, session.owner, 
+                    session.state, json.dumps(safe)))
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e):
+                    await db.execute("""
+                        CREATE TABLE game_sessions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            game_name TEXT NOT NULL,
+                            scope TEXT NOT NULL,
+                            target TEXT NOT NULL,
+                            owner TEXT DEFAULT NULL,
+                            state TEXT DEFAULT 'running',
+                            data TEXT DEFAULT '{}',
+                            saved_at INTEGER DEFAULT (strftime('%s','now')),
+                            UNIQUE(game_name, scope, target)
+                        )
+                    """)
+                    # Retry save
+                    await db.execute("INSERT ...", ...)  # repeat params
+                else:
+                    raise
+
+    async def session_load(self, scope: str, target: str) -> Optional[dict]:
+        async with _db(self.core.db_path) as db:
+            async with db.execute(
+                "SELECT data FROM game_sessions "
+                "WHERE game_name=? AND scope=? AND target=?",
+                (self.name, scope, target)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return json.loads(row["data"]) if row else None
+
+    async def session_clear(self, session: GameSession):
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "DELETE FROM game_sessions "
+                "WHERE game_name=? AND scope=? AND target=?",
+                (self.name, session.scope, session.target)
+            )
+
+    async def on_pubmsg(self, session: GameSession, nick: str, text: str, event=None):
+        pass
+
+    async def on_privmsg(self, nick: str, text: str, event=None):
+        pass
+
     async def send_privmsg(self, target, message):
         """Send message to channel/user"""
         self.core.irc_q.put({
@@ -119,7 +202,7 @@ class GameManager:
         self.core = core
         self.games: Dict[str, Game] = {}
 
-    async def load_game(self, game_name: str) -> Game:
+    async def load_game(self, game_name: str, scope: str = None, target: str = None, owner: str = None) -> Game:
         if game_name in self.games:
             return self.games[game_name]
 
@@ -141,19 +224,33 @@ class GameManager:
             self.games[game_name] = game
 
             await game.load()
+
+            async with _db(self.core.db_path) as db:
+                await db.execute(
+                    "INSERT INTO loaded_modules(name, type, scope, owner) VALUES(?,?,?,?) "
+                    "ON CONFLICT(name, type) DO UPDATE SET "
+                    "owner=excluded.owner, loaded_at=strftime('%s','now')",
+                    (game_name, "game", target, owner)
+                )
+
             log.info("Loaded game: %s", game_name)
             return game
 
         except Exception as e:
             raise RuntimeError(f"Failed to load game {game_name}: {e}") from e
 
-    async def unload_game(self, game_name: str):
+    async def unload_game(self, game_name: str, scope: str = None, target: str = None):
         game = self.games.pop(game_name, None)
         if not game:
-            log.warning("Game %s not loaded", game_name)
             return
-
         await game.unload()
+
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "DELETE FROM loaded_modules WHERE name=? AND type='game'",
+                (game_name, target)
+            )
+
         log.info("Unloaded game: %s", game_name)
 
     async def start_game(
@@ -208,13 +305,10 @@ class GameManager:
     async def tick(self):
         for name, game in self.games.items():
             try:
-                await game.on_tick()
+                if hasattr(game, "on_tick"):
+                    await game.on_tick()
             except Exception as e:
                 log.error("Game %s tick error: %s", name, e, exc_info=True)
 
 
-__all__ = [
-    "Game",
-    "GameSession",
-    "GameManager",
-]
+__all__ = ["Game", "GameSession", "GameContext", "GameManager"]

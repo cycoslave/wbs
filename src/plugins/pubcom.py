@@ -6,7 +6,6 @@ by: cyco
 Description: Public commands in the channel.
 """
 import asyncio
-import logging
 import re
 import time
 import json
@@ -27,34 +26,33 @@ from . import Plugin
 from .. import __version__
 from ..helper import clean_message
 
-log = logging.getLogger("wbs.plugins.pubcom")
-
 class pubcomPlugin(Plugin):
-    """Public commands plugin - provides IRC channel commands"""
-    
+    name    = "pubcom"
+    version = "0.1.0"
+
     def __init__(self, core):
         super().__init__(core)
-        self.name = 'pubcom'
-        self.version = '0.1.0'
-        self.auth_sessions = {}  # nick -> timestamp
-        self.auth_timeout = 43200  # 12 hours
+        self.auth_sessions = {}
+        self.auth_timeout = 43200
         self.http_session = None
     
     async def load(self):
-        """Initialize plugin"""
+        """Initialize plugin and register timers"""
+        await super().load()
         self.http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=10),
             headers={'User-Agent': f"WBS/{__version__}"}
         )
         self.dns_resolver = aiodns.DNSResolver()
-        log.info(f"Plugin {self.name} {self.version} loaded")
+        self.log.info(f"Plugin {self.name} {self.version} loaded")
     
     async def unload(self):
-        """Cleanup"""
+        """Unload plugin and unregister timers"""
         self.auth_sessions.clear()
         if self.http_session:
             await self.http_session.close()
-        log.info("Pubcom plugin unloaded")
+        await super().unload()
+        self.log.info("Pubcom plugin unloaded")
 
     # Helper methods
     def check_auth(self, nick: str) -> bool:
@@ -334,10 +332,10 @@ class pubcomPlugin(Plugin):
                     await self.send_privmsg(channel, f"CVE lookup failed (status {resp.status})")
                     
         except aiohttp.client_exceptions.ClientError as e:
-            log.error(f"CVE lookup error: {e}")
+            self.log.error(f"CVE lookup error: {e}")
             await self.send_privmsg(channel, "Network error fetching CVE")
         except (KeyError, ValueError, TypeError) as e:
-            log.error(f"CVE parsing error for {cve_id}: {e}")
+            self.log.error(f"CVE parsing error for {cve_id}: {e}")
             await self.send_privmsg(channel, "Error parsing CVE response")
     
     async def cmd_epss(self, nick, uhost, channel, arg):
@@ -375,10 +373,10 @@ class pubcomPlugin(Plugin):
                     await self.send_privmsg(channel, f"EPSS lookup failed (status {resp.status})")
                     
         except aiohttp.client_exceptions.ClientError as e:
-            log.error(f"EPSS lookup error: {e}")
+            self.log.error(f"EPSS lookup error: {e}")
             await self.send_privmsg(channel, "Network error fetching EPSS")
         except (KeyError, ValueError, TypeError) as e:
-            log.error(f"EPSS parsing error for {cve_id}: {e}")
+            self.log.error(f"EPSS parsing error for {cve_id}: {e}")
             await self.send_privmsg(channel, "Error parsing EPSS response")
     
     async def cmd_crypto(self, nick, uhost, channel, arg):
@@ -975,7 +973,7 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, f"Error fetching {url}: {e}")
             return
         
-        title = await self._extract_title(html)
+        title = self._extract_title(html)
         if title:
             await self.send_privmsg(channel, f"Title: {title}")
         else:
@@ -1004,7 +1002,7 @@ class pubcomPlugin(Plugin):
             return
         
         # YouTube meta title fallback
-        title = (await self._extract_title(html) or
+        title = (self._extract_title(html) or
                 self._extract_meta_title(html) or
                 "No title found")
         await self.send_privmsg(channel, f"Title: {title}")
@@ -1204,7 +1202,7 @@ class pubcomPlugin(Plugin):
         
     async def cmd_whois(self, nick, uhost, channel, arg):
         """WHOIS lookup (domain/IP/AS)"""
-        if not self.bot.get_channel_setting(channel, 'pubcom', False):
+        if not await self.is_pubcom_enabled(channel):
             return
         arg = arg.strip()
         if not arg:
@@ -1223,7 +1221,7 @@ class pubcomPlugin(Plugin):
     
     async def cmd_geoip(self, nick, uhost, channel, arg):
         """GeoIP via whois - matches Tcl vwckgeoip (free)"""
-        if not self.bot.get_channel_setting(channel, 'pubcom', False):
+        if not await self.is_pubcom_enabled(channel):
             return
         
         if not arg.strip():
@@ -1278,7 +1276,7 @@ class pubcomPlugin(Plugin):
     
     async def cmd_asn(self, nick, uhost, channel, arg):
         """ASN via whois - matches Tcl vwckasn (free)"""
-        if not self.bot.get_channel_setting(channel, 'pubcom', False):
+        if not await self.is_pubcom_enabled(channel):
             return
         
         if not arg.strip():
@@ -1356,7 +1354,7 @@ class pubcomPlugin(Plugin):
         except Exception:
             return []
         
-    async def _extract_title(self, html):
+    def _extract_title(self, html):
         """Extract <title> tag"""
         soup = BeautifulSoup(html, 'html.parser')
         title_tag = soup.find('title')

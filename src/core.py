@@ -17,7 +17,7 @@ from typing import Dict, Any
 from collections import deque
 
 from . import __version__
-from .db import init_db
+from .db import init_db, get_db
 from .net import NetListener
 from .channel import ChannelManager, Channel
 from .user import UserManager
@@ -27,7 +27,6 @@ from .commands import COMMANDS
 from .console import Console
 from .partyline import Partyline
 from .session import Session
-from .plugins.seen import Seen
 from .irc import irc_process_launcher
 from .plugins import PluginManager
 from .games import GameManager
@@ -58,7 +57,6 @@ class Core:
         self.bot = BotManager(self.db_path)
         self.botnet = BotnetManager(self)
         self.chan = ChannelManager(self.db_path)
-        self.seen = Seen(self.db_path)
         self.partyline = Partyline(self)
         self.plugin = PluginManager(self)
         self.game = GameManager(self)
@@ -81,8 +79,9 @@ class Core:
 
     async def _async_init(self):
         """One-time async initialization."""
-        # Initialize database schema
-        await init_db(self.db_path)        
+        await init_db(self.db_path) 
+        await self._seed_modules()
+        await self._autoload_modules()     
 
     def spawn_children(self):
         """Spawn daemon children - skip partyline in foreground mode."""
@@ -497,7 +496,7 @@ class Core:
         text = event.get('text', '')
         channel = event.get('channel', '')
         await self.game.dispatch_pubmsg(channel, nick, text, event=event)
-        await self.seen.update_seen(nick, host, channel, 'PUBMSG')
+        #await self.seen.update_seen(nick, host, channel, 'PUBMSG')
 
     async def on_privmsg(self, event: Dict[str, Any]):
         """Private message: treat as potential command from authorized user."""
@@ -571,7 +570,7 @@ class Core:
         host = event.get('host', '')
         channel = event.get('channel', '')
         chan_data = event.get('irc_data', '')
-        await self.seen.update_seen(nick, host, channel, 'JOIN')
+        #await self.seen.update_seen(nick, host, channel, 'JOIN')
         # Update channel user list
         if channel not in self.channels:
             chan = Channel(name=channel)
@@ -585,7 +584,7 @@ class Core:
         nick = event.get('nick', '')
         host = event.get('host', '')
         channel = event.get('channel', '')
-        await self.seen.update_seen(nick, host, channel, 'JOIN')
+        #await self.seen.update_seen(nick, host, channel, 'JOIN')
         # Update channel user list
         chan = self.channels.get(channel)
         if chan and nick not in chan.users:
@@ -596,7 +595,7 @@ class Core:
         nick = event.get('nick', '')
         host = event.get('host', '')
         channel = event.get('channel', '')
-        await self.seen.update_seen(nick, host, channel, 'PART')
+        #await self.seen.update_seen(nick, host, channel, 'PART')
         if nick == self.botname:
             if channel in self.channels:
                 del self.channels[channel]
@@ -616,7 +615,7 @@ class Core:
         """User kicked from channel."""
         kicked_nick = event.get('kicked_nick', '')
         channel = event.get('channel', '')
-        await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
+        #await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
         # If bot was kicked, remove channel entirely
         if kicked_nick == self.botname:
             if channel in self.channels:
@@ -635,7 +634,7 @@ class Core:
     async def on_quit(self, event: Dict[str, Any]):
         """User quit IRC."""
         nick = event.get('nick', '')
-        await self.seen.update_seen(nick, '', '', 'QUIT')
+        #await self.seen.update_seen(nick, '', '', 'QUIT')
         if nick == self.botname:
             self.channels.clear()
             return
@@ -651,7 +650,7 @@ class Core:
         """User changed nick."""
         old_nick = event.get('old_nick', '')
         new_nick = event.get('new_nick', '')
-        await self.seen.update_seen(old_nick, '', '', 'NICK')
+        #await self.seen.update_seen(old_nick, '', '', 'NICK')
         # Update nick in all channels
         for chan in self.channels.values():
             if old_nick in chan.users:
@@ -897,3 +896,32 @@ class Core:
             return ''
         
         return chan.mode
+    
+    async def _autoload_modules(self):
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT name, type, scope, owner FROM loaded_modules WHERE autoload=1"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        for row in rows:
+            try:
+                if row["type"] == "plugin":
+                    await self.plugin.load_plugin(row["name"])
+                    log.info("Autoloaded plugin: %s", row["name"])
+                elif row["type"] == "game" and row["scope"]:
+                    await self.game.start_game(
+                        row["name"], "channel", row["scope"], owner=row["owner"]
+                    )
+                    log.info("Autoloaded game: %s on %s", row["name"], row["scope"])
+            except Exception as e:
+                log.error("Autoload failed for %s %s: %s", row["type"], row["name"], e)
+
+    async def _seed_modules(self):
+        async with get_db(self.db_path) as db:
+            for plugin_name in self.config.get('plugins', []):
+                await db.execute(
+                    "INSERT INTO loaded_modules(name, type, scope, autoload) VALUES(?, 'plugin', NULL, 1) "
+                    "ON CONFLICT(name, type) DO NOTHING",
+                    (plugin_name,)
+                )

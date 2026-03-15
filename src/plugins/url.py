@@ -1,35 +1,35 @@
 # src/plugins/url.py
 """
 WBS Plugin: url.py 
-version: 0.1.0
+version: 0.1.1
 by: cyco
-Description: Set and watch channel limit
+Description: Plugin that shows title of URL being displayed in the IRC channels.
 """
 import re
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import logging
 
 from . import Plugin
 from .. import __version__
 
-log = logging.getLogger("wbs.plugins.url")
 URL_PATTERN = re.compile(r'(https?://[^\s<>"{}|\\^`\[\]]+)', re.IGNORECASE)
 
 class urlPlugin(Plugin):
+    name    = "url"
+    version = "0.1.1"
+
     def __init__(self, core):
         super().__init__(core)
-        self.name = 'url'
-        self.version = '0.1.0'
     
     async def load(self):
-        """Register IRC timer from core"""
-        log.info(f"Plugin {self.name} {self.version} loaded")
+        """Initialize plugin and register timers"""
+        await super().load()
+        self.log.info(f"Plugin {self.name} {self.version} loaded")
     
     async def unload(self):
-        """Unregister IRC timer"""
-        log.info("Limit plugin unloaded")
+        """Unload plugin and unregister timers"""
+        await super().unload()
+        self.log.info(f"Plugin {self.name} {self.version} unloaded")
 
     async def on_PUBMSG(self, event):
         """Handle public channel messages."""
@@ -70,25 +70,27 @@ class urlPlugin(Plugin):
         return False
     
     async def fetch_title(self, url: str) -> str:
-        """Fetch and extract title using pubcom helpers."""
         try:
-            resp = requests.get(url, timeout=5, headers={'User-Agent': f"WBS/{__version__}"})
-            resp.raise_for_status()
-            html = resp.text
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                    headers={"User-Agent": f"WBS/{__version__}"}
+                ) as resp:
+                    resp.raise_for_status()
+                    html = await resp.text()
 
-            title = await self._extract_title(html)
+            title = self._extract_title(html)
             if title:
                 return title[:200]
-
-            title = await self._extract_meta_title(html)
+            title = self._extract_meta_title(html)
             if title:
                 return title[:200]
-
-            return 'No title found'
+            return "No title found"
         except Exception:
-            return 'Unable to fetch title'
+            return "Unable to fetch title"
 
-    async def _extract_title(self, html):
+    def _extract_title(self, html):
         soup = BeautifulSoup(html, 'html.parser')
         title_tag = soup.find('title')
         return title_tag.get_text().strip() if title_tag else None

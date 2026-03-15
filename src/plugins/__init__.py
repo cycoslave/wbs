@@ -6,25 +6,53 @@ import importlib
 import inspect
 import logging
 import asyncio
-from typing import Any
+import re
+import aiosqlite
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List
 
 log = logging.getLogger("wbs.plugins")
 
+@asynccontextmanager
+async def _db(db_path):
+    db = await aiosqlite.connect(db_path)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield db
+        await db.commit()
+    finally:
+        await db.close()
+
 class Plugin:
     """Base plugin interface"""
+    name = "base"
+    TABLE_SQL: List[str] = []
+
     def __init__(self, core):
         self.core = core
+        self.log = logging.getLogger(f"wbs.plugins.{self.name}")
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.unload()        
     
     async def load(self):
-        """Called when plugin loads"""
-        pass
+        """Create plugin-owned tables, then run custom setup."""
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "INSERT INTO loaded_modules(name, type, scope, autoload) VALUES(?, 'plugin', NULL, 1) "
+                "ON CONFLICT(name, type) DO UPDATE SET loaded_at=strftime('%s','now')",
+                (self.name,)
+            )
     
     async def unload(self):
-        """Called when plugin unloads - cleanup timers/resources"""
-        pass
+        if not self.TABLE_SQL:
+            return
+        async with _db(self.core.db_path) as db:
+            for sql in self.TABLE_SQL:
+                match = re.search(r'CREATE TABLE IF NOT EXISTS\s+(\w+)', sql, re.IGNORECASE)
+                if match:
+                    await db.execute(f"DROP TABLE IF EXISTS {match.group(1)}")
 
     async def on_UNKNOWN(self, event):
         pass
@@ -76,41 +104,51 @@ class PluginManager:
 
         try:
             module = importlib.import_module(f'src.plugins.{plugin_name}')
-            
+
             plugin_classes = [
                 obj for name, obj in inspect.getmembers(module, inspect.isclass)
                 if issubclass(obj, Plugin) and obj.__name__ != 'Plugin' and obj.__module__ == module.__name__
             ]
-            
+
             if not plugin_classes:
                 raise ValueError(f"No Plugin subclass found in src.plugins.{plugin_name}")
-            
+
             plugin_instance = plugin_classes[0](self.core)
             self.plugins[plugin_name] = plugin_instance
-            
-            # Call load() method if it exists
-            if hasattr(plugin_instance, 'load') and inspect.iscoroutinefunction(plugin_instance.load):
-                await plugin_instance.load()
-            elif hasattr(plugin_instance, 'load'):
-                plugin_instance.load()
-            
-            # Call init() if it exists (separate lifecycle)
-            if hasattr(plugin_instance, 'init') and inspect.iscoroutinefunction(plugin_instance.init):
-                await plugin_instance.init()
-            
+            await plugin_instance.load()
+
+            async with _db(self.core.db_path) as db:
+                await db.execute(
+                    "INSERT INTO loaded_modules(name, type, autoload) VALUES(?,?,1) "
+                    "ON CONFLICT(name, type) DO UPDATE SET "
+                    "loaded_at=strftime('%s','now')",
+                    (plugin_name, "plugin")
+                )
+
+            log.info("Loaded plugin: %s", plugin_name)
             return plugin_instance
         except Exception as e:
             raise RuntimeError(f"Failed to load {plugin_name}: {e}")
-    
+
     async def unload_plugin(self, name: str):
-        """Unload plugin with cleanup"""
-        if name not in self.plugins:
+        plugin = self.plugins.pop(name, None)
+        if not plugin:
             log.warning(f"Plugin {name} not loaded")
             return
-        plugin = self.plugins.pop(name)
-        if hasattr(plugin, 'unload'):
-            await plugin.unload()
-        log.info(f"Unloaded plugin: {name}")
+        await plugin.unload()
+
+        async with _db(self.core.db_path) as db:
+            await db.execute(
+                "DELETE FROM loaded_modules WHERE name=? AND type='plugin'",
+                (name,)   # note the comma — single-element tuple
+            )
+
+        log.info("Unloaded plugin: %s", name)
+
+    async def reload_plugin(self, name: str) -> Plugin:
+        """Unload then reload a plugin by name."""
+        await self.unload_plugin(name)
+        return await self.load_plugin(name)        
     
     async def dispatch(self, event_type: str, event: dict):
         log.debug(f"[DISPATCH] {event_type}: {event}") 

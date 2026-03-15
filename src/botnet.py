@@ -152,7 +152,7 @@ class BotnetManager:
         parts = line.split()
         cmd = parts[0].upper()
 
-        log.debug(f"Processing from {from_bot}: {line[:100]}")
+        #log.info(f"Processing from {from_bot}: {line[:100]}")
         
         if cmd == "BOTLINK":
             # Incoming connection request
@@ -221,7 +221,7 @@ class BotnetManager:
 
         if cmd == "LINKACK":
             if link.password is None:
-                if len(parts) > 5:
+                if len(parts) > 6:
                     their_partial = parts[6]
                     our_partial = link.temp_partial
                     #log.info(f"remote {their_partial} - local {our_partial}")

@@ -168,22 +168,28 @@ CREATE TABLE IF NOT EXISTS ignores (
     creator TEXT NOT NULL
 );
 
+-- Loaded modules (plugin or game)
+CREATE TABLE IF NOT EXISTS loaded_modules (
+    name        TEXT    NOT NULL,
+    type        TEXT    NOT NULL CHECK(type IN ('game', 'plugin')),
+    scope       TEXT    DEFAULT NULL,   -- channel the game runs on (games only, NULL for plugins)
+    owner       TEXT    DEFAULT NULL,   -- nick who started the game
+    autoload    BOOLEAN DEFAULT 1,      -- 0 = skip on restart
+    loaded_at   INTEGER DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (name, type)
+);
 
--- =====================================================
--- TRACKING & STATS
--- =====================================================
-
--- Seen
-CREATE TABLE IF NOT EXISTS seen (
-    nick TEXT NOT NULL,
-    handle TEXT,                    -- Matched user handle (if authed)
-    channel TEXT,
-    action TEXT CHECK(action IN ('JOIN','PART','QUIT','KICK','NICK','MSG','PUBMSG')),
-    hostmask TEXT,
-    message TEXT DEFAULT '',
-    user_agent TEXT DEFAULT '',
-    last_seen INTEGER NOT NULL,
-    PRIMARY KEY(nick, channel, last_seen)
+-- Game session data
+CREATE TABLE IF NOT EXISTS game_sessions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_name   TEXT    NOT NULL,
+    scope       TEXT    NOT NULL,       -- "channel", "user"
+    target      TEXT    NOT NULL,       -- "#chan", nick
+    owner       TEXT    DEFAULT NULL,
+    state       TEXT    DEFAULT 'running',
+    data        TEXT    DEFAULT '{}',   -- JSON blob of session.data
+    saved_at    INTEGER DEFAULT (strftime('%s','now')),
+    UNIQUE(game_name, scope, target)
 );
 
 -- =====================================================
@@ -207,6 +213,10 @@ CREATE INDEX IF NOT EXISTS idx_runtime_expires ON runtime(expires_at);
 -- Ignores
 CREATE INDEX IF NOT EXISTS idx_ignores_hostmask ON ignores(hostmask);
 
+-- Modules
+CREATE INDEX IF NOT EXISTS idx_loaded_modules_type   ON loaded_modules(name, type);
+CREATE INDEX IF NOT EXISTS idx_game_sessions_lookup  ON game_sessions(game_name, scope, target);
+
 -- =====================================================
 -- TRIGGERS - PERFORMANCE & INTEGRITY
 -- =====================================================
@@ -229,14 +239,6 @@ AFTER UPDATE ON user_access FOR EACH ROW
 BEGIN
   UPDATE user_access SET updated_at=strftime('%s','now') 
   WHERE handle=OLD.handle AND channel=OLD.channel;
-END;
-
--- Seen cleanup (30 days, batched)
-CREATE TRIGGER IF NOT EXISTS trig_seen_cleanup
-AFTER INSERT ON seen
-WHEN (SELECT COUNT(*) FROM seen WHERE last_seen<strftime('%s','now')-2592000)>5000
-BEGIN
-  DELETE FROM seen WHERE last_seen<strftime('%s','now')-2592000;
 END;
 
 -- Runtime cleanup
