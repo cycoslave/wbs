@@ -90,12 +90,26 @@ class BlackjackGame(Game):
         )
         """,
     ]
+    _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
 
     async def load(self):
         await super().load()  
+        db_path = self.core.db_path 
+        async with _db(db_path) as db:
+            await db.execute(self.TABLE_SQL[0])
+            await db.commit() 
+        async with _db(db_path) as db:
+            await db.execute(self.TABLE_SQL[1])
+            await db.commit() 
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
+        async with _db(db_path) as db:
+            await db.execute("DROP TABLE IF EXISTS blackjack_settings")
+            await db.commit() 
+        async with _db(db_path) as db:
+            await db.execute("DROP TABLE IF EXISTS blackjack_cash")
+            await db.commit() 
         await super().unload() 
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
@@ -113,9 +127,9 @@ class BlackjackGame(Game):
         owner = session.owner or "someone"
         await self.say(chan,
             f"\x02[Blackjack]\x02 {owner} started a game! "
-            f"Type \x02!join\x02 to play. "
+            f"Type \x02!bjjoin\x02 to play. "
             f"Starting in {REGISTRATION_SECS // 60} min "
-            f"(or owner types \x02!start\x02)."
+            f"(or owner types \x02!bjstart\x02)."
         )
         session.task = asyncio.create_task(self._registration_phase(session))
 
@@ -145,7 +159,7 @@ class BlackjackGame(Game):
         session.data["phase"] = "betting"
         await self.say(chan,
             f"[Blackjack] {len(players)} player(s): {', '.join(players)} — "
-            f"You have {BET_SECS}s to \x02!bet <amount>\x02 "
+            f"You have {BET_SECS}s to \x02!bjbet <amount>\x02 "
             f"(default: ${cfg['default_bet']}, min: ${cfg['min_bet']})."
         )
 
@@ -194,7 +208,7 @@ class BlackjackGame(Game):
 
             await self.say(chan,
                 f"[Blackjack] {nick}'s turn: {hand_str(p.hand)} "
-                f"({hand_value(p.hand)}) — \x02!hit\x02 or \x02!stand\x02 "
+                f"({hand_value(p.hand)}) — \x02!bjhit\x02 or \x02!bjstand\x02 "
                 f"(timeout: {cfg['turn_secs']}s)"
             )
             session.data["current_player"] = nick
@@ -287,15 +301,15 @@ class BlackjackGame(Game):
             p.stood = False
             p.bust  = False
             p.done  = False
-        session.data["phase"] = "waiting"
+        session.data["phase"] = "finished"
         await self.say(session.target,
             "[Blackjack] Round over. "
-            "\x02!deal\x02 for next round  |  "
-            "\x02!join\x02 to add players  |  "
+            "\x02!bjdeal\x02 for next round  |  "
+            "\x02!bjjoin\x02 to add players  |  "
             "\x02!blackjack stop\x02 to end."
         )
 
-    async def on_pubmsg(self, session: GameSession, nick: str, text: str, event=None):
+    async def on_PUBMSG(self, session: GameSession, nick: str, text: str, event=None):
         parts = text.strip().split()
         if not parts:
             return
@@ -317,15 +331,15 @@ class BlackjackGame(Game):
             await self.say(chan, f"[Blackjack] {nick} joined with ${cash}.")
 
         elif cmd == "!bjstart" and phase == "registering":
-            if nick != session.owner:
-                return
+            #if nick != session.owner:
+            #    return
             if session.task and not session.task.done():
                 session.task.cancel()
             session.task = asyncio.create_task(self._begin_round(session))
 
         elif cmd == "!bjdeal" and phase == "waiting":
-            if nick != session.owner:
-                return
+            #if nick != session.owner:
+            #    return
             session.task = asyncio.create_task(self._begin_round(session))
 
         elif cmd == "!bjbet" and phase == "betting":
@@ -337,7 +351,7 @@ class BlackjackGame(Game):
             try:
                 amount = int(parts[1]) if len(parts) > 1 else cfg["default_bet"]
             except (ValueError, IndexError):
-                return await self.notice(nick, "Usage: !bet <amount>")
+                return await self.notice(nick, "Usage: !bjbet <amount>")
             if amount < cfg["min_bet"]:
                 return await self.notice(nick, f"Minimum bet is ${cfg['min_bet']}.")
             if amount > p.cash:
@@ -370,14 +384,16 @@ class BlackjackGame(Game):
             session.data["turn_done"].set()
 
         elif cmd == "!blackjack" and len(parts) > 1 and parts[1].lower() == "stop":
-            if nick != session.owner and not await self.core.nick_isop(nick, chan):
+            #if nick != session.owner and not self.core.nick_isop(nick, chan):
+            if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only the game owner or a chan-op can stop the game.")
             await self.stop_session(session.key)
+            return
 
-        elif cmd == "!bjset":
-            if nick != session.owner and not await self.core.nick_isop(nick, chan):
-                return await self.notice(nick, "Only the game owner or a chan-op can change settings.")
-            await self._handle_set(session, nick, parts[1:])
+        #elif cmd == "!bjset":
+        #    if nick != session.owner and not self.core.nick_isop(nick, chan):
+        #        return await self.notice(nick, "Only the game owner or a chan-op can change settings.")
+        #    await self._handle_set(session, nick, parts[1:])
 
         elif cmd == "!bjcash":
             target = parts[1] if len(parts) > 1 else nick
@@ -390,7 +406,8 @@ class BlackjackGame(Game):
         elif cmd == "!bjtop":
             await self._show_top(chan)
 
-    # ── settings ──────────────────────────────────────────────────────────────
+        elif cmd == "!bjhelp":
+            await self._show_help(chan)            
 
     async def _handle_set(self, session: GameSession, nick: str, args: list):
         chan = session.target
@@ -434,6 +451,20 @@ class BlackjackGame(Game):
             f"{i + 1}. {r['nick']} ${r['cash']}" for i, r in enumerate(rows)
         )
         await self.say(chan, f"[Blackjack] Top chips: {board}")
+
+    async def _show_help(self, chan: str):
+        await self.say(chan, f"[Blackjack] commands:")
+        await self.say(chan, f"    !blackjack            - Start a game. Opens 5-min registration window.")
+        await self.say(chan, f"    !bjjoin               - Join during registration or between rounds.")
+        await self.say(chan, f"    !bjstart              - Owner skips the registration countdown.")
+        await self.say(chan, f"    !bjbet <amount>       - Place bet during betting phase (45s window).")
+        await self.say(chan, f"    !bjhit                - Draw a card on your turn.")
+        await self.say(chan, f"    !bjstand              - Hold your hand on your turn.")
+        await self.say(chan, f"    !bjdeal               - Owner starts the next round.")
+        await self.say(chan, f"    !blackjack stop       - Owner or chan-op ends the game.")
+        #await self.say(chan, f"    !bjset <param> <v>    - Owner configures per-channel settings.")
+        await self.say(chan, f"    !bjcash [nick]        - Check chip balance.")
+        await self.say(chan, f"    !bjtop                - Top 5 chip leaders.")
 
     async def _load_settings(self, channel: str) -> dict:
         async with _db(self.core.db_path) as db:

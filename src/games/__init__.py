@@ -67,10 +67,10 @@ class Game:
     async def load(self):
         async with _db(self.core.db_path) as db:
             await db.execute(
-                "INSERT INTO loaded_modules(name, type, autoload) VALUES(?,?,1) "
+                "INSERT INTO loaded_modules(name, type, scope, owner, autoload) VALUES(?,?,?,?,1) "
                 "ON CONFLICT(name, type) DO UPDATE SET "
-                "owner=excluded.owner, loaded_at=strftime('%s','now')",
-                (self.name, "game")
+                "autoload=1, owner=excluded.owner, loaded_at=strftime('%s','now')",
+                (self.name, "game", None, None)
             )
 
     async def unload(self):
@@ -81,8 +81,8 @@ class Game:
             )
 
     async def start_session(self, session: GameSession):
-        await self.session_save(session)
         session.state = "running"
+        await self.session_save(session)
         #session.task = asyncio.create_task(self.game_loop(session))
 
     async def stop_session(self, key: str):

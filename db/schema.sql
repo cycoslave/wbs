@@ -122,10 +122,6 @@ CREATE TABLE IF NOT EXISTS channels (
     is_dynamicbans BOOLEAN DEFAULT 0,
     is_dynamicexempts BOOLEAN DEFAULT 0,
     is_dynamicinvites BOOLEAN DEFAULT 0,
-    is_pubcom BOOLEAN DEFAULT 0,
-    is_news BOOLEAN DEFAULT 0,
-    is_url BOOLEAN DEFAULT 0,
-    is_stats BOOLEAN DEFAULT 0,
     is_locked BOOLEAN DEFAULT 0,      -- CHANLOCK
     lock_by TEXT DEFAULT '',
     lock_at INTEGER DEFAULT 0,
@@ -135,12 +131,6 @@ CREATE TABLE IF NOT EXISTS channels (
     topiclock_by TEXT DEFAULT '',
     topiclock_at INTEGER DEFAULT 0,
     topiclock_reason TEXT DEFAULT '',
-    is_limit BOOLEAN DEFAULT 0,     -- LIMIT
-    limit_add INTEGER DEFAULT 15,
-    limit_rand INTEGER DEFAULT 200,
-    limit_tolerance INTEGER DEFAULT 2,
-    limit_delta INTEGER DEFAULT 300,
-    limit_at INTEGER DEFAULT 0,
     comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),

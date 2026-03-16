@@ -107,7 +107,7 @@ class Core:
         for plugin_name in self.config.get('plugins', []):
             try:
                 await self.plugin.load_plugin(plugin_name)
-                log.info(f"Auto-loaded plugin: {plugin_name}")
+                log.debug(f"Auto-loaded plugin: {plugin_name}")
             except Exception as e:
                 log.error(f"Failed auto-load {plugin_name}: {e}")
 
@@ -675,6 +675,7 @@ class Core:
                 log.info(f"Joining {channel}..")
                 self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
                 time.sleep(0.2)
+        await self._autoload_games()
 
     async def on_disconnect(self, event: Dict[str, Any]):
         """IRC connection dropped."""
@@ -909,11 +910,9 @@ class Core:
                 if row["type"] == "plugin":
                     await self.plugin.load_plugin(row["name"])
                     log.info("Autoloaded plugin: %s", row["name"])
-                elif row["type"] == "game" and row["scope"]:
-                    await self.game.start_game(
-                        row["name"], "channel", row["scope"], owner=row["owner"]
-                    )
-                    log.info("Autoloaded game: %s on %s", row["name"], row["scope"])
+                elif row["type"] == "game":
+                    await self.game.load_game(row["name"])
+                    log.info("Autoloaded game: %s", row["name"])
             except Exception as e:
                 log.error("Autoload failed for %s %s: %s", row["type"], row["name"], e)
 
@@ -925,3 +924,31 @@ class Core:
                     "ON CONFLICT(name, type) DO NOTHING",
                     (plugin_name,)
                 )
+
+    async def _autoload_games(self):
+        async with get_db(self.db_path) as db:
+            # Step 1: which games were loaded
+            async with db.execute(
+                "SELECT DISTINCT game_name FROM game_sessions WHERE state='running'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        for row in rows:
+            game_name = row["game_name"]
+            try:
+                await self.game.load_game(game_name)
+                async with get_db(self.db_path) as db:
+                    async with db.execute(
+                        "SELECT scope, target, owner, data FROM game_sessions "
+                        "WHERE game_name=? AND state='running'",
+                        (game_name,)
+                    ) as cursor:
+                        sessions = await cursor.fetchall()
+
+                for s in sessions:
+                    await self.game.start_game(
+                        game_name, s["scope"], s["target"], owner=s["owner"]
+                    )
+                    log.info("Restored game session: %s on %s:%s", game_name, s["scope"], s["target"])
+            except Exception as e:
+                log.error("Failed to restore game %s: %s", game_name, e)
