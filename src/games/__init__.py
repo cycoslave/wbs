@@ -302,6 +302,15 @@ class GameManager:
             except Exception as e:
                 log.error("Game %s on_privmsg error: %s", game.name, e, exc_info=True)
 
+    async def dispatch_notice(self, nick: str, text: str, event=None):
+        for game in self.games.values():
+            # NOTICE is not channel-scoped, iterate all channel sessions
+            for session in game.sessions.values():
+                try:
+                    await game.on_NOTICE(session, nick, text, event=event)
+                except Exception as e:
+                    log.error("Game %s on_NOTICE error: %s", game.name, e, exc_info=True)                
+
     async def tick(self):
         for name, game in self.games.items():
             try:
