@@ -25,13 +25,18 @@ CREATE TABLE IF NOT EXISTS user_access (
     channel TEXT DEFAULT NULL,
     subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
-    is_admin BOOLEAN DEFAULT 0,
-    is_bot BOOLEAN DEFAULT 0,
-    is_op BOOLEAN DEFAULT 0,
-    is_deop BOOLEAN DEFAULT 0,
-    is_voice BOOLEAN DEFAULT 0,
-    is_devoice BOOLEAN DEFAULT 0,
-    is_friend BOOLEAN DEFAULT 0,
+    is_admin BOOLEAN DEFAULT 0,       -- +A - Botnet Admin
+    is_owner BOOLEAN DEFAULT 0,       -- +n - Bot Owner
+    is_friend BOOLEAN DEFAULT 0,      -- +f
+    is_autoop BOOLEAN DEFAULT 0,      -- +a - auto op
+    is_op BOOLEAN DEFAULT 0,          -- +o - op
+    is_deop BOOLEAN DEFAULT 0,        -- +d - remove op
+    is_autohop BOOLEAN DEFAULT 0,     -- +y - auto half op
+    is_hop BOOLEAN DEFAULT 0,         -- +l - halfop
+    is_dehop BOOLEAN DEFAULT 0,       -- +r - remove halfop
+    is_voice BOOLEAN DEFAULT 0,       -- +v - voice
+    is_devoice BOOLEAN DEFAULT 0,     -- +q - remove voice
+    is_autokick BOOLEAN DEFAULT 0,    -- +k - auto kick/ban
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
@@ -64,13 +69,13 @@ CREATE TABLE IF NOT EXISTS bot_access (
     channel TEXT DEFAULT NULL,
     subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
-    is_admin BOOLEAN DEFAULT 0,
-    is_bot BOOLEAN DEFAULT 0,
+    is_friend BOOLEAN DEFAULT 0,
     is_op BOOLEAN DEFAULT 0,
     is_deop BOOLEAN DEFAULT 0,
+    is_hop BOOLEAN DEFAULT 0,
+    is_dehop BOOLEAN DEFAULT 0,
     is_voice BOOLEAN DEFAULT 0,
     is_devoice BOOLEAN DEFAULT 0,
-    is_friend BOOLEAN DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
@@ -89,10 +94,19 @@ CREATE TABLE IF NOT EXISTS subnets (
     created_by TEXT DEFAULT NULL
 );
 
+-- Servers
+CREATE TABLE IF NOT EXISTS servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    subnet_id INTEGER DEFAULT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL
+);
+
 -- Channels
 CREATE TABLE IF NOT EXISTS channels (
     name TEXT PRIMARY KEY,
-    subnet_id INTEGER DEFAULT NULL,
+    subnet_id INTEGER DEFAULT NULL, -- Null subnet_id means the channel exists on all the networks
     modes TEXT DEFAULT '',
     bans TEXT DEFAULT '[]',         -- JSON ban list
     invites TEXT DEFAULT '[]',      -- JSON invite list  
@@ -122,15 +136,6 @@ CREATE TABLE IF NOT EXISTS channels (
     is_dynamicbans BOOLEAN DEFAULT 0,
     is_dynamicexempts BOOLEAN DEFAULT 0,
     is_dynamicinvites BOOLEAN DEFAULT 0,
-    is_locked BOOLEAN DEFAULT 0,      -- CHANLOCK
-    lock_by TEXT DEFAULT '',
-    lock_at INTEGER DEFAULT 0,
-    lock_reason TEXT DEFAULT '',
-    is_topiclock BOOLEAN DEFAULT 0, -- TOPICLOCK
-    topiclock TEXT DEFAULT '',
-    topiclock_by TEXT DEFAULT '',
-    topiclock_at INTEGER DEFAULT 0,
-    topiclock_reason TEXT DEFAULT '',
     comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
