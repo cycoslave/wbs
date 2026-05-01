@@ -223,6 +223,26 @@ class UserManager:
             await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
             await db.commit()
 
+    async def verify_password(self, handle: str, password: str) -> bool:
+        """Verify a plaintext password against the stored bcrypt hash."""
+        try:
+            async with get_db(self.db_path) as db:
+                row = await db.execute_fetchone(
+                    "SELECT password FROM users WHERE handle = ? AND is_locked = 0",
+                    (handle,)
+                )
+
+            if not row:
+                return False
+
+            stored_hash = row["password"]
+            if not stored_hash:
+                return False
+
+            return bool(bcrypt.checkpw(password.encode(), stored_hash.encode()))
+        except Exception:
+            return False
+
     async def change_handle(self, handle: str, new_handle: str):
             async with get_db(self.db_path) as db:
                 await db.execute("UPDATE users SET handle = ? WHERE handle = ?", (new_handle, handle))

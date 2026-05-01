@@ -6,6 +6,7 @@ import aiosqlite
 import sqlite3
 import logging
 import json
+from irc import modes
 from typing import Dict, Optional, List
 from dataclasses import dataclass, field, asdict
 
@@ -42,7 +43,7 @@ class Channel:
     
     def _parse_and_set_modes(self, modes_str: str):
         """Parse RPL_324 or MODE msg"""
-        modes = irc.modes.parse_channel_modes(modes_str)
+        modes = modes.parse_channel_modes(modes_str)
         for sign, mode, param in modes:
             setter = {'+': self._set_mode, '-': self._clear_mode}
             setter[sign](mode, param)

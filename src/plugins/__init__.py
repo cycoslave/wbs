@@ -125,7 +125,7 @@ class PluginManager:
                     (plugin_name, "plugin")
                 )
 
-            log.info("Loaded plugin: %s", plugin_name)
+            #log.info("Loaded plugin: %s", plugin_name)
             return plugin_instance
         except Exception as e:
             raise RuntimeError(f"Failed to load {plugin_name}: {e}")

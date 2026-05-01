@@ -68,7 +68,7 @@ class pubcomPlugin(Plugin):
     
     async def is_pubcom_enabled(self, channel: str) -> bool:
         """Check if pubcom is enabled for channel"""
-        chan_settings = await self.core.chan.get(channel)
+        chan_settings = await self.core.chan.get_channel(channel)
         return chan_settings and chan_settings.get('pubcom', False)
     
     # Authentication handlers
@@ -87,7 +87,7 @@ class pubcomPlugin(Plugin):
         
         # Parse identify command
         if len(parts) == 2:
-            handle = event['uhost']  # Use their nick as handle
+            handle = event['host']  # Use their nick as handle
             password = parts[1]
         else:
             handle = parts[1]

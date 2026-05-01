@@ -509,7 +509,7 @@ class Core:
     async def on_invite(self, event: dict):
         """Forward invite notice to partyline."""
         channel = event['channel']
-        inviter_nick = event['inviter_nick']
+        inviter_nick = event['inviter']
         solicitation = event['solicitation']
         self.partyline.broadcast(f"{solicitation} invite to join {channel} by {inviter_nick}")
 
@@ -909,10 +909,10 @@ class Core:
             try:
                 if row["type"] == "plugin":
                     await self.plugin.load_plugin(row["name"])
-                    log.info("Autoloaded plugin: %s", row["name"])
+                    #log.info("Autoloaded plugin: %s", row["name"])
                 elif row["type"] == "game":
                     await self.game.load_game(row["name"])
-                    log.info("Autoloaded game: %s", row["name"])
+                    #log.info("Autoloaded game: %s", row["name"])
             except Exception as e:
                 log.error("Autoload failed for %s %s: %s", row["type"], row["name"], e)
 

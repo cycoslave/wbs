@@ -10,9 +10,11 @@ import logging
 import json
 import asyncio
 import irc.bot
+import irc.client
 from datetime import datetime, timedelta
-from irc.client import ServerConnectionError
+from jaraco.stream import buffer
 
+from .helper import clean_message
 from .user import UserManager
 from .channel import ChannelManager
 from . import __version__
@@ -56,6 +58,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         }
         self.irc_timers = {}  # name → task
         self.last_connect_attempt = 0
+        irc.client.ServerConnection.buffer_class = buffer.LenientDecodingLineBuffer
+        irc.client.ServerConnection.buffer_class.errors = "replace"
         servers = self._parse_servers(config)
         bot_config = config.get('bot', {})
         super().__init__(
@@ -89,7 +93,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         """Override to handle connection errors gracefully"""
         try:
             super()._connect()
-        except ServerConnectionError as e:
+        except irc.client.ServerConnectionError as e:
             log.error(f"Connection failed: {e}")
             self._emit_event({
                 'type': EventType.ERROR,
@@ -440,20 +444,20 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     return
                 
                 if cmd == 'msg':
-                    self.connection.privmsg(cmd_data['target'], cmd_data['text'])
+                    self.connection.privmsg(cmd_data['target'], clean_message(cmd_data['text']))
                 
                 elif cmd == 'notice':
-                    self.connection.notice(cmd_data['target'], cmd_data['text'])
+                    self.connection.notice(cmd_data['target'], clean_message(cmd_data['text']))
                 
                 elif cmd == 'action':
-                    self.connection.action(cmd_data['target'], cmd_data['text'])
+                    self.connection.action(cmd_data['target'], clean_message(cmd_data['text']))
                 
                 elif cmd == 'join':
                     self.connection.join(cmd_data['channel'])
                 
                 elif cmd == 'part':
                     reason = cmd_data.get('reason', '')
-                    self.connection.part(cmd_data['channel'], reason)
+                    self.connection.part(cmd_data['channel'], clean_message(reason))
                 
                 elif cmd == 'mode':
                     self.connection.mode(cmd_data['channel'], cmd_data['modes'])
@@ -461,14 +465,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 elif cmd == 'quit':
                     self.connection.quit(cmd_data['message'])
                     time.sleep(2.0)
-                    self.core_q.put_nowait({'cmd': 'quit', 'message': cmd_data['message']})
+                    self.core_q.put_nowait({'cmd': 'quit', 'message': clean_message(cmd_data['message'])})
                 
                 elif cmd == 'kick':
                     reason = cmd_data.get('reason', 'Kicked')
                     self.connection.kick(
                         cmd_data['channel'],
                         cmd_data['nick'],
-                        reason
+                        clean_message(reason)
                     )
                 
                 elif cmd == 'whois':
@@ -637,7 +641,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 sock.settimeout(3)
                 sock.send(b'\n')  # minimal probe (no-op)
                 return True
-            except (socket.error, OSError, BrokenPipeError):
+            except (sock.error, OSError, BrokenPipeError):
                 log.warning("Socket probe failed")
                 return False
         return False

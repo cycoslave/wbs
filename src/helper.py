@@ -3,10 +3,21 @@
 Helper functions
 """
 
-def clean_message(text: str, max_len: int = 255) -> str:
-    # Remove LF (\n) and CR (\r) by replacing with space
-    cleaned = text.replace('\n', ' ').replace('\r', ' ')
-    # Truncate to max_len - 3 (for '...'), add ellipsis if truncated
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len - 3] + '...'
-    return cleaned.strip()
+def clean_message(text: str, max_bytes: int = 255) -> str:
+    if not text:
+        return ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\n", " ")
+    text = " ".join(text.split())
+
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+
+    truncated = raw[:max_bytes - 3]
+    while True:
+        try:
+            return truncated.decode("utf-8") + "..."
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
