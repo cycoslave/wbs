@@ -233,7 +233,7 @@ class Core:
                 subnet_id=1  # Get from config if needed
             )
             
-            self.bot_sessions[bot_id] = bot_session
+            self.bot_sessions[bot_name.lower()] = bot_session
             
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
             # Send handshake response

@@ -24,6 +24,9 @@ class NetListener:
     async def handle_connection(self, reader, writer):
         """Detect botlink vs partyline → route to core_q with DUP FD or picklable data."""
         peer = writer.get_extra_info('peername')
+        orig_sock = writer.transport.get_extra_info('socket')
+        sockfd = orig_sock.fileno()
+        dup_fd = os.dup(orig_sock.fileno()) 
         log.debug(f"Incoming {peer}")
         
         try:
@@ -40,11 +43,6 @@ class NetListener:
                     remote_handle = parts[1]
                     log.info(f"Botlink from {remote_handle}")
                     
-                    # DUP FD → core handles link entirely
-                    orig_sock = writer.transport.get_extra_info('socket')
-                    sockfd = orig_sock.fileno()
-                    dup_fd = os.dup(sockfd)
-                    
                     self.core_q.put_nowait({
                         'type': 'BOT_CONNECT', 
                         'handle': remote_handle,
@@ -58,10 +56,6 @@ class NetListener:
                 # Partyline user → picklable data only (no FD)
                 handle = f"user_{peer[0]}_{peer[1]}"
                 log.info(f"Partyline user: {handle}")
-                
-                orig_sock = writer.transport.get_extra_info('socket')
-                sockfd = orig_sock.fileno()
-                dup_fd = os.dup(sockfd)
 
                 self.core_q.put_nowait({
                     'type': 'PARTYLINE_CONNECT',
@@ -73,8 +67,10 @@ class NetListener:
                 
         except asyncio.TimeoutError:
             log.warning(f"Handshake timeout {peer}")
+            os.close(dup_fd)
         except Exception as e:
             log.error(f"Connection error {peer}: {e}")
+            os.close(dup_fd)
         finally:
             # Always close original in net process
             log.debug(f"Net closing original for {peer}")

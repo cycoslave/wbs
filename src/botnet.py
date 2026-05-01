@@ -205,7 +205,7 @@ class BotnetManager:
                     ack = f"LINKACK {self.my_handle} {remote} 1 WBS {__version__} {our_partial}\n"
                     log.info(f"Sending {ack}")
                     await self._safe_send(writer, ack)
-                    asyncio.create_task(self.read_peer(from_bot, reader, writer))
+                    #asyncio.create_task(self.read_peer(from_bot, reader, writer))
                 else:
                     log.error(f"No password configured for {from_bot} and no key exchange offered")
                     writer.close()
@@ -213,7 +213,7 @@ class BotnetManager:
             else:
                 # Password exists, ACKAUTH
                 await self._safe_send(writer, f"LINKACK {self.my_handle} {remote} 1 WBS {__version__}\n")
-                asyncio.create_task(self.read_peer(from_bot, reader, writer))
+                #asyncio.create_task(self.read_peer(from_bot, reader, writer))
             return
         
         if from_bot.lower() not in self.peers:
