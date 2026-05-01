@@ -205,22 +205,40 @@ class SubnetManager:
     # Runtime peer membership
     # ------------------------------------------------------------------
 
-    def register_peer(self, handle: str, subnet_id: int):
+    def register_peer(self, handle: str, subnet_id: int | None):
         """
         Mark a peer as belonging to a subnet at runtime.
         Call from BotnetManager when LINKREADY/LINKAUTH completes.
         """
         handle = handle.lower()
+
+        if subnet_id is None:
+            subnet_id = 0
+            log.info("Assigned default subnet_id=0 to '%s'", handle)
+
         state = self._subnets.get(subnet_id)
+        if state is None and subnet_id != 0:
+            log.info(
+                "Unknown subnet_id=%s for '%s'; falling back to default subnet_id=0",
+                subnet_id,
+                handle,
+            )
+            subnet_id = 0
+            state = self._subnets.get(subnet_id)
+
         if state is None:
             log.warning(
-                f"register_peer: unknown subnet_id={subnet_id} for '{handle}'"
+                "Default subnet_id=0 is missing; cannot register peer '%s'",
+                handle,
             )
             return
+
         if handle not in state.peer_handles:
             state.peer_handles.append(handle)
             log.debug(
-                f"Peer '{handle}' registered in subnet '{state.subnet.name}'"
+                "Peer '%s' registered in subnet '%s'",
+                handle,
+                state.subnet.name,
             )
 
     def unregister_peer(self, handle: str):
