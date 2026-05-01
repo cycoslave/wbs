@@ -80,6 +80,7 @@ class Core:
     async def _async_init(self):
         """One-time async initialization."""
         await init_db(self.db_path) 
+        await self.botnet.subnet.load()
         await self._seed_modules()
         await self._autoload_modules()     
 

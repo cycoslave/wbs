@@ -107,10 +107,10 @@ class BlackjackGame(Game):
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
-        async with _db(db_path) as db:
+        async with _db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_settings")
             await db.commit() 
-        async with _db(db_path) as db:
+        async with _db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_cash")
             await db.commit() 
         await super().unload() 

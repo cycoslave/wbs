@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from . import __version__
 from .bot import BotManager
+from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
 
@@ -50,6 +51,7 @@ class BotnetManager:
         self.config = self.core.config
         self.irc_q = self.core.irc_q
         self.bot = BotManager(self.db_path)
+        self.subnet = SubnetManager(self.db_path)
         self.peers: Dict[BotLink] = {}
         self.cmds: Dict[BotCommand, Callable] = {}
         
@@ -97,7 +99,7 @@ class BotnetManager:
             writer.write(handshake.encode())
             await writer.drain()
             
-            self.peers[handle] = link
+            self.peers[handle.lower()] = link
             asyncio.create_task(self.read_peer(handle, reader, writer))
             log.info(f"Connected to peer {handle} at {bot.address}:{bot.port}")
             link.connected = True
@@ -139,6 +141,7 @@ class BotnetManager:
         except Exception as e:
             log.error(f"Read error from {handle}: {e}")
         finally:
+            self.subnet.unregister_peer(handle)
             # Clean up on disconnect
             if handle.lower() in self.peers:
                 del self.peers[handle.lower()]
@@ -263,6 +266,7 @@ class BotnetManager:
             #log.info(f"Auth success: {from_bot}")
             #self.core.bot_sessions[from_bot.lower()] = link
             #link.connected_at = time.time()
+            self.subnet.register_peer(from_bot, link.subnet_id)
             await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
             return
         
@@ -271,6 +275,7 @@ class BotnetManager:
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
             #log.info(f"Link established with {from_bot}")
+            self.subnet.register_peer(from_bot, link.subnet_id)
             self.core.bot_sessions[from_bot.lower()] = link
             #link.connected_at = time.time()
             return
@@ -350,16 +355,15 @@ class BotnetManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def broadcast_subnet(self, cmd: Dict):
-        """Broadcast to subnet peers only."""
-        msg = f"CMD:{json.dumps(cmd)}\n"
-        tasks = []
-        for name, (_, writer) in self.peers.items():
-            peer = self.peers.get(name)
-            if peer and peer.subnet_id == self.subnet_id:
-                tasks.append(self._safe_send(writer, msg))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    async def broadcast_subnet(self, cmd: str, subnet_id: int):
+        targets = self.subnet.resolve_targets(
+            self.peers, scope="subnet", subnet_id=subnet_id
+        )
+        msg = f"CMD {cmd}\n"
+        await asyncio.gather(
+            *[self._safe_send(t.writer, msg) for t in targets],
+            return_exceptions=True,
+        )
     
     async def _safe_send(self, writer: asyncio.StreamWriter, msg: str):
         """Send with error handling."""
@@ -660,6 +664,7 @@ class BotnetManager:
     async def handle_share_subnets(self, data: str, from_bot: str):
         """Merge subnets with conflict resolution."""
         subnets = json.loads(data)
+        await self.subnet.merge_from_peer(subnets, from_bot)
         
         async with aiosqlite.connect(self.db_path) as db:
             for subnet in subnets:
