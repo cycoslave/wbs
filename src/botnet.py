@@ -159,7 +159,7 @@ class BotnetManager:
         
         if cmd == "BOTLINK":
             # Incoming connection request
-            if from_bot not in self.peers:
+            if from_bot.lower() not in self.peers:
                 bot = await self.bot.get(from_bot.lower())
                 link = BotLink(
                     name=from_bot,
@@ -177,6 +177,7 @@ class BotnetManager:
                     'handle': link.name,
                     'nick': link.name
                 })
+                asyncio.create_task(self.read_peer(from_bot, reader, writer))
             else:
                 link = self.peers[from_bot.lower()]
 
@@ -191,13 +192,18 @@ class BotnetManager:
                 writer.close()
                 return
             
+            if link.password is None and len(parts) <= 6:
+                log.error(f"Credential mismatch from {from_bot}: local password unset and peer offered no exchange token")
+                writer.close()
+                return
+
             if link.password is None:
-                if len(parts) > 5:  
+                if len(parts) > 6:  
                     their_partial = parts[6]
                     our_partial = secrets.token_hex(16)
                     #log.info(f"remote {their_partial} - local {our_partial}")
 
-                    shared_password = hashlib.sha256(f"{their_partial}{our_partial}".encode()).hexdigest()
+                    shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
                     link.password = shared_password
                     #log.info(f"shared pass: {shared_password}")
                     log.info(f"Generated shared password with {from_bot}")
@@ -229,7 +235,7 @@ class BotnetManager:
                     our_partial = link.temp_partial
                     #log.info(f"remote {their_partial} - local {our_partial}")
 
-                    shared_password = hashlib.sha256(f"{our_partial}{their_partial}".encode()).hexdigest()
+                    shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
                     link.password = shared_password
                     #log.info(f"shared pass: {shared_password}")
                     
@@ -241,7 +247,9 @@ class BotnetManager:
                     #log.info(f"Sending authentication token {challenge}")
                     await self._safe_send(writer, challenge)
                 else:
-                    log.error(f"Unknown LINKACK from {from_bot}")
+                    log.error(f"Credential mismatch with {from_bot}: peer sent LINKACK without exchange token while local password is unset")
+                    writer.close()
+                    return
             else:
                 #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                 chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
@@ -368,6 +376,9 @@ class BotnetManager:
     async def _safe_send(self, writer: asyncio.StreamWriter, msg: str):
         """Send with error handling."""
         try:
+            if writer is None or writer.is_closing():
+                log.error("Send failed: writer already closing")
+                return
             writer.write(msg.encode())
             await writer.drain()
         except Exception as e:
