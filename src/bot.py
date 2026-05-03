@@ -24,7 +24,6 @@ class Bot:
     address: str = 'localhost'
     port: int = 3333
     role: Literal['hub', 'backup', 'leaf', 'none'] = 'none'
-    subnet_id: Optional[int] = None
     share_level: str = 'subnet'
     comment: str = ''
     created_at: int = field(default_factory=lambda: int(time.time()))
@@ -42,6 +41,75 @@ class Bot:
         
         # Property access
         self.hostmask = self._hostmasks_list[0] if self._hostmasks_list else None
+
+    async def get_subnet_ids(self, handle: str) -> list[int]:
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM bot_subnets WHERE bot_handle = ? ORDER BY subnet_id",
+                (handle,)
+            )
+            return [row["subnet_id"] for row in rows]
+
+    async def is_global(self, handle: str) -> bool:
+        subnet_ids = await self.get_subnet_ids(handle)
+        return len(subnet_ids) == 0
+
+    async def bind_to_subnet(self, handle: str, subnet_id: int, added_by: str = None) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO bot_subnets (bot_handle, subnet_id, added_by)
+                VALUES (?, ?, ?)
+                """,
+                (handle, subnet_id, added_by)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def unbind_from_subnet(self, handle: str, subnet_id: int) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM bot_subnets WHERE bot_handle = ? AND subnet_id = ?",
+                (handle, subnet_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def make_global(self, handle: str) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM bot_subnets WHERE bot_handle = ?",
+                (handle,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_bots_for_subnet(self, subnet_id: int) -> list[str]:
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                """
+                SELECT b.handle
+                FROM bots b
+                WHERE
+                    EXISTS (
+                        SELECT 1
+                        FROM bot_subnets bs
+                        WHERE bs.bot_handle = b.handle
+                        AND bs.subnet_id = ?
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM bot_subnets bs2
+                        WHERE bs2.bot_handle = b.handle
+                    )
+                ORDER BY b.handle
+                """,
+                (subnet_id,)
+            )
+            return [row["handle"] for row in rows]        
 
 @property
 def hostmasks_list(self):

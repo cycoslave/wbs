@@ -80,9 +80,76 @@ class Channel:
             self._db_loaded = True
     
     # Lazy-loaded DB properties
-    async def get_subnet_id(self) -> Optional[int]:
-        await self._load_db_config()
-        return self._db_config.get('subnet_id') if self._db_config else None
+    async def get_subnet_ids(self, channel: str) -> list[int]:
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (channel,)
+            )
+            return [row["subnet_id"] for row in rows]
+
+    async def is_global(self, channel: str) -> bool:
+        subnet_ids = await self.get_subnet_ids(channel)
+        return len(subnet_ids) == 0
+
+    async def bind_to_subnet(self, channel: str, subnet_id: int, added_by: str = None) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by)
+                VALUES (?, ?, ?)
+                """,
+                (channel, subnet_id, added_by)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def unbind_from_subnet(self, channel: str, subnet_id: int) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM channel_subnets WHERE channel_name = ? AND subnet_id = ?",
+                (channel, subnet_id)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def make_global(self, channel: str) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM channel_subnets WHERE channel_name = ?",
+                (channel,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_channels_for_subnet(self, subnet_id: int) -> list[str]:
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                """
+                SELECT name
+                FROM channels
+                WHERE is_inactive = 0
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM channel_subnets cs
+                        WHERE cs.channel_name = channels.name
+                        AND cs.subnet_id = ?
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM channel_subnets cs2
+                        WHERE cs2.channel_name = channels.name
+                    )
+                )
+                ORDER BY name
+                """,
+                (subnet_id,)
+            )
+            return [row["name"] for row in rows]
     
     async def get_modes(self) -> str:
         await self._load_db_config()
@@ -316,24 +383,26 @@ class ChannelManager:
     def __init__(self, db_path):
         self.db_path = db_path
 
-    async def addchan(self, channel: str):
-        """Add channel. Returns True if created."""
+    async def addchan(self, channel: str, subnet_id: int = None, added_by: str = None):
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
             async with db.execute("SELECT name FROM channels WHERE name = ?", (channel,)) as cursor:
                 if await cursor.fetchone():
                     raise ValueError(f"Channel {channel} already exists")
-            
-            async with db.execute(
-                """
-                INSERT INTO channels (name) 
-                VALUES (?)
-                """,
-                (channel,)
-            ) as cursor:
-                await db.commit()
-                if cursor.rowcount > 0:
-                    return True
-                return False
+            await db.execute(
+                "INSERT INTO channels (name, created_by) VALUES (?, ?)",
+                (channel, added_by)
+            )
+            if subnet_id is not None:
+                await db.execute(
+                    """
+                    INSERT INTO channel_subnets (channel_name, subnet_id, added_by)
+                    VALUES (?, ?, ?)
+                    """,
+                    (channel, subnet_id, added_by)
+                )
+            await db.commit()
+            return True
             
     async def delchan(self, channel: str) -> str:
         """Delete channel."""
@@ -353,19 +422,22 @@ class ChannelManager:
                     return False 
         
     async def listchans(self) -> str:
-        """List all channels."""
         async with get_db(self.db_path) as db:
-            chans = await db.execute("""
-                SELECT name,comment,is_inactive
-                FROM channels
-                ORDER BY name
-            """)
-            
+            rows = await db.execute_fetchall(
+                """
+                SELECT c.name, c.comment, c.is_inactive,
+                    GROUP_CONCAT(cs.subnet_id) AS subnet_ids
+                FROM channels c
+                LEFT JOIN channel_subnets cs ON cs.channel_name = c.name
+                GROUP BY c.name
+                ORDER BY c.name
+                """
+            )
             result = ["Channels:"]
-            async for row in chans:
-                active = " (inactive)" if row['is_inactive'] else ""
-                result.append(f"  {row['name']}{active} - {row['comment']}")
-            
+            for row in rows:
+                active = " (inactive)" if row["is_inactive"] else ""
+                scope = f"subnets [{row['subnet_ids']}]" if row["subnet_ids"] else "all subnets"
+                result.append(f"  {row['name']}{active} [{scope}] - {row['comment']}")
             return "\n".join(result)
 
     async def showchan(self, channel: str) -> str:
@@ -417,17 +489,20 @@ class ChannelManager:
         return data
 
     async def get_channel(self, name: str) -> Optional[dict]:
-        """Fetch channel from DB -> dict."""
         async with get_db(self.db_path) as db:
-            async with db.execute(
-                "SELECT * FROM channels WHERE name = ?",
-                (name,)
-            ) as cursor:
+            async with db.execute("SELECT * FROM channels WHERE name = ?", (name,)) as cursor:
                 row = await cursor.fetchone()
-            
-            if row:
-                return dict(row)
-            return None
+
+            if not row:
+                return None
+
+            data = dict(row)
+            subnet_rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (name,)
+            )
+            data["subnet_ids"] = [r["subnet_id"] for r in subnet_rows]
+            return data
 
     async def get_all_channels(self) -> list[Channel]:
         """Get all channels."""

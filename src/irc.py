@@ -12,6 +12,7 @@ import asyncio
 import irc.bot
 import irc.client
 from datetime import datetime, timedelta
+from collections import defaultdict, deque
 from jaraco.stream import buffer
 
 from .helper import clean_message
@@ -45,6 +46,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def __init__(self, config, core_q, irc_q):
         self.config = config
+        self.maintenance_state.setdefault('join_attempts', defaultdict(deque))
+        self.maintenance_state.setdefault('join_cooldown_until', {})
         self.chan = ChannelManager(self.config['db']['path'])
         self.user = UserManager(self.config['db']['path'])
         self.core_q = core_q
@@ -146,6 +149,9 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             '368': self.on_368,    # RPL_ENDOFBANLIST etc.
             '347': self.on_347,    # RPL_ENDOFINVITELIST
             '349': self.on_349,    # RPL_ENDOFEXCEPTLIST
+            '471': self.on_471,    # ERR_CHANNELISFULL
+            '473': self.on_473,    # ERR_INVITEONLYCHAN
+            '474': self.on_474,    # ERR_BANNEDFROMCHAN
         }
         for numeric, handler in numerics.items():
             conn.add_global_handler(numeric, handler, -20)
@@ -382,7 +388,28 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         self._emit_event({
             'type': 'EXCEPTLIST_END',
             'channel': chan_name
-        })                
+        })
+
+    def on_471(self, conn, event):  # ERR_CHANNELISFULL
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'ERR_CHANNELISFULL',
+            'channel': chan_name
+        }) 
+
+    def on_473(self, conn, event):  # ERR_INVITEONLYCHAN
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'ERR_INVITEONLYCHAN',
+            'channel': chan_name
+        }) 
+
+    def on_474(self, conn, event):  # ERR_BANNEDFROMCHAN
+        chan_name = event.arguments[1]
+        self._emit_event({
+            'type': 'ERR_BANNEDFROMCHAN',
+            'channel': chan_name
+        })                         
 
     def on_whoisuser(self, conn, event):
         """WHOIS response (311 numeric)"""
@@ -514,28 +541,39 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 await asyncio.sleep(60) 
 
     async def _check_channels(self):
-        """Rejoin active channels if missing"""
+        """Rejoin active channels if missing, with flood protection/backoff."""
         try:
             if not self.is_connected:
                 return
-            
             active_chans = await self.chan.getchans() or []
             now = datetime.now()
-            
-            # Fix: self.channels (dict str -> Channel), not self.connection.channels
             current_chans = {chan_name.lower(): chan for chan_name, chan in self.channels.items()}
-            
+            join_attempts = self.maintenance_state['join_attempts']
+            join_cooldown_until = self.maintenance_state['join_cooldown_until']
             log.debug(f"Active: {active_chans}, Current: {list(current_chans)}")
-            
             for chan in active_chans:
                 chan_lower = chan.lower()
-                if chan_lower not in current_chans:
-                    last_try = self.maintenance_state['last_rejoin'].get(chan, datetime.min)
-                    if now - last_try > timedelta(minutes=1):
-                        self.connection.join(chan)
-                        self.maintenance_state['last_rejoin'][chan] = now
-                        log.info(f"Rejoined {chan}")
-                        
+                if chan_lower in current_chans:
+                    continue
+                cooldown_until = join_cooldown_until.get(chan_lower)
+                if cooldown_until and now < cooldown_until:
+                    log.debug(f"Join cooldown active for {chan} until {cooldown_until}")
+                    continue
+                attempts = join_attempts[chan_lower]
+                # keep only attempts from the last 5 minutes
+                cutoff = now - timedelta(minutes=5)
+                while attempts and attempts[0] < cutoff:
+                    attempts.popleft()
+                # if we've already tried 3 times in the last 5 minutes, back off for 30 minutes
+                if len(attempts) >= 3:
+                    cooldown_until = now + timedelta(minutes=30)
+                    join_cooldown_until[chan_lower] = cooldown_until
+                    attempts.clear()
+                    log.warning(f"Join backoff triggered for {chan}; pausing until {cooldown_until}")
+                    continue
+                self.connection.join(chan)
+                attempts.append(now)
+                log.info(f"Trying to join: {chan} (attempts in last 5m: {len(attempts)})")
         except Exception as e:
             log.error(f"_check_channels error: {e}", exc_info=True)
 

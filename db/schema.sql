@@ -5,6 +5,13 @@ PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;  -- Better concurrency for multiprocessing
 PRAGMA user_version = 1;    -- Schema version for migrations
 
+-- Subnets
+CREATE TABLE IF NOT EXISTS subnets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL
+);
 
 -- Users
 CREATE TABLE IF NOT EXISTS users (
@@ -23,7 +30,6 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS user_access (
     handle TEXT NOT NULL,
     channel TEXT DEFAULT NULL,
-    subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
     is_admin BOOLEAN DEFAULT 0,       -- +A - Botnet Admin
     is_owner BOOLEAN DEFAULT 0,       -- +n - Bot Owner
@@ -42,10 +48,10 @@ CREATE TABLE IF NOT EXISTS user_access (
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
     last_seen TIMESTAMP DEFAULT NULL,
-    
-    PRIMARY KEY(handle, channel),
-    FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE,
-    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
+    subnet_id INTEGER DEFAULT NULL, -- NULL = all subnets, <id> = subnet-scoped
+    PRIMARY KEY (handle, channel, subnet_id), 
+    FOREIGN KEY (handle)    REFERENCES users(handle)  ON DELETE CASCADE,
+    FOREIGN KEY (subnet_id) REFERENCES subnets(id)    ON DELETE SET NULL
 );
 
 -- Bots
@@ -56,18 +62,15 @@ CREATE TABLE IF NOT EXISTS bots (
     address TEXT NOT NULL,
     port INTEGER NOT NULL DEFAULT 3333,
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
-    subnet_id INTEGER,
     share_level TEXT DEFAULT 'subnet', -- full/subnet/none
     comment TEXT DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
 
 -- Bot access
 CREATE TABLE IF NOT EXISTS bot_access (
     handle TEXT NOT NULL,
     channel TEXT DEFAULT NULL,
-    subnet_id INTEGER DEFAULT NULL,
     has_partyline BOOLEAN DEFAULT 0,
     is_friend BOOLEAN DEFAULT 0,
     is_op BOOLEAN DEFAULT 0,
@@ -80,18 +83,17 @@ CREATE TABLE IF NOT EXISTS bot_access (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
-    
     PRIMARY KEY(handle, channel),
     FOREIGN KEY(handle) REFERENCES bots(handle) ON DELETE CASCADE,
-    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE SET NULL
 );
-
--- Subnets
-CREATE TABLE IF NOT EXISTS subnets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    created_by TEXT DEFAULT NULL
+CREATE TABLE bot_subnets (
+    bot_handle   TEXT NOT NULL,
+    subnet_id    INTEGER NOT NULL,
+    added_at     INTEGER DEFAULT (strftime('%s', 'now')),
+    added_by     TEXT DEFAULT NULL,
+    PRIMARY KEY (bot_handle, subnet_id),
+    FOREIGN KEY (bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
+    FOREIGN KEY (subnet_id)  REFERENCES subnets(id)  ON DELETE CASCADE
 );
 
 -- Servers
@@ -106,7 +108,6 @@ CREATE TABLE IF NOT EXISTS servers (
 -- Channels
 CREATE TABLE IF NOT EXISTS channels (
     name TEXT PRIMARY KEY,
-    subnet_id INTEGER DEFAULT NULL, -- Null subnet_id means the channel exists on all the networks
     modes TEXT DEFAULT '',
     bans TEXT DEFAULT '[]',         -- JSON ban list
     invites TEXT DEFAULT '[]',      -- JSON invite list  
@@ -141,8 +142,15 @@ CREATE TABLE IF NOT EXISTS channels (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
-
-    FOREIGN KEY(subnet_id) REFERENCES subnets(id) ON DELETE CASCADE
+);
+CREATE TABLE channel_subnets (
+    channel_name TEXT NOT NULL,
+    subnet_id    INTEGER NOT NULL,
+    added_at     INTEGER DEFAULT (strftime('%s', 'now')),
+    added_by     TEXT DEFAULT NULL,
+    PRIMARY KEY (channel_name, subnet_id),
+    FOREIGN KEY (channel_name) REFERENCES channels(name) ON DELETE CASCADE,
+    FOREIGN KEY (subnet_id)    REFERENCES subnets(id)    ON DELETE CASCADE
 );
 
 -- Runtime
@@ -195,11 +203,15 @@ CREATE TABLE IF NOT EXISTS game_sessions (
 CREATE INDEX IF NOT EXISTS idx_users_hostmasks ON users(hostmasks);
 CREATE INDEX IF NOT EXISTS idx_user_access_handle_chan ON user_access(handle, channel);
 CREATE INDEX IF NOT EXISTS idx_user_access_channel_handle ON user_access(channel, handle);
+CREATE INDEX IF NOT EXISTS idx_user_access_handle_chan_subnet ON user_access(handle, channel, subnet_id);
+CREATE INDEX IF NOT EXISTS idx_user_access_channel_subnet_handle ON user_access(channel, subnet_id, handle);
 CREATE INDEX IF NOT EXISTS idx_user_access_subnet ON user_access(subnet_id);
+CREATE INDEX IF NOT EXISTS idx_bot_subnets_handle ON bot_subnets(bot_handle);
+CREATE INDEX IF NOT EXISTS idx_bot_subnets_subnet ON bot_subnets(subnet_id);
 
 -- Channels 
-CREATE INDEX IF NOT EXISTS idx_channels_subnet_name ON channels(subnet_id, name);
-CREATE INDEX IF NOT EXISTS idx_channels_name_subnet ON channels(name, subnet_id);
+CREATE INDEX IF NOT EXISTS idx_channel_subnets_channel ON channel_subnets(channel_name);
+CREATE INDEX IF NOT EXISTS idx_channel_subnets_subnet ON channel_subnets(subnet_id);
 
 -- Runtime
 CREATE INDEX IF NOT EXISTS idx_runtime_key ON runtime(key);
@@ -232,8 +244,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS trig_access_update_ts
 AFTER UPDATE ON user_access FOR EACH ROW
 BEGIN
-  UPDATE user_access SET updated_at=strftime('%s','now') 
-  WHERE handle=OLD.handle AND channel=OLD.channel;
+  UPDATE user_access
+  SET updated_at = strftime('%s','now')
+  WHERE handle = OLD.handle
+    AND channel = OLD.channel
+    AND (
+      subnet_id = OLD.subnet_id
+      OR (subnet_id IS NULL AND OLD.subnet_id IS NULL)
+    );
 END;
 
 -- Runtime cleanup

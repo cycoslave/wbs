@@ -182,6 +182,9 @@ class Core:
             'BANLIST_ADD': self.on_367,
             'INVITELIST_ADD': self.on_346,
             'EXEMPTLIST_ADD': self.on_348,
+            'ERR_CHANNELISFULL': self.on_471,
+            'ERR_INVITEONLYCHAN': self.on_473,
+            'ERR_BANNEDFROMCHAN': self.on_474,
             'BANLIST_END': self.on_null,
             'INVITELIST_END': self.on_null,
             'EXCEPTLIST_END': self.on_null,
@@ -720,7 +723,25 @@ class Core:
         """Add exempt to list"""
         chan = self.channels.get(event['channel'])
         if chan:
-            chan.exempts.append(event['exempt'])        
+            chan.exempts.append(event['exempt'])       
+
+    async def on_471(self, event):  # ERR_CHANNELISFULL
+        """Add exempt to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            log.info(f"Channel join {chan}: Channel full.")  
+
+    async def on_473(self, event):  # ERR_INVITEONLYCHAN
+        """Add exempt to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            log.info(f"Channel join {chan}: Channel invite only.")    
+
+    async def on_474(self, event):  # ERR_BANNEDFROMCHAN
+        """Add exempt to list"""
+        chan = self.channels.get(event['channel'])
+        if chan:
+            log.info(f"Channel join {chan}: I am banned.")                                         
 
     async def request_botlinks(self, event: dict):
         """Merge botnet.peers + user flags"""
