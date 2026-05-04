@@ -137,7 +137,7 @@ class Game:
                     saved_at = strftime('%s','now')
                 """, (self.name, session.scope, session.target, session.owner, 
                     session.state, json.dumps(safe)))
-            except sqlite3.OperationalError as e:
+            except aiosqlite.OperationalError as e:
                 if "no such table" in str(e):
                     await db.execute("""
                         CREATE TABLE game_sessions (
