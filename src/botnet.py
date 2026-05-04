@@ -84,7 +84,7 @@ class BotnetManager:
             )
             link.reader = reader
             link.writer = writer
-            link.subnet_id = bot.subnet_id
+            #link.subnet_id = bot.subnet_id
             link.password = bot.password
             
             #log.info(f"password: {link.password}")
@@ -168,7 +168,7 @@ class BotnetManager:
                     writer=writer,
                     reader=reader
                 )
-                link.subnet_id = bot.subnet_id
+                #link.subnet_id = bot.subnet_id
                 link.password = bot.password
                 self.peers[from_bot.lower()] = link
                 link.connected = True

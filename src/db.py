@@ -47,7 +47,6 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
             await db.commit()
         
         await ensure_schema(db)
-        ensure_default_subnet(db_path)
         log.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
 
 
@@ -79,11 +78,6 @@ async def seed_db(db_path: str, config: dict):
         
         await db.commit()
         log.info(f"DB seeded: bot={nick}, owner={owner}")
-
-async def ensure_default_subnet(db_path: str):
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("INSERT OR IGNORE INTO subnets (id, name) VALUES (0, 'default')")
-        await db.commit()
 
 @asynccontextmanager
 async def get_db(db_path: str):

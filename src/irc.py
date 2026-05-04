@@ -46,6 +46,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def __init__(self, config, core_q, irc_q):
         self.config = config
+        self.maintenance_state = {}
         self.maintenance_state.setdefault('join_attempts', defaultdict(deque))
         self.maintenance_state.setdefault('join_cooldown_until', {})
         self.chan = ChannelManager(self.config['db']['path'])
@@ -548,8 +549,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             active_chans = await self.chan.getchans() or []
             now = datetime.now()
             current_chans = {chan_name.lower(): chan for chan_name, chan in self.channels.items()}
-            join_attempts = self.maintenance_state['join_attempts']
-            join_cooldown_until = self.maintenance_state['join_cooldown_until']
+            join_attempts = self.maintenance_state.get('join_attempts', {})
+            join_cooldown_until = self.maintenance_state.get('join_cooldown_until', 0)
             log.debug(f"Active: {active_chans}, Current: {list(current_chans)}")
             for chan in active_chans:
                 chan_lower = chan.lower()

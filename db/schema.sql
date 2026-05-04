@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS bots (
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
     share_level TEXT DEFAULT 'subnet', -- full/subnet/none
     comment TEXT DEFAULT '',
-    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
 -- Bot access
@@ -84,9 +84,9 @@ CREATE TABLE IF NOT EXISTS bot_access (
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
     PRIMARY KEY(handle, channel),
-    FOREIGN KEY(handle) REFERENCES bots(handle) ON DELETE CASCADE,
+    FOREIGN KEY(handle) REFERENCES bots(handle) ON DELETE CASCADE
 );
-CREATE TABLE bot_subnets (
+CREATE TABLE IF NOT EXISTS bot_subnets (
     bot_handle   TEXT NOT NULL,
     subnet_id    INTEGER NOT NULL,
     added_at     INTEGER DEFAULT (strftime('%s', 'now')),
@@ -141,9 +141,9 @@ CREATE TABLE IF NOT EXISTS channels (
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
-    updated_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL
 );
-CREATE TABLE channel_subnets (
+CREATE TABLE IF NOT EXISTS channel_subnets (
     channel_name TEXT NOT NULL,
     subnet_id    INTEGER NOT NULL,
     added_at     INTEGER DEFAULT (strftime('%s', 'now')),
