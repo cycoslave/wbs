@@ -673,7 +673,8 @@ class Core:
         self.connected_on = time.time()
         self.botname = event.get('botname')
         log.info("IRC READY - joining channels..")
-        channels = await self.chan.getchans()
+        subnet_id = self.config.get('botnet', {}).get('subnet_id', None)
+        channels = await self.chan.getchans(subnet_id=subnet_id)
         for channel in channels:
             if not None:
                 log.info(f"Joining {channel}..")

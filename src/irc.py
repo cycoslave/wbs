@@ -550,31 +550,43 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             now = datetime.now()
             current_chans = {chan_name.lower(): chan for chan_name, chan in self.channels.items()}
             join_attempts = self.maintenance_state.get('join_attempts', {})
-            join_cooldown_until = self.maintenance_state.get('join_cooldown_until', 0)
+            join_cooldown_until = self.maintenance_state.get('join_cooldown_until', {})  # Fix: {} not 0
+
             log.debug(f"Active: {active_chans}, Current: {list(current_chans)}")
+
             for chan in active_chans:
                 chan_lower = chan.lower()
                 if chan_lower in current_chans:
                     continue
+
                 cooldown_until = join_cooldown_until.get(chan_lower)
                 if cooldown_until and now < cooldown_until:
                     log.debug(f"Join cooldown active for {chan} until {cooldown_until}")
                     continue
-                attempts = join_attempts[chan_lower]
-                # keep only attempts from the last 5 minutes
+
+                attempts = join_attempts.setdefault(chan_lower, deque())  # Fix: safe default deque
+
+                # Keep only attempts from the last 5 minutes
                 cutoff = now - timedelta(minutes=5)
                 while attempts and attempts[0] < cutoff:
                     attempts.popleft()
-                # if we've already tried 3 times in the last 5 minutes, back off for 30 minutes
+
+                # If we've already tried 3 times in the last 5 minutes, back off for 30 minutes
                 if len(attempts) >= 3:
                     cooldown_until = now + timedelta(minutes=30)
                     join_cooldown_until[chan_lower] = cooldown_until
                     attempts.clear()
                     log.warning(f"Join backoff triggered for {chan}; pausing until {cooldown_until}")
                     continue
+
                 self.connection.join(chan)
                 attempts.append(now)
                 log.info(f"Trying to join: {chan} (attempts in last 5m: {len(attempts)})")
+
+            # Persist updated state back
+            self.maintenance_state['join_attempts'] = join_attempts
+            self.maintenance_state['join_cooldown_until'] = join_cooldown_until
+
         except Exception as e:
             log.error(f"_check_channels error: {e}", exc_info=True)
 

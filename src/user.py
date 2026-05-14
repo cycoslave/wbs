@@ -58,80 +58,85 @@ class UserManager:
     def __init__(self, db_path):
         self.db_path = db_path
 
-    async def adduser(self, handle: str, hostmask: str = None):
-        """Add user with hostmask. Returns True if created."""
-        if not hostmask:
-            hostmask = "*! *@localhost"  # Default
-        
+    async def adduser(self, handle: str, hostmask: str = None,
+                      subnet_id: int = None, added_by: str = None) -> bool:
+        """
+        Add a user. subnet_id scopes their default access entry.
+        None = global (partyline access on all subnets).
+        Handles resurrection of soft-deleted users.
+        """
+        import time
+        now = int(time.time())
+        hostmasks = json.dumps([hostmask] if hostmask else [])
+
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT handle FROM users WHERE handle = ?", (handle,)) as cursor:
-                if await cursor.fetchone():
-                    raise ValueError(f"User {handle} already exists")
-            
+            await db.execute("PRAGMA foreign_keys = ON")
             async with db.execute(
-                """
-                INSERT INTO users (handle, hostmasks, created_by) 
-                VALUES (?, json_array(?), ?)
-                """,
-                (handle, hostmask, "partyline")
-            ) as cursor:
-                await db.commit()
-                if cursor.rowcount > 0:
-                    return True
-                return False
-            
-    async def deluser(self, target_handle: str) -> str:
-        """Delete user by handle. Requires admin rights."""
+                "SELECT handle, deleted_at FROM users WHERE handle = ?", (handle,)
+            ) as cur:
+                row = await cur.fetchone()
+
+            if row:
+                if row[1] is None:
+                    return False  # Already exists and active
+                # Resurrect
+                await db.execute(
+                    "UPDATE users SET deleted_at = NULL, updated_at = ?, updated_by = ?, "
+                    "hostmasks = ? WHERE handle = ?",
+                    (now, added_by, hostmasks, handle)
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO users (handle, hostmasks, created_by, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (handle, hostmasks, added_by, now)
+                )
+
+            # Create a default access entry scoped to subnet (or global if None)
+            await db.execute(
+                """INSERT OR IGNORE INTO user_access
+                   (handle, channel, subnet_id, created_by, updated_at)
+                   VALUES (?, NULL, ?, ?, ?)""",
+                (handle, subnet_id, added_by, now)
+            )
+            await db.commit()
+            return True
+
+    async def deluser(self, handle: str, deleted_by: str = None) -> bool:
+        """Soft-delete a user and their access entries."""
+        import time
+        now = int(time.time())
         async with aiosqlite.connect(self.db_path) as db:
-            # Check actor has admin rights
-            #actor = await db.fetchone(
-            #    "SELECT handle FROM user_access WHERE handle = ? AND is_admin = 1 AND channel = '*'",
-            #    (actor_handle,)
-            #)
-            #if not actor:
-            #    return f"{actor_handle}: Insufficient rights to delete users."
-            
-            async with db.execute("SELECT handle FROM users WHERE handle = ?", (target_handle,)) as cursor:
-                if await cursor.fetchone():
-                    async with db.execute("DELETE FROM users WHERE handle = ?", (target_handle,)) as cursor:
-                        await db.commit()                    
-                    async with db.execute("SELECT handle FROM users WHERE handle = ?", (target_handle,)) as cursor:
-                        if await cursor.fetchone():
-                            return False
-                        else:
-                            return True
-                else:
-                    return False                 
-        
+            cur = await db.execute(
+                "UPDATE users SET deleted_at = ?, updated_at = ?, updated_by = ? "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (now, now, deleted_by, handle)
+            )
+            if cur.rowcount == 0:
+                await db.commit()
+                return False
+            # Soft-delete all access rows too
+            await db.execute(
+                "UPDATE user_access SET deleted_at = ?, updated_at = ? WHERE handle = ?",
+                (now, now, handle)
+            )
+            await db.commit()
+            return True
+
     async def listusers(self) -> str:
-        """List all users with access summary."""
+        """List active (non-deleted) users."""
         async with get_db(self.db_path) as db:
-            # Check actor rights (admin or partyline access)
-            #actor_rights = await db.fetchone(
-            #    "SELECT has_partyline FROM user_access WHERE handle = ? AND channel = '*'",
-            #    (actor_handle,)
-            #)
-            #if not actor_rights:
-            #    return f"{actor_handle}: Access denied."
-            
-            users = await db.execute("""
-                SELECT u.handle, u.comment, 
-                    COUNT(ua.channel) as channel_count,
-                    GROUP_CONCAT(ua.channel) as channels,
-                    MAX(ua.is_admin) as is_admin
-                FROM users u 
-                LEFT JOIN user_access ua ON u.handle = ua.handle
-                GROUP BY u.handle
-                ORDER BY u.handle
-            """)
-            
-            result = ["Users:"]
-            async for row in users:
-                admin = " (admin)" if row['is_admin'] else ""
-                channels = row['channels'] or '*'
-                result.append(f"  {row['handle']}{admin}: {channels} - {row['comment']}")
-            
-            return "\n".join(result)
+            rows = await db.execute_fetchall(
+                "SELECT handle, comment, is_locked FROM users "
+                "WHERE deleted_at IS NULL ORDER BY handle"
+            )
+            if not rows:
+                return "No users."
+            lines = ["Users:"]
+            for r in rows:
+                lock = " [LOCKED]" if r["is_locked"] else ""
+                lines.append(f"  {r['handle']}{lock} - {r['comment'] or ''}")
+            return "\n".join(lines)
 
     async def showuser(self, target_handle: str) -> str:
         """Show detailed info for specific user."""

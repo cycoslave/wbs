@@ -174,8 +174,10 @@ class pubcomPlugin(Plugin):
         """Display available commands"""
         commands = "!version !uptime !time !op !deop !voice !devoice !kick !ban !mode !crypto " \
                    "!rehash !restart !jump !news !cve !epss !trend !lastcve !whois !portscan !youtube !dmarc !spf !dkim " \
-                   "!srv !soa !txt !caa !a !aaaa !ptr !ptr6 !mx !ns !website !waf !tech !geoip !asn"
+                   "!srv !soa !txt !caa !a !aaaa !ptr !ptr6 !mx !ns"
+        c2 = "!website !waf !tech !geoip !asn"
         await self.send_privmsg(channel, f"Valid commands are: {commands}")
+        await self.send_privmsg(channel, f"{c2}")
     
     async def cmd_identify_help(self, nick, uhost, channel, arg):
         """Show identify help"""

@@ -62,3 +62,8 @@ options:
     2026-03-23 12:38:04,658 INFO Rejoined #tohands
     2026-03-23 12:38:04,658 INFO Rejoined #wbs
 
+- botnet op
+    * WBS (~WBS@wbs.bot) has joined
+    * WBS2 gives channel operator status to WBS
+    * WBS gives channel operator status to WBS2
+    * WBS2 gives channel operator status to WBS

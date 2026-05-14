@@ -10,7 +10,11 @@ CREATE TABLE IF NOT EXISTS subnets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    created_by TEXT DEFAULT NULL
+    created_by TEXT DEFAULT NULL,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 
 -- Users
@@ -23,7 +27,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
-    updated_by TEXT DEFAULT NULL
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 
 -- User access
@@ -49,6 +55,8 @@ CREATE TABLE IF NOT EXISTS user_access (
     updated_by TEXT DEFAULT NULL,
     last_seen TIMESTAMP DEFAULT NULL,
     subnet_id INTEGER DEFAULT NULL, -- NULL = all subnets, <id> = subnet-scoped
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL,
     PRIMARY KEY (handle, channel, subnet_id), 
     FOREIGN KEY (handle)    REFERENCES users(handle)  ON DELETE CASCADE,
     FOREIGN KEY (subnet_id) REFERENCES subnets(id)    ON DELETE SET NULL
@@ -64,7 +72,13 @@ CREATE TABLE IF NOT EXISTS bots (
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
     share_level TEXT DEFAULT 'subnet', -- full/subnet/none
     comment TEXT DEFAULT '',
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    subnet_id INTEGER DEFAULT NULL,  -- what subnet is this bot part of
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 
 -- Bot access
@@ -83,14 +97,20 @@ CREATE TABLE IF NOT EXISTS bot_access (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL,
     PRIMARY KEY(handle, channel),
     FOREIGN KEY(handle) REFERENCES bots(handle) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS bot_subnets (
     bot_handle   TEXT NOT NULL,
     subnet_id    INTEGER NOT NULL,
-    added_at     INTEGER DEFAULT (strftime('%s', 'now')),
-    added_by     TEXT DEFAULT NULL,
+    created_at     INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by     TEXT DEFAULT NULL,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL,
     PRIMARY KEY (bot_handle, subnet_id),
     FOREIGN KEY (bot_handle) REFERENCES bots(handle) ON DELETE CASCADE,
     FOREIGN KEY (subnet_id)  REFERENCES subnets(id)  ON DELETE CASCADE
@@ -141,13 +161,19 @@ CREATE TABLE IF NOT EXISTS channels (
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
-    updated_by TEXT DEFAULT NULL
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 CREATE TABLE IF NOT EXISTS channel_subnets (
     channel_name TEXT NOT NULL,
     subnet_id    INTEGER NOT NULL,
-    added_at     INTEGER DEFAULT (strftime('%s', 'now')),
-    added_by     TEXT DEFAULT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    created_by TEXT DEFAULT NULL,
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL,
     PRIMARY KEY (channel_name, subnet_id),
     FOREIGN KEY (channel_name) REFERENCES channels(name) ON DELETE CASCADE,
     FOREIGN KEY (subnet_id)    REFERENCES subnets(id)    ON DELETE CASCADE
@@ -168,7 +194,11 @@ CREATE TABLE IF NOT EXISTS ignores (
     flags TEXT DEFAULT '',
     comment TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    creator TEXT NOT NULL
+    created_by TEXT DEFAULT NULL,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_by TEXT DEFAULT NULL,
+    deleted_at INTEGER DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 
 -- Loaded modules (plugin or game)
@@ -229,14 +259,18 @@ CREATE INDEX IF NOT EXISTS idx_game_sessions_lookup  ON game_sessions(game_name,
 -- =====================================================
 
 -- Timestamp auto-update (users/channels/access)
+DROP TRIGGER IF EXISTS trig_users_update_ts;
 CREATE TRIGGER IF NOT EXISTS trig_users_update_ts
 AFTER UPDATE ON users FOR EACH ROW
+WHEN NEW.deleted_at IS NULL
 BEGIN
   UPDATE users SET updated_at=strftime('%s','now') WHERE handle=OLD.handle;
 END;
 
+DROP TRIGGER IF EXISTS trig_channels_update_ts;
 CREATE TRIGGER IF NOT EXISTS trig_channels_update_ts
 AFTER UPDATE ON channels FOR EACH ROW
+WHEN NEW.deleted_at IS NULL
 BEGIN
   UPDATE channels SET updated_at=strftime('%s','now') WHERE name=OLD.name;
 END;

@@ -477,26 +477,59 @@ async def cmd_bots(core, handle, session_id, arg, respond):
     await respond(f"Linked bots: {bots_str}")
 
 async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .+chan #channel [subnet_name]
+    subnet_name: name of subnet to bind to, or '*' for global (no subnet binding).
+    If omitted, defaults to the bot's own subnet.
+    """
     if not arg:
-        await respond("Usage: .addchan <user>")
+        await respond("Usage: .+chan <#channel> [subnet_name|*]")
         return
+
     parts = arg.split()
-    if await core.chan.addchan(parts[0]) == True:
-        core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-        await respond(f"→ Channel {parts[0]} added!")
+    channel = parts[0]
+    subnet_arg = parts[1] if len(parts) > 1 else None
+
+    # Resolve subnet_id
+    subnet_id = None  # None = global
+
+    if subnet_arg is None or subnet_arg == '*':
+        if subnet_arg is None:
+            # Default: use bot's own subnet
+            subnet_id = core.config.get('botnet', {}).get('subnet_id', None)
     else:
-        await respond(f"→ Channel {parts[0]} NOT added!")
+        # Named subnet — look it up
+        async with get_db(core.db_path) as db:
+            row = await db.fetchone(
+                "SELECT id FROM subnets WHERE name = ?", (subnet_arg,)
+            )
+        if not row:
+            await respond(f"Unknown subnet: {subnet_arg}")
+            return
+        subnet_id = row["id"]
+
+    try:
+        await core.chan.addchan(channel, subnet_id=subnet_id, added_by=handle)
+        core.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
+        subnet_label = subnet_arg or f"subnet {subnet_id}"
+        await respond(f"→ Channel {channel} added (scope: {subnet_label})!")
+    except ValueError as e:
+        await respond(f"→ {e}")
+    except Exception as e:
+        await respond(f"→ Channel {channel} NOT added: {e}")
 
 async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
+    """.-chan #channel"""
     if not arg:
-        await respond("Usage: .delchan <user>")
+        await respond("Usage: .-chan <#channel>")
         return
     parts = arg.split()
-    if await core.chan.delchan(parts[0]) == True:
-        core.irc_q.put_nowait({'cmd': 'part', 'channel': parts[0]})
-        await respond(f"→ Channel {parts[0]} deleted!")
+    channel = parts[0]
+    if await core.chan.delchan(channel, deleted_by=handle):
+        core.irc_q.put_nowait({'cmd': 'part', 'channel': channel})
+        await respond(f"→ Channel {channel} deleted!")
     else:
-        await respond(f"→ Channel {parts[0]} NOT deleted!")
+        await respond(f"→ Channel {channel} not found or already deleted.")
 
 async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -506,24 +539,54 @@ async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
     await respond(await core.chan.showchan(parts[0]))
 
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .+user <user> [hostmask] [subnet_name|*]
+    If subnet_name omitted, defaults to bot's subnet.
+    '*' = global access (valid on all subnets).
+    """
     if not arg:
-        await respond("Usage: .adduser <user> [hostmask]")
+        await respond("Usage: .+user <user> [hostmask] [subnet_name|*]")
         return
+
     parts = arg.split()
-    if await core.user.adduser(parts[0], parts[1]) == True:
-        await respond(f"→ User {parts[0]} added!")
+    new_handle = parts[0]
+    hostmask = parts[1] if len(parts) > 1 else None
+    subnet_arg = parts[2] if len(parts) > 2 else None
+
+    # Resolve subnet_id
+    subnet_id = None
+
+    if subnet_arg is None:
+        # Default: bot's subnet
+        subnet_id = core.config.get('botnet', {}).get('subnet_id', None)
+    elif subnet_arg == '*':
+        subnet_id = None  # Global
     else:
-        await respond(f"→ User {parts[0]} NOT added!")
+        async with get_db(core.db_path) as db:
+            row = await db.fetchone(
+                "SELECT id FROM subnets WHERE name = ?", (subnet_arg,)
+            )
+        if not row:
+            await respond(f"Unknown subnet: {subnet_arg}")
+            return
+        subnet_id = row["id"]
+
+    if await core.user.adduser(new_handle, hostmask, subnet_id=subnet_id, added_by=handle):
+        scope = subnet_arg or f"subnet {subnet_id}"
+        await respond(f"→ User {new_handle} added (scope: {scope})!")
+    else:
+        await respond(f"→ User {new_handle} NOT added (already exists?).")
 
 async def cmd_deluser(core, handle: str, session_id: int, arg: str, respond):
+    """.-user <user>"""
     if not arg:
-        await respond("Usage: .deluser <user>")
+        await respond("Usage: .-user <user>")
         return
     parts = arg.split()
-    if await core.user.deluser(parts[0]) == True:
+    if await core.user.deluser(parts[0], deleted_by=handle):
         await respond(f"→ User {parts[0]} deleted!")
     else:
-        await respond(f"→ User {parts[0]} NOT deleted!")
+        await respond(f"→ User {parts[0]} NOT deleted (not found?).")
 
 async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
