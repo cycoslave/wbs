@@ -3,13 +3,12 @@
 """
 WBS Launcher
 """
-
 import argparse
 import asyncio
 import json
 import logging
-import sys
 import os
+import sys
 from src.core import Core
 from src import __version__
 
@@ -18,16 +17,77 @@ log = logging.getLogger("wbs")
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="wbs")
-    parser.add_argument("-f", "--foreground", action="store_true")
-    parser.add_argument("-c", "--config", default="config.json")
-    parser.add_argument("-d", "--db-path")
+    parser.add_argument("-f", "--foreground", action="store_true",
+                        help="Run in foreground with console")
+    parser.add_argument("-c", "--config", default="config.json",
+                        help="Path to config file")
+    parser.add_argument("-d", "--db-path",
+                        help="Override database path from config")
+    parser.add_argument("--pidfile", default=None,
+                        help="Override pid file path (default: from config settings.pid_file)")
+    parser.add_argument("--logfile", default=None,
+                        help="Override log file path (default: from config logging.file)")
     return parser.parse_args()
 
+def daemonize(logfile: str = "logs/wbs.log"):
+    """Double-fork daemonize to fully detach from terminal."""
+    if os.fork():
+        sys.exit(0)
+    os.setsid()
+    if os.fork():
+        sys.exit(0)
+    os.makedirs(os.path.dirname(logfile) or '.', exist_ok=True)
+    sys.stdin  = open(os.devnull, 'r')
+    log_fh     = open(logfile, 'a')
+    sys.stdout = log_fh
+    sys.stderr = log_fh
+
+def write_pidfile(path: str):
+    try:
+        with open(path, 'w') as f:
+            f.write(str(os.getpid()))
+        log.info(f"PID file written: {path}")
+    except OSError as e:
+        log.warning(f"Could not write PID file {path}: {e}")
+
+def remove_pidfile(path: str):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 def main():
-    log.info(f"Launching WBS {__version__}")
     args = parse_args()
-    core = Core(args=args)
-    asyncio.run(core.run(foreground=args.foreground))
+
+    # Load config first — needed to resolve pidfile/logfile paths
+    with open(args.config) as f:
+        config = json.load(f)
+
+    settings = config.get('settings', {})
+    log_cfg  = config.get('logging', {})
+
+    # Resolve paths: CLI arg > config section > hardcoded default
+    pidfile = args.pidfile or settings.get('pid_file',  'wbs.pid')
+    logfile = args.logfile or log_cfg.get('file', 'logs/wbs.log')
+
+    log.info(f"Launching WBS {__version__}")
+    if not args.foreground:
+        daemonize(logfile)
+        write_pidfile(pidfile)
+        logging.basicConfig(
+            level=getattr(logging, log_cfg.get('level', 'INFO').upper(), logging.INFO),
+            format='%(asctime)s %(levelname)s %(message)s',
+            filename=logfile,
+            filemode='a',
+            force=True
+        )
+
+    try:
+        core = Core(args=args)
+        asyncio.run(core.run(foreground=args.foreground))
+    finally:
+        if not args.foreground:
+            remove_pidfile(pidfile)
 
 if __name__ == '__main__':
     main()

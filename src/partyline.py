@@ -18,6 +18,7 @@ class Partyline:
         
         # Session registry: session_id -> session info
         self.sessions = {}  # {session_id: {'type': 'console/telnet/dcc', 'handle': str, 'queue': Queue}}
+        self.relay_sessions: dict = {}  # relay_key → {handle, origin, orig_sid, respond}
         self.next_id = 0
         
         # Console session (special case - no queue, direct output)
@@ -62,24 +63,38 @@ class Partyline:
             log.info(f"Session {session_id} unregistered")
     
     async def handle_input(self, session_id: int, text: str):
-        """Process input: commands locally, chat broadcast to sessions + botnet."""
-        if session_id not in self.sessions:
+        session = self.sessions.get(session_id)
+        if not session:
             return
-        session = self.sessions[session_id]
-        handle = session['handle']
-        
-        if text.startswith('.'):
-            await self._handle_command(session_id, handle, text)
-        else:
-            # Broadcast chat to all local sessions (excl sender)
-            self.broadcast(f"{handle}: {text}", exclude_session=session_id)
-            # Forward to botnet if enabled
-            #if self.botnet_q:
-            #    self.botnet_q.put_nowait({
-            #        'type': 'PARTYLINECHAT',
-            #        'from': handle,
-            #        'text': text
-            #    })
+
+        relay_target = session.get('relay_to')
+        if relay_target:
+            # '.relay' alone always disconnects regardless of what remote thinks
+            if text.strip() in ('.relay', '.disconnect'):
+                session.pop('relay_to', None)
+                session.pop('relay_origin', None)
+                if relay_target in self.core.botnet.peers:
+                    await self.core.botnet.send_to_peer(relay_target, {
+                        'type': 'RELAY_CLOSE',
+                        'from': session['handle'],
+                        'session_id': session_id,
+                        'origin': self.core.botname
+                    })
+                await self._send(session_id, f"Relay closed. Back on {self.core.botname}.")
+                return
+
+            # Forward everything else verbatim to remote bot's partyline
+            await self.core.botnet.send_to_peer(relay_target, {
+                'type': 'RELAY_INPUT',
+                'from': session['handle'],
+                'session_id': session_id,
+                'origin': self.core.botname,
+                'text': text
+            })
+            return
+
+        # Normal local dispatch
+        await self.dispatch_command(session['handle'], session_id, text)
     
     async def _handle_command(self, session_id: int, handle: str, text: str):
         """Handle partyline command"""

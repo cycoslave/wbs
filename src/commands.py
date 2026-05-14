@@ -10,6 +10,10 @@ import resource
 import shutil
 import glob
 import logging
+import secrets
+import string
+import socket
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
@@ -597,17 +601,20 @@ async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
-        await respond("Usage: .passwd [user] <password>")
+        await respond("Usage: .chpass [user] <password>")
         return
     parts = arg.split()
-    if len(parts) > 1:
-        await respond(core.user.set_password(parts[1], parts[2]))  
+    if len(parts) == 2:
+        # Admin changing another user's password
+        target, password = parts[0], parts[1]
     else:
+        # User changing their own password
         if handle == "console":
-            await respond("ERROR: Console user don't have a password to change.")
+            await respond("ERROR: Console user does not have a password.")
             return
-        await respond(core.user.set_password(handle, parts[1]))
-    return
+        target, password = handle, parts[0]
+    await core.user.set_password(target, password)
+    await respond(f"Password updated for {target}.")
 
 async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
@@ -1336,6 +1343,471 @@ async def cmd_gsessions(core, handle: str, session_id: int, arg: str, respond):
 
     await respond("\n".join(lines))
 
+async def cmd_chattr(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .chattr <user> [channel] +/-<flags>
+    Flags: A=admin P=partyline O=op V=voice F=friend D=deop E=devoice
+    """
+    parts = arg.split()
+    if len(parts) < 2:
+        await respond("Usage: .chattr <user> [#channel] +/-<flags>")
+        return
+
+    target = parts[0]
+    if len(parts) == 3:
+        channel, flags = parts[1], parts[2]
+    else:
+        channel, flags = None, parts[1]
+
+    if not flags or flags[0] not in ('+', '-'):
+        await respond("Flags must start with + or -")
+        return
+
+    adding = flags[0] == '+'
+    flag_chars = flags[1:].lower()
+
+    flag_map = {
+        'a': 'is_admin', 'p': 'has_partyline', 'o': 'is_op',
+        'v': 'is_voice',  'f': 'is_friend',     'd': 'is_deop',
+        'e': 'is_devoice'
+    }
+
+    updates = {flag_map[f]: adding for f in flag_chars if f in flag_map}
+    if not updates:
+        await respond(f"No valid flags in: {flags}")
+        return
+
+    set_clause = ", ".join(f"{col} = ?" for col in updates)
+    values = list(updates.values())
+
+    async with get_db(core.db_path) as db:
+        if channel:
+            values += [target, channel]
+            await db.execute(
+                f"UPDATE user_access SET {set_clause} WHERE handle = ? AND channel = ?",
+                values
+            )
+        else:
+            values += [target]
+            await db.execute(
+                f"UPDATE user_access SET {set_clause} WHERE handle = ? AND channel IS NULL",
+                values
+            )
+        await db.commit()
+
+    scope = f" on {channel}" if channel else " (global)"
+    await respond(f"Flags {flags} applied to {target}{scope}")
+
+async def cmd_relay(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .relay <botnick> — connect your partyline session to another bot's partyline via botnet.
+    .relay <botnick> <command> — run a single command on a remote bot and return output.
+    Type '.relay' with no args to disconnect from current relay.
+    """
+    parts = arg.strip().split(maxsplit=1)
+
+    # .relay with no args — disconnect from current relay
+    if not parts:
+        session = core.partyline.sessions.get(session_id, {})
+        if session.get('relay_to'):
+            prev = session.pop('relay_to')
+            await respond(f"Disconnected from relay: {prev}")
+        else:
+            await respond("Not currently relayed to any bot.")
+        return
+
+    botnick = parts[0]
+    remote_cmd = parts[1] if len(parts) > 1 else None
+
+    # Verify bot is linked
+    if botnick not in core.botnet.peers:
+        await respond(f"Bot {botnick} is not linked. Use .link first.")
+        return
+
+    if remote_cmd:
+        # One-shot: send a single command to the remote bot and relay response back
+        await core.botnet.send_to_peer(botnick, {
+            'type': 'PARTYLINE_CMD',
+            'from': handle,
+            'session_id': session_id,
+            'cmd': remote_cmd,
+            'reply_to': core.botname
+        })
+        await respond(f"→ [{botnick}] {remote_cmd}")
+    else:
+        # Persistent relay: park this session's input on the remote bot
+        session = core.partyline.sessions.get(session_id, {})
+        if session.get('relay_to') == botnick:
+            await respond(f"Already relayed to {botnick}.")
+            return
+        session['relay_to'] = botnick
+        await respond(f"Relayed to {botnick}. All input forwarded. Type '.relay' alone to disconnect.")
+
+async def cmd_mass(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .mass <op|deop> <#channel>
+    Mass op/deop all users in a channel.
+    """
+    parts = arg.split()
+    if len(parts) < 2:
+        await respond("Usage: .mass <op|deop> <#channel>")
+        return
+
+    action, channel = parts[0].lower(), parts[1]
+
+    # Ask IRC process for channel userlist via snapshot
+    snapshot = core.irc_snapshot.get(channel, {})
+    users = snapshot.get('user_list', [])
+    ops   = set(snapshot.get('ops', []))
+    botname = core.botname
+
+    if not users:
+        await respond(f"No users found in {channel} (not joined or no snapshot).")
+        return
+
+    if action == 'op':
+        targets = [u for u in users if u != botname and u not in ops]
+        mode_char = '+o'
+    elif action == 'deop':
+        targets = [u for u in users if u != botname and u in ops]
+        mode_char = '-o'
+    else:
+        await respond(f"Unknown mass action: {action}. Valid: op deop")
+        return
+
+    if not targets:
+        await respond(f"No users to {action} in {channel}.")
+        return
+
+    # IRC max 4 mode targets per line (safe default)
+    chunk = 4
+    for i in range(0, len(targets), chunk):
+        batch = targets[i:i+chunk]
+        modes = f"{'+'if action=='op' else '-'}{'o'*len(batch)} {' '.join(batch)}"
+        core.irc_q.put_nowait({'cmd': 'mode', 'channel': channel, 'modes': modes})
+
+    await respond(f"Mass {action} sent for {len(targets)} user(s) in {channel}.")
+
+async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .net <subcmd> [args]
+    Botnet-level commands: op deop say msg join part mode rehash restart die
+    """
+    parts = arg.split(maxsplit=1)
+    if not parts:
+        await respond("Usage: .net <op|deop|say|msg|join|part|mode|restart|die> [args]")
+        return
+
+    subcmd = parts[0].lower()
+    rest   = parts[1] if len(parts) > 1 else ''
+
+    # Broadcast to all linked peers via botnet
+    if hasattr(core, 'botnet') and core.botnet.peers:
+        await core.botnet.broadcast({'type': 'NET_CMD', 'subcmd': subcmd, 'args': rest, 'from': handle})
+
+    # Also execute locally
+    local_cmds = {
+        'op':      cmd_op,
+        'deop':    cmd_deop,
+        'say':     cmd_msg,
+        'msg':     cmd_msg,
+        'join':    cmd_join,
+        'part':    cmd_part,
+        'mode':    cmd_mode,
+        'restart': cmd_restart,
+        'die':     cmd_quit,
+    }
+    if subcmd in local_cmds:
+        await local_cmds[subcmd](core, handle, session_id, rest, respond)
+    else:
+        await respond(f"Unknown net subcmd: {subcmd}")
+
+async def cmd_subnet(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .subnet list
+    .subnet set <name> <key> <value>
+    """
+    parts = arg.split()
+    if not parts:
+        await respond("Usage: .subnet <list|set> [args]")
+        return
+
+    subcmd = parts[0].lower()
+
+    if subcmd == 'list':
+        async with get_db(core.db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT id, name, hub_host, hub_port FROM subnets ORDER BY id"
+            )
+        if not rows:
+            await respond("No subnets configured.")
+            return
+        for r in rows:
+            await respond(f"  [{r['id']}] {r['name']}  hub={r['hub_host']}:{r['hub_port']}")
+
+    elif subcmd == 'set':
+        if len(parts) < 4:
+            await respond("Usage: .subnet set <name> <key> <value>")
+            return
+        name, key, value = parts[1], parts[2], parts[3]
+        allowed = {'hub_host', 'hub_port', 'name'}
+        if key not in allowed:
+            await respond(f"Allowed keys: {', '.join(allowed)}")
+            return
+        async with get_db(core.db_path) as db:
+            await db.execute(f"UPDATE subnets SET {key} = ? WHERE name = ?", (value, name))
+            await db.commit()
+        await respond(f"Subnet {name}: {key} = {value}")
+    else:
+        await respond(f"Unknown subnet subcmd: {subcmd}. Valid: list set")
+
+async def cmd_taskset(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .taskset <task_name> <0|1>
+    Enable or disable a named task in core.tasks.
+    """
+    parts = arg.split()
+    if len(parts) < 2:
+        await respond("Usage: .taskset <task_name> <0|1>")
+        return
+
+    task_name, state = parts[0], parts[1]
+    enabled = state not in ('0', 'off', 'false', 'no')
+
+    tasks = getattr(core, 'tasks', {})
+    if task_name not in tasks:
+        await respond(f"Unknown task: {task_name}. See .tasks for list.")
+        return
+
+    tasks[task_name]['enabled'] = enabled
+    await respond(f"Task {task_name} {'enabled' if enabled else 'disabled'}.")
+
+async def cmd_tasks(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .tasks — show all registered tasks and their state.
+    """
+    tasks = getattr(core, 'tasks', {})
+    if not tasks:
+        await respond("No tasks registered.")
+        return
+    await respond("Tasks:")
+    for name, info in sorted(tasks.items()):
+        state = "ON" if info.get('enabled', True) else "OFF"
+        interval = info.get('interval', '?')
+        await respond(f"  {name:<20} [{state}]  every {interval}s")
+
+async def cmd_timers(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .timers — show active IRC timers registered in the IRC process.
+    """
+    # IRC timers live in the irc process; we read from core's snapshot if available
+    timers = getattr(core, 'irc_timers', {})
+    if not timers:
+        await respond("No active IRC timers.")
+        return
+    await respond("IRC Timers:")
+    for name, info in sorted(timers.items()):
+        interval = info.get('interval', '?')
+        await respond(f"  {name:<20} every {interval}s")
+
+async def cmd_nopass(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .nopass — list all users without a password set.
+    """
+    async with get_db(core.db_path) as db:
+        rows = await db.execute_fetchall(
+            "SELECT handle FROM users WHERE (password IS NULL OR password = '') AND deleted_at IS NULL ORDER BY handle"
+        )
+    if not rows:
+        await respond("All users have passwords set.")
+        return
+    await respond(f"Users without password ({len(rows)}):")
+    for r in rows:
+        await respond(f"  {r['handle']}")
+
+async def cmd_fixpass(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .fixpass — assign a random 12-char password to all users without one.
+    Passwords are echoed once; user should change immediately with .chpass.
+    """
+    async with get_db(core.db_path) as db:
+        rows = await db.execute_fetchall(
+            "SELECT handle FROM users WHERE (password IS NULL OR password = '') AND deleted_at IS NULL"
+        )
+
+    if not rows:
+        await respond("No users without passwords.")
+        return
+
+    import bcrypt
+    alphabet = string.ascii_letters + string.digits
+    fixed = []
+    for r in rows:
+        pw = ''.join(secrets.choice(alphabet) for _ in range(12))
+        hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+        async with get_db(core.db_path) as db:
+            await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, r['handle']))
+            await db.commit()
+        fixed.append((r['handle'], pw))
+
+    await respond(f"Set random passwords for {len(fixed)} user(s):")
+    for uhandle, pw in fixed:
+        await respond(f"  {uhandle}: {pw}")
+    await respond("Users should change their password with .chpass immediately.")
+
+async def cmd_baway(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .baway [reason] — set the bot away on IRC.
+    """
+    reason = arg.strip() or "Away"
+    core.irc_q.put_nowait({'cmd': 'raw', 'line': f'AWAY :{reason}'})
+    core.away = reason
+    await respond(f"Bot is now away: {reason}")
+
+async def cmd_bback(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .bback — return the bot from away.
+    """
+    core.irc_q.put_nowait({'cmd': 'raw', 'line': 'AWAY'})
+    core.away = None
+    await respond("Bot is back.")
+
+async def cmd_nick(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .nick [newnick] — show current nick or change it.
+    """
+    if not arg:
+        await respond(f"Current nick: {core.botname}")
+        return
+    new_nick = arg.strip().split()[0]
+    core.irc_q.put_nowait({'cmd': 'raw', 'line': f'NICK {new_nick}'})
+    await respond(f"Nick change requested: {new_nick}")
+
+async def cmd_lag(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .lag — show current measured lag to the IRC server.
+    """
+    if not core.connected:
+        await respond("Not connected to IRC.")
+        return
+
+    lag = core._last_lag_ms
+    if lag == 0.0:
+        await respond("No lag measurement yet (waiting for first PONG).")
+    else:
+        await respond(f"Current lag: {lag:.1f}ms")
+
+async def cmd_sdns(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .sdns <host|ip> — resolve hostname/IP using the local resolver.
+    """
+    if not arg:
+        await respond("Usage: .sdns <host|ip>")
+        return
+    target = arg.strip().split()[0]
+    try:
+        loop = asyncio.get_event_loop()
+        info = await loop.getaddrinfo(target, None)
+        seen = set()
+        for entry in info:
+            addr = entry[4][0]
+            if addr not in seen:
+                seen.add(addr)
+                await respond(f"  {target} → {addr}")
+    except socket.gaierror as e:
+        await respond(f"DNS lookup failed for {target}: {e}")
+
+async def cmd_swhois(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .swhois <nick> — send WHOIS to IRC server.
+    """
+    if not arg:
+        await respond("Usage: .swhois <nick>")
+        return
+    nick = arg.strip().split()[0]
+    core.irc_q.put_nowait({'cmd': 'whois', 'nick': nick})
+    await respond(f"WHOIS sent for {nick}. Response will appear in server output.")
+
+async def cmd_swhowas(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .swhowas <nick> — send WHOWAS to IRC server.
+    """
+    if not arg:
+        await respond("Usage: .swhowas <nick>")
+        return
+    nick = arg.strip().split()[0]
+    core.irc_q.put_nowait({'cmd': 'raw', 'line': f'WHOWAS {nick}'})
+    await respond(f"WHOWAS sent for {nick}.")
+
+async def cmd_links(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .links — request server LINKS list from IRC.
+    """
+    core.irc_q.put_nowait({'cmd': 'raw', 'line': 'LINKS'})
+    await respond("LINKS request sent. Response will appear in server output.")
+
+async def cmd_infoleaf(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .infoleaf — show the command to add this bot as a leaf on another bot.
+    """
+    cfg = core.config.get('botnet', {})
+    botname  = core.botname
+    address  = cfg.get('address', '<your.host>')
+    port     = cfg.get('listen_port', 3333)
+    await respond(f"To add this bot as a leaf on another hub, run:")
+    await respond(f"  .addleaf {botname} {address} {port}")
+
+
+async def cmd_addleaf(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .addleaf <botnick> <host> <port>
+    Register a leaf bot and print the reciprocal addhub command.
+    """
+    parts = arg.split()
+    if len(parts) < 3:
+        await respond("Usage: .addleaf <botnick> <host> <port>")
+        return
+    botnick, host, port = parts[0], parts[1], parts[2]
+    try:
+        port_int = int(port)
+    except ValueError:
+        await respond("Port must be a number.")
+        return
+
+    ok = await core.bot.addbot(botnick, None, host, port_int)
+    if ok:
+        await respond(f"Leaf {botnick} ({host}:{port_int}) added.")
+        await respond(f"Now run on {botnick}:")
+        cfg = core.config.get('botnet', {})
+        my_addr = cfg.get('address', '<your.host>')
+        my_port = cfg.get('listen_port', 3333)
+        await respond(f"  .addhub {core.botname} {my_addr} {my_port}")
+    else:
+        await respond(f"Bot {botnick} already exists. Use .chaddr to update.")
+
+
+async def cmd_addhub(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .addhub <botnick> <host> <port>
+    Register a hub bot to connect to.
+    """
+    parts = arg.split()
+    if len(parts) < 3:
+        await respond("Usage: .addhub <botnick> <host> <port>")
+        return
+    botnick, host, port = parts[0], parts[1], parts[2]
+    try:
+        port_int = int(port)
+    except ValueError:
+        await respond("Port must be a number.")
+        return
+
+    ok = await core.bot.addbot(botnick, None, host, port_int)
+    if ok:
+        await respond(f"Hub {botnick} ({host}:{port_int}) added. Use .link {botnick} to connect.")
+    else:
+        await respond(f"Bot {botnick} already exists. Use .chaddr to update.")
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -1359,8 +1831,30 @@ COMMANDS = {
     'quit': cmd_quit,
     'die': cmd_quit,
     'status': cmd_status,
+    'backup': cmd_backup,
     'module': cmd_module,
     'restart': cmd_restart,
+    'chattr':       cmd_chattr,
+    'relay':        cmd_relay,
+    'mass':         cmd_mass,
+    'net':          cmd_net,
+    'subnet':       cmd_subnet,
+    'taskset':      cmd_taskset,
+    'tasks':        cmd_tasks,
+    'timers':       cmd_timers,
+    'nopass':       cmd_nopass,
+    'fixpass':      cmd_fixpass,
+    'baway':        cmd_baway,
+    'bback':        cmd_bback,
+    'nick':         cmd_nick,
+    'lag':          cmd_lag,
+    'sdns':         cmd_sdns,
+    'swhois':       cmd_swhois,
+    'swhowas':      cmd_swhowas,
+    'links':        cmd_links,
+    'infoleaf':     cmd_infoleaf,
+    'addleaf':      cmd_addleaf,
+    'addhub':       cmd_addhub,
     # user
     '+user': cmd_adduser,
     '-user': cmd_deluser,

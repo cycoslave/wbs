@@ -75,6 +75,8 @@ class Core:
         self.event_handlers = {}  # type → [plugins]
         self.timers = {}  # name → task
         self.foreground = False
+        self._lag_ping_sent: float | None = None
+        self._last_lag_ms: float = 0.0
         log.info(f"Core process started. (pid={os.getpid()})")
 
     async def _async_init(self):
@@ -188,6 +190,7 @@ class Core:
             'BANLIST_END': self.on_null,
             'INVITELIST_END': self.on_null,
             'EXCEPTLIST_END': self.on_null,
+            'IRC_PONG': self.on_irc_pong,
         }
         handler = handlers.get(etype)
         if handler:
@@ -195,6 +198,14 @@ class Core:
         else:
             log.warning(f"Unhandled event type: {etype}")
     
+    async def on_irc_pong(self, event: Dict[str, Any]):
+        """Handle PONG reply to measure lag."""
+        sent = self._lag_ping_sent
+        if sent is not None:
+            self._last_lag_ms = (time.time() * 1000) - sent
+            self._lag_ping_sent = None
+            log.debug(f"Lag: {self._last_lag_ms:.1f}ms")
+
     async def on_partyline_input(self, event: dict):
         """Forward partyline input to Partyline manager."""
         session_id = event['session_id']
@@ -260,33 +271,17 @@ class Core:
                 pass
 
     async def on_bot_disconnect(self, event: dict):
-        """Handle bot disconnection"""
+        """Handle bot disconnection."""
         handle = event['handle']
-        session_id = event.get('session_id', handle)
-        
         if handle in self.botnet.peers:
             link = self.botnet.peers.pop(handle)
             if not link.writer.is_closing():
                 link.writer.close()
                 await link.writer.wait_closed()
-        if session_id in self.bot_sessions:
-            del self.bot_sessions[session_id]
-        
-        try:
-            await self.bot.seen(handle, last_seen=datetime.now())
-        except Exception as e:
-            log.error(f"DB status {handle}: {e}")
-        
+        key = handle.lower()
+        if key in self.bot_sessions:
+            del self.bot_sessions[key]
         log.info(f"Bot {handle} unlinked.")
-        self.party_q.put_nowait({
-            'type': 'botnet_status',
-            'text': f"*** {handle} unlinked",
-            'bots': [{'name': h, 'online': h in self.botnet.peers} for h in await self.bot.list()]
-        })
-        self.core.irc_q.put({
-            'type': 'BOTLINK_UNLINK', 
-            'handle': handle
-        })
         if hasattr(self, 'partyline'):
             self.partyline.broadcast(f"*** {handle} unlinked")
 
@@ -772,8 +767,16 @@ class Core:
 
     async def _periodic_tasks(self):
         """Periodic tasks."""
-        if hasattr(self, 'botnet_mgr') and self.botnet_mgr:
-            await self.botnet_mgr.poll_queues()
+        if hasattr(self, 'botnet') and self.botnet:
+            await self.botnet.poll_queues() if hasattr(self.botnet, 'poll_queues') else None
+
+        # Lag ping every 30s when connected
+        if self.connected and self._lag_ping_sent is None:
+            now = time.time()
+            if not hasattr(self, '_last_lag_ping') or (now - self._last_lag_ping) >= 30.0:
+                self._lag_ping_sent = time.time() * 1000
+                self._last_lag_ping = now
+                self.irc_q.put_nowait({'cmd': 'ping', 'token': f'LAG{int(now)}'})
 
     async def register_timer(self, name: str, callback, interval: float, random: bool = False):
         """Register repeating timer"""

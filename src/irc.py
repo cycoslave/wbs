@@ -136,6 +136,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         """Connected to IRC server?"""
         return self.connection.is_connected()
 
+    def on_pong(self, conn, event):
+        """Server PONG reply — emit to core for lag measurement."""
+        token = event.arguments[0] if event.arguments else ''
+        self._emit_event({
+            'type': 'IRC_PONG',
+            'token': token
+        })
+
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
         log.info(f"Connected as {conn.get_nickname()}")
@@ -508,6 +516,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     req_id = hash(nick)
                     self.whois_trackers[req_id] = {'nick': nick}
                     self.connection.whois(nick)
+
+                elif cmd == 'ping':
+                    token = cmd_data.get('token', str(int(time.time())))
+                    self.connection.ping(token)
 
                 elif cmd == 'raw':
                     self.connection.send_raw(cmd_data['line'])

@@ -39,6 +39,7 @@
   },
   "plugins": [],
   "settings": {
+    "pid_file": "wbs.pid",
     "botnet": false,
     "listen_port": 3333,
     "auto_update": false,

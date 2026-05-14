@@ -318,6 +318,59 @@ class BotnetManager:
                     return
             log.warning(f"No handler for CMD {name}")
         
+        elif msg_type == 'RELAY_OPEN':
+            # Remote user attached — register a virtual relay session
+            from_handle = data['from']
+            origin_bot  = data['origin']
+            orig_sid    = data['session_id']
+            relay_key   = f"relay:{origin_bot}:{orig_sid}"
+
+            async def relay_respond(text):
+                """Send output back to the user's real session on the origin bot."""
+                if origin_bot in self.peers:
+                    await self.send_to_peer(origin_bot, {
+                        'type': 'RELAY_OUTPUT',
+                        'session_id': orig_sid,
+                        'text': text
+                    })
+
+            self.core.partyline.relay_sessions[relay_key] = {
+                'handle':   from_handle,
+                'origin':   origin_bot,
+                'orig_sid': orig_sid,
+                'respond':  relay_respond
+            }
+            log.info(f"Relay session opened: {from_handle}@{origin_bot} → {self.core.botname}")
+
+        elif msg_type == 'RELAY_INPUT':
+            # Incoming keystrokes from relayed user — run as a real partyline command
+            origin_bot = data['origin']
+            orig_sid   = data['session_id']
+            relay_key  = f"relay:{origin_bot}:{orig_sid}"
+            text       = data.get('text', '')
+
+            rs = self.core.partyline.relay_sessions.get(relay_key)
+            if rs:
+                await self.core.partyline.dispatch_command(
+                    handle=rs['handle'],
+                    session_id=relay_key,   # virtual session id
+                    text=text,
+                    respond=rs['respond']
+                )
+
+        elif msg_type == 'RELAY_CLOSE':
+            origin_bot = data['origin']
+            orig_sid   = data['session_id']
+            relay_key  = f"relay:{origin_bot}:{orig_sid}"
+            self.core.partyline.relay_sessions.pop(relay_key, None)
+            log.info(f"Relay session closed: {relay_key}")
+
+        elif msg_type == 'RELAY_OUTPUT':
+            # Output coming back from the remote bot — deliver to user's real session
+            sid  = data['session_id']
+            text = data.get('text', '')
+            await self.core.partyline.send_to_session(sid, text)
+
         #elif line.startswith('RESPONSE:'):
         #    # Command response from another bot
         #    msg = line[9:]
