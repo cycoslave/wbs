@@ -94,7 +94,8 @@ class Partyline:
             return
 
         # Normal local dispatch
-        await self.dispatch_command(session['handle'], session_id, text)
+        # Normal local dispatch
+        await self._handle_command(session_id, session['handle'], text)
     
     async def _handle_command(self, session_id: int, handle: str, text: str):
         """Handle partyline command"""

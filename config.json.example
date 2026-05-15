@@ -38,6 +38,14 @@
     "file": "logs/wbs.log"
   },
   "plugins": [],
+  "dcc": {
+    "enabled": true,
+    "mode": "auto",
+    "public_ip": "",
+    "port_min": 40000,
+    "port_max": 40100,
+    "max_sessions": 10
+  },
   "settings": {
     "pid_file": "wbs.pid",
     "botnet": false,

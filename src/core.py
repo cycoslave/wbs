@@ -13,7 +13,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from collections import deque
 
 from . import __version__
@@ -30,6 +30,7 @@ from .session import Session
 from .irc import irc_process_launcher
 from .plugins import PluginManager
 from .games import GameManager
+from .dcc import DCCManager
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -58,6 +59,7 @@ class Core:
         self.botnet = BotnetManager(self)
         self.chan = ChannelManager(self.db_path)
         self.partyline = Partyline(self)
+        self.dcc = DCCManager(self)
         self.plugin = PluginManager(self)
         self.game = GameManager(self)
 
@@ -77,6 +79,7 @@ class Core:
         self.foreground = False
         self._lag_ping_sent: float | None = None
         self._last_lag_ms: float = 0.0
+        self.public_ip: Optional[str] = None
         log.info(f"Core process started. (pid={os.getpid()})")
 
     async def _async_init(self):
@@ -156,6 +159,7 @@ class Core:
         await self.plugin.dispatch(etype, event)
         
         handlers = {
+            'DCC_CHAT_REQUEST': self.on_dcc_chat_request, 
             'PARTYLINE_INPUT': self.on_partyline_input,
             'PARTYLINE_CONNECT': self.on_partyline_connect,
             'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
@@ -191,6 +195,7 @@ class Core:
             'INVITELIST_END': self.on_null,
             'EXCEPTLIST_END': self.on_null,
             'IRC_PONG': self.on_irc_pong,
+            'BOT_PUBLIC_IP': self.on_bot_public_ip,
         }
         handler = handlers.get(etype)
         if handler:
@@ -198,6 +203,13 @@ class Core:
         else:
             log.warning(f"Unhandled event type: {etype}")
     
+    async def on_bot_public_ip(self, event: dict):
+        ip = event['ip']
+        self.public_ip = ip
+        log.info(f"[Core] Public IP: {ip}")
+        if self.dcc:
+            self.dcc.public_ip = ip
+
     async def on_irc_pong(self, event: Dict[str, Any]):
         """Handle PONG reply to measure lag."""
         sent = self._lag_ping_sent
@@ -355,6 +367,29 @@ class Core:
                 self.partyline.broadcast(f"{handle} left the partyline", exclude_session=session_id)
         
         log.debug(f"Partyline disconnect complete: {session_id}")
+
+    async def on_dcc_chat_request(self, event: Dict[str, Any]):
+        """Route DCC CHAT CTCP from irc.py → DCCManager."""
+        nick  = event.get('nick', '')
+        host  = event.get('host', '')
+        args  = event.get('args', [])
+        token = event.get('passive_token')   # None for new requests
+
+        if token:
+            # User's client is confirming a passive/reverse DCC offer we sent
+            try:
+                ip_int = int(args[-3]) if len(args) >= 4 else 0
+                port   = int(args[-2]) if len(args) >= 4 else 0
+            except (ValueError, IndexError):
+                ip_int, port = 0, 0
+            asyncio.create_task(
+                self.dcc.on_passive_callback(nick, token, ip_int, port)
+            )
+        else:
+            # New incoming DCC CHAT request
+            asyncio.create_task(
+                self.dcc.handle_request(nick, host, args)
+            )
 
     def event_poller(self):
         """Thread: Poll core_q -> event buffer."""

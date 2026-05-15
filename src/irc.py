@@ -149,6 +149,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         log.info(f"Connected as {conn.get_nickname()}")
         conn.mode(conn.get_nickname(), "+i-ws")
         numerics = {
+            '302': self.on_userhost, # RPL_USERHOST
             '332': self.on_332,    # RPL_TOPIC
             '324': self.on_324,    # RPL_CHANNELMODEIS
             '329': self.on_329,    # RPL_CHANNELCREATETIME
@@ -164,6 +165,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         }
         for numeric, handler in numerics.items():
             conn.add_global_handler(numeric, handler, -20)
+        #log.info(f"[IRC] Sending USERHOST for {conn.get_nickname()}")
+        conn.send_raw(f"USERHOST {conn.get_nickname()}")
         self._emit_event({
             'type': EventType.READY,
             'botname': conn.get_nickname()
@@ -301,6 +304,32 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             conn.ctcp_reply(nick, f"PING {ts}")
         elif ctcp_cmd == 'VERSION':
             conn.ctcp_reply(nick, f"VERSION WBS {__version__}")
+        elif ctcp_cmd == 'DCC':
+            # Log raw args so we can see exactly what jaraco delivers
+            log.debug(f"[IRC] DCC raw arguments from {nick}: {event.arguments!r}")
+
+            # jaraco may deliver as ['DCC', 'CHAT', 'chat', '<ip>', '<port>']
+            # OR as ['DCC', 'CHAT chat <ip> <port>'] (one blob in [1])
+            # Flatten and re-split to handle both
+            parts = ' '.join(str(a) for a in event.arguments).split()
+            # parts[0]='DCC', parts[1]='CHAT', parts[2]='chat', parts[3]=ip, parts[4]=port
+            # passive: parts[5]=token
+
+            subtype = parts[1].upper() if len(parts) > 1 else ''
+            if subtype == 'CHAT':
+                # Token is present only in passive DCC (6th field, non-numeric)
+                token = parts[5] if len(parts) >= 6 and not parts[5].isdigit() else None
+                log.info(f"[IRC] DCC CHAT from {nick} ip={parts[3] if len(parts)>3 else '?'} "
+                        f"port={parts[4] if len(parts)>4 else '?'} token={token}")
+                self._emit_event({
+                    'type': 'DCC_CHAT_REQUEST',
+                    'nick': nick,
+                    'host': str(event.source),
+                    'args': parts,
+                    'passive_token': token
+                })
+            else:
+                log.debug(f"[IRC] Unhandled DCC subtype {subtype!r} from {nick}")      
         else:
             super().on_ctcp(conn, event)
     
@@ -326,6 +355,18 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'inviter': inviter_nick,
                 'solicitation': 'Unsolicited'
             })
+
+    def on_userhost(self, conn, event):
+        """302 RPL_USERHOST — extract our public IP from server's view."""
+        # Response: :server 302 botnick :botnick=+user@1.2.3.4
+        #log.debug(f"[IRC] USERHOST raw arguments: {event.arguments!r}")
+        try:
+            payload = event.arguments[0]  # e.g. "wbs=+~wbs@1.2.3.4"
+            host = payload.split('@', 1)[1].strip()
+            log.info(f"[IRC] Public IP from USERHOST: {host}")
+            self._emit_event({'type': 'BOT_PUBLIC_IP', 'ip': host})
+        except (IndexError, ValueError):
+            log.warning(f"[IRC] Could not parse USERHOST: {event.arguments!r}")
 
     def on_332(self, conn, event):  # RPL_TOPIC
         chan_name = event.arguments[1]

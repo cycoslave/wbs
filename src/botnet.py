@@ -318,11 +318,11 @@ class BotnetManager:
                     return
             log.warning(f"No handler for CMD {name}")
         
-        elif msg_type == 'RELAY_OPEN':
+        elif cmd == 'RELAY_OPEN':
             # Remote user attached — register a virtual relay session
-            from_handle = data['from']
-            origin_bot  = data['origin']
-            orig_sid    = data['session_id']
+            from_handle = parts[1]
+            origin_bot  = parts[2]
+            orig_sid    = parts[3]
             relay_key   = f"relay:{origin_bot}:{orig_sid}"
 
             async def relay_respond(text):
@@ -342,12 +342,12 @@ class BotnetManager:
             }
             log.info(f"Relay session opened: {from_handle}@{origin_bot} → {self.core.botname}")
 
-        elif msg_type == 'RELAY_INPUT':
+        elif cmd == 'RELAY_INPUT':
             # Incoming keystrokes from relayed user — run as a real partyline command
-            origin_bot = data['origin']
-            orig_sid   = data['session_id']
+            origin_bot = parts[1]
+            orig_sid   = parts[2]
             relay_key  = f"relay:{origin_bot}:{orig_sid}"
-            text       = data.get('text', '')
+            text       = parts[3:]
 
             rs = self.core.partyline.relay_sessions.get(relay_key)
             if rs:
@@ -358,17 +358,17 @@ class BotnetManager:
                     respond=rs['respond']
                 )
 
-        elif msg_type == 'RELAY_CLOSE':
-            origin_bot = data['origin']
-            orig_sid   = data['session_id']
+        elif cmd == 'RELAY_CLOSE':
+            origin_bot = parts[1]
+            orig_sid   = parts[2]
             relay_key  = f"relay:{origin_bot}:{orig_sid}"
             self.core.partyline.relay_sessions.pop(relay_key, None)
             log.info(f"Relay session closed: {relay_key}")
 
-        elif msg_type == 'RELAY_OUTPUT':
+        elif cmd == 'RELAY_OUTPUT':
             # Output coming back from the remote bot — deliver to user's real session
-            sid  = data['session_id']
-            text = data.get('text', '')
+            sid  = parts[1]
+            text = parts[2:]
             await self.core.partyline.send_to_session(sid, text)
 
         #elif line.startswith('RESPONSE:'):
