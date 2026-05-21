@@ -53,7 +53,7 @@ class Core:
         self.quit_event = mp.Event()
         
         # Managers
-        self.net_listener = NetListener(self.core_q)
+        self.net_listener = NetListener(self.core_q, config=self.config)
         self.user = UserManager(self.db_path)
         self.bot = BotManager(self.db_path)
         self.botnet = BotnetManager(self)

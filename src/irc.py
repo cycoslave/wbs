@@ -13,6 +13,7 @@ import random
 import string
 import irc.bot
 import irc.client
+import ssl as ssl_lib
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from jaraco.stream import buffer
@@ -245,17 +246,29 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         )
         self._emit_event({'type': 'REQUEST_BOTLINKS'})
 
-    def _parse_servers(self, config: dict) -> list[tuple[str, int]]:
-        """Extract server list from config (supports multiple formats)"""
+    def _parse_servers(self, config: dict) -> list:
         try:
-            # New format: config['bot']['servers'] = [{'host': ..., 'port': ...}]
             servers_list = config['bot']['servers']
-            return [(s['host'], s['port']) for s in servers_list]
+            result = []
+            for s in servers_list:
+                host = s['host']
+                port = s['port']
+                use_ssl = s.get('ssl', False)
+                password = s.get('password', None)
+                if use_ssl:
+                    ssl_ctx = ssl_lib.create_default_context()
+                    # Optional: allow self-signed certs for private servers
+                    if s.get('ssl_verify', True) is False:
+                        ssl_ctx.check_hostname = False
+                        ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+                    result.append(irc.bot.ServerSpec(host, port, password, ssl_ctx))
+                else:
+                    result.append(irc.bot.ServerSpec(host, port, password))
+            return result
         except (KeyError, TypeError):
-            # Legacy format: config['server'], config['port']
             host = config.get('server', 'irc.wcksoft.com')
             port = config.get('port', 6667)
-            return [(host, port)]
+            return [irc.bot.ServerSpec(host, port)]
     
     def _emit_event(self, event_data: dict):
         """Send event to core.py via queue"""

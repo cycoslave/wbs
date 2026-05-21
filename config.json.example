@@ -4,7 +4,7 @@
     "user": "wbs",
     "realname": "WBS IRC Bot",
     "servers": [
-      {"host": "irc.example.com", "port": 6667, "password": null}
+      {"host": "irc.example.com", "port": 6667, "password": null, "ssl": true }
     ],
     "channels": ["#channel", "#channel2"]
   },
@@ -50,6 +50,10 @@
     "pid_file": "wbs.pid",
     "botnet": false,
     "listen_port": 3333,
+    "ssl": true,
+    "ssl_verify": false,
+    "certfile": "wbs.crt",
+    "keyfile":  "wbs.key",
     "auto_update": false,
     "irc_throttle_ms": 100
   }

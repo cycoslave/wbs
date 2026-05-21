@@ -12,3 +12,5 @@ src/games/__pycache__/*
 *.pid
 *.log
 *.bak
+*.key
+*.crt

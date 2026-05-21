@@ -9,6 +9,7 @@ import logging
 import aiosqlite
 import secrets
 import hashlib
+import ssl as ssl_lib
 from datetime import datetime, timezone
 from typing import Dict, Optional, Any, Literal, Callable
 from dataclasses import dataclass
@@ -73,9 +74,17 @@ class BotnetManager:
         """Establish outgoing connection to peer."""
         try:
             bot = await self.bot.get(handle)
-            
-            # Connect first
-            reader, writer = await asyncio.open_connection(bot.address, bot.port)
+
+            cfg = self.config.get('settings', {})
+            use_ssl = cfg.get('ssl', False)
+
+            if use_ssl:
+                ssl_ctx = ssl_lib.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+                reader, writer = await asyncio.open_connection(bot.address, bot.port, ssl=ssl_ctx)
+            else:
+                reader, writer = await asyncio.open_connection(bot.address, bot.port)
             
             # Create link and assign streams
             link = BotLink(
