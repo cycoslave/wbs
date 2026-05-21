@@ -18,11 +18,13 @@ log = logging.getLogger("wbs.channel")
 class Channel:
     """Live IRC channel state + lazy-loaded DB config"""
     name: str
-    
+
+    # --- Live IRC state ---
     users: List[str] = field(default_factory=list)
     ops: List[str] = field(default_factory=list)
     voiced: List[str] = field(default_factory=list)
     bot_op: bool = False
+    synced: bool = False
     # Bool modes (no param)
     modes_n: bool = False
     modes_t: bool = False
@@ -38,19 +40,88 @@ class Channel:
     exempts: List[str] = field(default_factory=list)
     topic: Optional[str] = ''
     created: Optional[int] = 0
-    
-    _chan_mgr = None
-    
+
+    # Private — initialized in __post_init__
+    _chan_mgr: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        self._db_loaded: bool = False
+        self._db_config: Optional[dict] = None
+        self.name = self.name.lower()
+
+    # Live IRC state — membership
+    def add_user(self, nick: str):
+        nick = nick.lower()
+        if nick not in self.users:
+            self.users.append(nick)
+
+    def remove_user(self, nick: str):
+        nick = nick.lower()
+        self.users = [n for n in self.users if n != nick]
+        self.unset_op(nick)
+        self.voiced = [n for n in self.voiced if n != nick]
+
+    def rename_user(self, old: str, new: str):
+        old, new = old.lower(), new.lower()
+        self.users  = [new if n == old else n for n in self.users]
+        self.ops    = [new if n == old else n for n in self.ops]
+        self.voiced = [new if n == old else n for n in self.voiced]
+
+    def clear_state(self):
+        """Reset all live IRC state (e.g. on bot PART or disconnect)."""
+        self.users.clear()
+        self.ops.clear()
+        self.voiced.clear()
+        self.bans.clear()
+        self.invites.clear()
+        self.exempts.clear()
+        self.bot_op = False
+        self.synced = False
+        self.limit = 0
+        self.key = ''
+        self.topic = ''
+
+    # Live IRC state — op/voice
+    def is_op(self, nick: str) -> bool:
+        return nick.lower() in self.ops
+
+    def set_op(self, nick: str, botname: str = ''):
+        nick = nick.lower()
+        if nick not in self.ops:
+            self.ops.append(nick)
+        if botname and nick == botname.lower():
+            self.bot_op = True
+
+    def unset_op(self, nick: str, botname: str = ''):
+        nick = nick.lower()
+        self.ops = [n for n in self.ops if n != nick]
+        if botname and nick == botname.lower():
+            self.bot_op = False
+
+    def is_voiced(self, nick: str) -> bool:
+        return nick.lower() in self.voiced
+
+    def set_voice(self, nick: str):
+        nick = nick.lower()
+        if nick not in self.voiced:
+            self.voiced.append(nick)
+
+    def unset_voice(self, nick: str):
+        nick = nick.lower()
+        self.voiced = [n for n in self.voiced if n != nick]
+
+    # Live IRC state — modes
     def _parse_and_set_modes(self, modes_str: str):
-        """Parse RPL_324 or MODE msg"""
-        modes = modes.parse_channel_modes(modes_str)
-        for sign, mode, param in modes:
-            setter = {'+': self._set_mode, '-': self._clear_mode}
-            setter[sign](mode, param)
+        """Parse RPL_324 or MODE msg and apply to live state."""
+        parsed = modes.parse_channel_modes(modes_str)
+        for sign, mode, param in parsed:
+            if sign == '+':
+                self._set_mode(mode, param)
+            else:
+                self._clear_mode(mode, param)
 
     def _set_mode(self, mode: str, param: Optional[str] = None):
-        bool_modes = 'ntpsim'
-        if mode in bool_modes:
+        if mode in 'ntpsim':
             setattr(self, f'modes_{mode}', True)
         elif mode == 'l':
             self.limit = int(param) if param else None
@@ -58,8 +129,7 @@ class Channel:
             self.key = param
 
     def _clear_mode(self, mode: str, param: Optional[str] = None):
-        bool_modes = 'ntpsim'
-        if mode in bool_modes:
+        if mode in 'ntpsim':
             setattr(self, f'modes_{mode}', False)
         elif mode == 'l':
             self.limit = None
@@ -67,19 +137,23 @@ class Channel:
             self.key = None
 
     def update_irc_state(self, irc_data: dict):
-        self.users = irc_data.get('user_list', [])  # Use full list
-        self.bot_op = irc_data.get('bot_op', False)
-        self.ops = irc_data.get('ops', [])
-        self.voiced = irc_data.get('voiced', [])
-        # Bool/param now live-updated via handlers; no need for raw mode str
-    
+        self.users   = irc_data.get('user_list', [])
+        self.bot_op  = irc_data.get('bot_op', False)
+        self.ops     = irc_data.get('ops', [])
+        self.voiced  = irc_data.get('voiced', [])
+
+    # DB — lazy load
     async def _load_db_config(self):
-        """Lazy load channel settings from DB"""
         if not self._db_loaded and self._chan_mgr:
             self._db_config = await self._chan_mgr.get_raw(self.name)
             self._db_loaded = True
-    
-    # Lazy-loaded DB properties
+
+    def invalidate_cache(self):
+        """Force next DB access to reload from database."""
+        self._db_loaded = False
+        self._db_config = None
+
+    # DB — subnet binding
     async def get_subnet_ids(self, channel: str) -> list[int]:
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
@@ -89,17 +163,13 @@ class Channel:
             return [row["subnet_id"] for row in rows]
 
     async def is_global(self, channel: str) -> bool:
-        subnet_ids = await self.get_subnet_ids(channel)
-        return len(subnet_ids) == 0
+        return len(await self.get_subnet_ids(channel)) == 0
 
     async def bind_to_subnet(self, channel: str, subnet_id: int, added_by: str = None) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             cursor = await db.execute(
-                """
-                INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by)
-                VALUES (?, ?, ?)
-                """,
+                "INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by) VALUES (?, ?, ?)",
                 (channel, subnet_id, added_by)
             )
             await db.commit()
@@ -129,251 +199,242 @@ class Channel:
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
                 """
-                SELECT name
-                FROM channels
+                SELECT name FROM channels
                 WHERE is_inactive = 0
                 AND (
-                    EXISTS (
-                        SELECT 1
-                        FROM channel_subnets cs
-                        WHERE cs.channel_name = channels.name
-                        AND cs.subnet_id = ?
-                    )
-                    OR NOT EXISTS (
-                        SELECT 1
-                        FROM channel_subnets cs2
-                        WHERE cs2.channel_name = channels.name
-                    )
+                    EXISTS (SELECT 1 FROM channel_subnets cs WHERE cs.channel_name = channels.name AND cs.subnet_id = ?)
+                    OR NOT EXISTS (SELECT 1 FROM channel_subnets cs2 WHERE cs2.channel_name = channels.name)
                 )
                 ORDER BY name
                 """,
                 (subnet_id,)
             )
             return [row["name"] for row in rows]
-    
+
+    # DB — config properties (lazy)
     async def get_modes(self) -> str:
         await self._load_db_config()
         return self._db_config.get('modes', '') if self._db_config else ''
-    
+
     async def get_bans(self) -> List[str]:
         await self._load_db_config()
         if self._db_config:
             bans = self._db_config.get('bans', '[]')
             return json.loads(bans) if isinstance(bans, str) else bans
         return []
-    
+
     async def get_invites(self) -> List[str]:
         await self._load_db_config()
         if self._db_config:
             invites = self._db_config.get('invites', '[]')
             return json.loads(invites) if isinstance(invites, str) else invites
         return []
-    
+
     async def get_exempts(self) -> List[str]:
         await self._load_db_config()
         if self._db_config:
             exempts = self._db_config.get('exempts', '[]')
             return json.loads(exempts) if isinstance(exempts, str) else exempts
         return []
-    
+
     # Flood protection
     async def get_flood_pub(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_pub', 15) if self._db_config else 15
-    
+
     async def get_flood_pub_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_pub_time', 60) if self._db_config else 60
-    
+
     async def get_flood_ctcp(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_ctcp', 3) if self._db_config else 3
-    
+
     async def get_flood_ctcp_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_ctcp_time', 60) if self._db_config else 60
-    
+
     async def get_flood_join(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_join', 5) if self._db_config else 5
-    
+
     async def get_flood_join_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_join_time', 60) if self._db_config else 60
-    
+
     async def get_flood_kick(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_kick', 3) if self._db_config else 3
-    
+
     async def get_flood_kick_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_kick_time', 10) if self._db_config else 10
-    
+
     async def get_flood_deop(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_deop', 3) if self._db_config else 3
-    
+
     async def get_flood_deop_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_deop_time', 10) if self._db_config else 10
-    
+
     async def get_flood_nick(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_nick', 5) if self._db_config else 5
-    
+
     async def get_flood_nick_time(self) -> int:
         await self._load_db_config()
         return self._db_config.get('flood_nick_time', 60) if self._db_config else 60
-    
+
     # Channel flags
     async def is_bitch(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_bitch', False) if self._db_config else False
-    
+
     async def is_autoop(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_autoop', False) if self._db_config else False
-    
+
     async def is_autovoice(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_autovoice', False) if self._db_config else False
-    
+
     async def is_revenge(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_revenge', False) if self._db_config else False
-    
+
     async def is_revengebots(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_revengebots', False) if self._db_config else False
-    
+
     async def is_protectfriends(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_protectfriends', False) if self._db_config else False
-    
+
     async def is_protectops(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_protectops', False) if self._db_config else False
-    
+
     async def is_dontkickops(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_dontkickops', False) if self._db_config else False
-    
+
     async def is_inactive(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_inactive', False) if self._db_config else False
-    
+
     async def is_enforcebans(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_enforcebans', False) if self._db_config else False
-    
+
     async def is_dynamicbans(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_dynamicbans', False) if self._db_config else False
-    
+
     async def is_dynamicexempts(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_dynamicexempts', False) if self._db_config else False
-    
+
     async def is_dynamicinvites(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_dynamicinvites', False) if self._db_config else False
-    
+
     async def is_pubcom(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_pubcom', False) if self._db_config else False
-    
+
     async def is_news(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_news', False) if self._db_config else False
-    
+
     async def is_url(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_url', False) if self._db_config else False
-    
+
     async def is_stats(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_stats', False) if self._db_config else False
-    
+
     async def is_locked(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_locked', False) if self._db_config else False
-    
+
     async def is_topiclock(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_topiclock', False) if self._db_config else False
-    
+
     async def is_limit(self) -> bool:
         await self._load_db_config()
         return self._db_config.get('is_limit', False) if self._db_config else False
-    
+
     # Lock state
     async def get_lock_by(self) -> Optional[str]:
         await self._load_db_config()
         return self._db_config.get('lock_by') if self._db_config else None
-    
+
     async def get_lock_at(self) -> int:
         await self._load_db_config()
         return self._db_config.get('lock_at', 0) if self._db_config else 0
-    
+
     async def get_lock_reason(self) -> str:
         await self._load_db_config()
         return self._db_config.get('lock_reason', '') if self._db_config else ''
-    
+
     # Topic lock
     async def get_topiclock(self) -> str:
         await self._load_db_config()
         return self._db_config.get('topiclock', '') if self._db_config else ''
-    
+
     async def get_topiclock_by(self) -> Optional[str]:
         await self._load_db_config()
         return self._db_config.get('topiclock_by') if self._db_config else None
-    
+
     async def get_topiclock_at(self) -> int:
         await self._load_db_config()
         return self._db_config.get('topiclock_at', 0) if self._db_config else 0
-    
+
     async def get_topiclock_reason(self) -> str:
         await self._load_db_config()
         return self._db_config.get('topiclock_reason', '') if self._db_config else ''
-    
+
     # Channel limits
     async def get_limit_add(self) -> int:
         await self._load_db_config()
         return self._db_config.get('limit_add', 15) if self._db_config else 15
-    
+
     async def get_limit_rand(self) -> int:
         await self._load_db_config()
         return self._db_config.get('limit_rand', 200) if self._db_config else 200
-    
+
     async def get_limit_tolerance(self) -> int:
         await self._load_db_config()
         return self._db_config.get('limit_tolerance', 2) if self._db_config else 2
-    
+
     async def get_limit_delta(self) -> int:
         await self._load_db_config()
         return self._db_config.get('limit_delta', 300) if self._db_config else 300
-    
+
     async def get_limit_at(self) -> int:
         await self._load_db_config()
         return self._db_config.get('limit_at', 0) if self._db_config else 0
-    
+
     # Metadata
     async def get_comment(self) -> str:
         await self._load_db_config()
         return self._db_config.get('comment', '') if self._db_config else ''
-    
+
     async def get_created_at(self) -> int:
         await self._load_db_config()
         return self._db_config.get('created_at', 0) if self._db_config else 0
-    
+
     async def get_updated_at(self) -> int:
         await self._load_db_config()
         return self._db_config.get('updated_at', 0) if self._db_config else 0
-    
+
     async def get_created_by(self) -> Optional[str]:
         await self._load_db_config()
         return self._db_config.get('created_by') if self._db_config else None
-    
+
     async def get_updated_by(self) -> Optional[str]:
         await self._load_db_config()
         return self._db_config.get('updated_by') if self._db_config else None

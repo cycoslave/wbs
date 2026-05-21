@@ -857,92 +857,50 @@ class Core:
             'irc_data': irc_data
         })
 
-    def on_chan(self, channel: str) -> bool:
-        """Check if the bot is on a channel.
-        
-        Args:
-            channel: Channel name (with or without # prefix)
-        
-        Returns:
-            True if bot is on the channel, False otherwise
-        """
-        if not channel.startswith('#'):
+    def _normalize_chan(self, channel: str) -> str:
+        """Ensure channel has # prefix and is lowercase."""
+        if not channel.startswith(('#', '&', '!', '+')):
             channel = f'#{channel}'
-        return channel in self.channels
+        return channel.lower()
+
+    def on_chan(self, channel: str) -> bool:
+        """Check if the bot is on a channel."""
+        return self._normalize_chan(channel) in self.channels
 
     def bot_isop(self, channel: str) -> bool:
-        """Check if the bot has op status on a channel.
-        
-        Args:
-            channel: Channel name (with or without # prefix)
-        
-        Returns:
-            True if bot is opped, False otherwise
-        """
-        if not channel.startswith('#'):
-            channel = f'#{channel}'
-        
-        chan = self.channels.get(channel)
+        """Check if the bot has op status on a channel."""
+        chan = self.channels.get(self._normalize_chan(channel))
         if not chan:
             return False
-        
-        return self.botname in chan.ops
+        return chan.bot_op  # use the dedicated bool, avoid scanning ops list
 
     def nick_isop(self, nick: str, channel: str) -> bool:
-        """Check if a nick has op status on a channel.
-        
-        Args:
-            nick: Nickname to check
-            channel: Channel name (with or without # prefix)
-        
-        Returns:
-            True if nick is opped, False otherwise
-        """
-        if not channel.startswith('#'):
-            channel = f'#{channel}'
-        
-        chan = self.channels.get(channel)
+        """Check if a nick has op status on a channel."""
+        chan = self.channels.get(self._normalize_chan(channel))
         if not chan:
             return False
-        
-        return nick in chan.ops
+        return chan.is_op(nick)  # uses lowercase-safe method
 
     def nick_isvoice(self, nick: str, channel: str) -> bool:
-        """Check if a nick has voice status on a channel.
-        
-        Args:
-            nick: Nickname to check
-            channel: Channel name (with or without # prefix)
-        
-        Returns:
-            True if nick has voice, False otherwise
-        """
-        if not channel.startswith('#'):
-            channel = f'#{channel}'
-        
-        chan = self.channels.get(channel)
+        """Check if a nick has voice status on a channel."""
+        chan = self.channels.get(self._normalize_chan(channel))
         if not chan:
             return False
-        
-        return nick in chan.voiced
+        return chan.is_voiced(nick)
 
     def chan_modes(self, channel: str) -> str:
-        """Get current channel mode string.
-        
-        Args:
-            channel: Channel name (with or without # prefix)
-        
-        Returns:
-            Mode string (e.g., '+nt') or empty string if channel not found
-        """
-        if not channel.startswith('#'):
-            channel = f'#{channel}'
-        
-        chan = self.channels.get(channel)
+        """Get current channel mode string (e.g. '+ntm')."""
+        chan = self.channels.get(self._normalize_chan(channel))
         if not chan:
             return ''
-        
-        return chan.mode
+        # Build mode string from the bool flags on the dataclass
+        active = [m for m in 'ntpsim' if getattr(chan, f'modes_{m}', False)]
+        mode_str = '+' + ''.join(active) if active else ''
+        if chan.limit:
+            mode_str += 'l'
+        if chan.key:
+            mode_str += 'k'
+        return mode_str
     
     async def _autoload_modules(self):
         async with get_db(self.db_path) as db:
