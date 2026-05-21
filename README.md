@@ -41,8 +41,4 @@ options:
 - try to fix duckhunt cheating.
 
 ## Bugs
-- blackjack: 
-    <cyco> !bjjoin
-    <WBS> [Blackjack] cyco joined with $750.
-    <cyco> !bjtop
-    <WBS> [Blackjack] Top chips: 1. randy $1500  2. cyco $0
+- None, for now.

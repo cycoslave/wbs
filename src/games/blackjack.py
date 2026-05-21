@@ -490,6 +490,7 @@ class BlackjackGame(Game):
                     "INSERT INTO blackjack_cash(nick, cash) VALUES(?,?)",
                     (nick, starting_cash)
                 )
+                await db.commit()
         return row["cash"] if row else starting_cash
 
     async def _save_cash(self, nick: str, amount: int):
