@@ -236,6 +236,7 @@ class pubcomPlugin(Plugin):
                     # Extract CVSS scores from CVE 5.1 format
                     score = 'N/A'
                     severity = ''
+                    severity_str = ''
 
                     containers = data.get('containers', {})
                     if containers:
@@ -912,8 +913,8 @@ class pubcomPlugin(Plugin):
                 data_text = await resp.text()
                 cves: List[Dict[str, Any]] = json.loads(data_text)
         except Exception as e:
-            self.log.error(f"CVE fetch error: {e}")
-            await self.send_privmsg(channel, f"Error fetching CVEs: {e}")
+            self.log.error(f"CVE fetch error: {type(e).__name__}: {e!r}")
+            await self.send_privmsg(channel, f"Error fetching CVEs: {type(e).__name__}")
             return
         
         count = 0

@@ -46,30 +46,3 @@ options:
     <WBS> [Blackjack] cyco joined with $750.
     <cyco> !bjtop
     <WBS> [Blackjack] Top chips: 1. randy $1500  2. cyco $0
-
-- pubcom having issues pulling CVE:
-    console> 2026-03-17 09:37:11,875 ERROR CVE fetch error: 
-    2026-03-17 09:38:09,867 ERROR CVE fetch error: 
-    2026-03-17 11:03:00,402 WARNING 
-
-- pubcom
-2026-05-15 09:14:50,656 ERROR Plugin pubcom.on_PUBMSG error: cannot access local variable 'severity_str' where it is not associated with a value
-Traceback (most recent call last):
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/__init__.py", line 163, in dispatch
-    await method(event)
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 165, in on_PUBMSG
-    await handler(nick, uhost, channel, arg)
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 328, in cmd_cve
-    msg = f"{products_str} - CVSS: {score}{severity_str} | {summary}"
-                                           ^^^^^^^^^^^^
-UnboundLocalError: cannot access local variable 'severity_str' where it is not associated with a value
-2026-05-15 09:15:04,101 ERROR Plugin pubcom.on_PUBMSG error: cannot access local variable 'severity_str' where it is not associated with a value
-Traceback (most recent call last):
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/__init__.py", line 163, in dispatch
-    await method(event)
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 165, in on_PUBMSG
-    await handler(nick, uhost, channel, arg)
-  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 328, in cmd_cve
-    msg = f"{products_str} - CVSS: {score}{severity_str} | {summary}"
-                                           ^^^^^^^^^^^^
-UnboundLocalError: cannot access local variable 'severity_str' where it is not associated with a value
