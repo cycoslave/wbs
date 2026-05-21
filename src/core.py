@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import sys
+import random
 from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import deque
@@ -236,6 +237,11 @@ class Core:
 
         reader, writer = streams
 
+        subnet_id = (
+            event.get('subnet_id')
+            or self.config.get('botnet', {}).get('subnet_id', None)
+        )
+
         try:
             bot_id = len(self.bot_sessions)
             response_q = mp.Queue()
@@ -248,7 +254,7 @@ class Core:
                 writer=writer,
                 core_q=self.core_q,
                 response_q=response_q,
-                subnet_id=1
+                subnet_id=subnet_id
             )
 
             self.bot_sessions[bot_name.lower()] = bot_session
@@ -455,7 +461,7 @@ class Core:
                 if child.is_alive():
                     child.terminate()
                     child.join(timeout=1.0)
-        sys.exit(1)
+        sys.exit(0)
 
     async def on_command(self, event):
         """
@@ -463,10 +469,13 @@ class Core:
         Delegates actual command logic to commands.py.
         """
         nick = event.get('nick', '')
+        host = event.get('host', '')
+        ident = event.get('ident', '')
         text = event.get('text', '').strip()
         
-        # Check authorization via user manager
-        handle = await self.user.match_user(f"{nick}!*@*")  # Simplified; use full hostmask
+        full_hostmask = f"{nick}!{ident}@{host}" if ident else f"{nick}!*@{host}"
+
+        handle = await self.user.match_user(full_hostmask)
         if not handle:
             self.send_cmd('msg', nick, "You are not recognized. Contact bot owner.")
             return
@@ -682,7 +691,7 @@ class Core:
         subnet_id = self.config.get('botnet', {}).get('subnet_id', None)
         channels = await self.chan.getchans(subnet_id=subnet_id)
         for channel in channels:
-            if not None:
+            if channel is not None:
                 log.info(f"Joining {channel}..")
                 self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
                 time.sleep(0.2)
@@ -789,20 +798,20 @@ class Core:
                 self._last_lag_ping = now
                 self.irc_q.put_nowait({'cmd': 'ping', 'token': f'LAG{int(now)}'})
 
-    async def register_timer(self, name: str, callback, interval: float, random: bool = False):
+    async def register_timer(self, name: str, callback, interval: float, randomize: bool = False):
         """Register repeating timer"""
         async def timer_loop():
+            current_interval = interval
             while True:
                 try:
                     await callback()
                 except Exception as e:
                     log.error(f"Timer {name} error: {e}")
-                if random:
-                    interval += random.randint(-30, 30)
-                await asyncio.sleep(interval)
-        
+                if randomize:
+                    current_interval = max(1.0, interval + random.randint(-30, 30))
+                await asyncio.sleep(current_interval)
+                log.debug(f"Registered timer {name}: {current_interval}s")
         self.timers[name] = asyncio.create_task(timer_loop())
-        log.debug(f"Registered timer {name}: {interval}s")
     
     def unregister_timer(self, name: str):
         if name in self.timers:

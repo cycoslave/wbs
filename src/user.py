@@ -8,6 +8,7 @@ import json
 import bcrypt
 import time
 import logging
+import fnmatch
 from typing import List, Optional, Dict
 from dataclasses import dataclass, asdict, field
 
@@ -211,14 +212,26 @@ class UserManager:
             return "\n".join(result)
 
     async def match_user(self, hostmask: str) -> Optional[str]:
-        """Glob match hostmasks (eggdrop-style)."""
+        """
+        Match a full nick!ident@host against stored glob-style hostmasks.
+        Hostmasks are stored as a JSON array per user, e.g. ["*!*@*.bar.com"].
+        """
+        hostmask = hostmask.lower()
         async with get_db(self.db_path) as db:
-            # Simple LIKE; enhance with fnmatch/regex if needed
             rows = await db.execute_fetchall(
-                "SELECT handle FROM users WHERE hostmasks LIKE ?",
-                (f"%{hostmask}%",)
+                "SELECT handle, hostmasks FROM users WHERE deleted_at IS NULL"
             )
-            return rows[0]['handle'] if rows else None
+        for row in rows:
+            masks = row['hostmasks']
+            if isinstance(masks, str):
+                try:
+                    masks = json.loads(masks) if masks else []
+                except (json.JSONDecodeError, ValueError):
+                    masks = []
+            for mask in masks:
+                if fnmatch.fnmatch(hostmask, mask.lower()):
+                    return row['handle']
+        return None
 
     async def set_password(self, handle: str, password: str):
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else ''

@@ -15,10 +15,6 @@ if TYPE_CHECKING:
 log = logging.getLogger("wbs.subnet")
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Subnet:
     """Runtime representation of a subnet row."""
@@ -27,7 +23,6 @@ class Subnet:
     created_at: Optional[str] = None
     created_by: Optional[str] = None
 
-
 @dataclass
 class SubnetState:
     """Live runtime state for a subnet (peers, channels, networks)."""
@@ -35,11 +30,6 @@ class SubnetState:
     peer_handles: List[str] = field(default_factory=list)
     networks: Dict[str, bool] = field(default_factory=dict)
     channels: Dict[str, bool] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# SubnetManager
-# ---------------------------------------------------------------------------
 
 class SubnetManager:
     """
@@ -57,10 +47,6 @@ class SubnetManager:
         self.db_path = db_path
         # subnet_id → SubnetState
         self._subnets: Dict[int, SubnetState] = {}
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def load(self):
         """Load all subnets from DB into memory. Call at startup."""
@@ -82,10 +68,6 @@ class SubnetManager:
             self._subnets[s.id] = SubnetState(subnet=s)
 
         log.info(f"Loaded {len(self._subnets)} subnets")
-
-    # ------------------------------------------------------------------
-    # CRUD
-    # ------------------------------------------------------------------
 
     async def create(self, name: str, created_by: str = "local") -> Subnet:
         """Create a new subnet. Returns the new Subnet."""
@@ -201,10 +183,6 @@ class SubnetManager:
             key=lambda s: s.id,
         )
 
-    # ------------------------------------------------------------------
-    # Runtime peer membership
-    # ------------------------------------------------------------------
-
     def register_peer(self, handle: str, subnet_id: int | None):
         """
         Mark a peer as belonging to a subnet at runtime.
@@ -213,22 +191,22 @@ class SubnetManager:
         handle = handle.lower()
 
         if subnet_id is None:
-            subnet_id = 0
-            log.info("Assigned default subnet_id=0 to '%s'", handle)
+            subnet_id = 1
+            log.info("Assigned default subnet_id=1 to '%s'", handle)
 
         state = self._subnets.get(subnet_id)
-        if state is None and subnet_id != 0:
+        if state is None and subnet_id != 1:
             log.info(
-                "Unknown subnet_id=%s for '%s'; falling back to default subnet_id=0",
+                "Unknown subnet_id=%s for '%s'; falling back to default subnet_id=1",
                 subnet_id,
                 handle,
             )
-            subnet_id = 0
+            subnet_id = 1
             state = self._subnets.get(subnet_id)
 
         if state is None:
             log.warning(
-                "Default subnet_id=0 is missing; cannot register peer '%s'",
+                "Default subnet_id=1 is missing; cannot register peer '%s'",
                 handle,
             )
             return
@@ -275,10 +253,6 @@ class SubnetManager:
         sid_a = self.subnet_of_peer(handle_a)
         return sid_a is not None and sid_a == self.subnet_of_peer(handle_b)
 
-    # ------------------------------------------------------------------
-    # Broadcast target resolution
-    # ------------------------------------------------------------------
-
     def resolve_targets(
         self,
         peers: Dict[str, "BotLink"],
@@ -313,11 +287,7 @@ class SubnetManager:
             # scope == 'bot': caller resolves directly, nothing added here
 
         return targets
-
-    # ------------------------------------------------------------------
-    # Peer share merge (replaces inline logic in handle_share_subnets)
-    # ------------------------------------------------------------------
-
+    
     async def merge_from_peer(self, subnets: list, from_bot: str):
         """
         Merge subnet list received via SHARE SUBNETS.

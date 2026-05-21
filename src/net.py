@@ -52,8 +52,9 @@ class NetListener:
 
             if line.startswith('BOTLINK'):
                 parts = line.split()
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     remote_handle = parts[1]
+                    subnet_id = int(parts[3])
                     log.info(f"Botlink from {remote_handle}")
                     # Store FIRST, then notify — prevents race in on_bot_connect
                     self._pending_streams[remote_handle.lower()] = (reader, writer)
@@ -61,6 +62,7 @@ class NetListener:
                         'type': 'BOT_CONNECT',
                         'handle': remote_handle,
                         'peer': peer,
+                        'subnet_id': subnet_id,
                         'data': line,
                     })
                     return  # Streams owned by core now — do NOT close

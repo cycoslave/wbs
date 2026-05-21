@@ -51,33 +51,50 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
 
 
 async def seed_db(db_path: str, config: dict):
-    """Seed from config.json: bot record, channels, users."""
+    """Seed from config.json: subnet, bot record, channels, users."""
     bot_config = config.get('bot', {})
     nick = bot_config['nick']
-    
+
+    # Parse subnet from config — coerce id to int
+    subnet_cfg = config.get('subnet', {})
+    subnet_id = int(subnet_cfg.get('id', 1))
+    subnet_name = subnet_cfg.get('name', 'default')
+
     async with aiosqlite.connect(db_path) as db:
-        # Self-bot record (handle-based)
+        # Subnet must exist before anything references it as a FK
         await db.execute("""
-            INSERT OR IGNORE INTO bots (handle, address, port, subnet_id, is_online)
-            VALUES (?, '127.0.0.1', 3333, 1, 1)
-        """, (nick,))
-        
+            INSERT INTO subnets (id, name, created_by)
+            VALUES (?, ?, 'config')
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name
+        """, (subnet_id, subnet_name))
+
+        # Self-bot record
+        await db.execute("""
+            INSERT INTO bots (handle, address, port, subnet_id, is_online)
+            VALUES (?, '127.0.0.1', 3333, ?, 1)
+            ON CONFLICT(handle) DO UPDATE SET
+                subnet_id = excluded.subnet_id,
+                is_online = 1
+        """, (nick, subnet_id))
+
         # Channels
         for ch in bot_config.get('channels', []):
             await db.execute("""
-                INSERT OR IGNORE INTO channels (name, subnet_id, settings)
-                VALUES (?, 1, '{}')
-            """, (ch,))
-        
+                INSERT INTO channels (name, subnet_id, settings)
+                VALUES (?, ?, '{}')
+                ON CONFLICT(name) DO NOTHING
+            """, (ch, subnet_id))
+
         # Owner user
         owner = bot_config.get('owners', ['owner'])[0]
         await db.execute("""
-            INSERT OR IGNORE INTO users (handle, flags, password)
+            INSERT INTO users (handle, flags, password)
             VALUES (?, '+fhoimn', '')
+            ON CONFLICT(handle) DO NOTHING
         """, (owner,))
-        
+
         await db.commit()
-        log.info(f"DB seeded: bot={nick}, owner={owner}")
+        log.info(f"DB seeded: subnet={subnet_name}(id={subnet_id}), bot={nick}, owner={owner}")
 
 @asynccontextmanager
 async def get_db(db_path: str):
