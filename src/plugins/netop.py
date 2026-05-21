@@ -54,14 +54,12 @@ class netopPlugin(Plugin):
                 await self.msg_to_bots(f"reqop {self.core.botname} {chan}")
     
     async def on_MODE(self, event):
-        """Netop deop/op handling - botnet protection."""
-
         chan = event.get('channel', '').lower()
         modes = event.get('modes', '')
         victims = [a.lower() for a in event.get('args', [])]
 
         now = time.time()
-        peers = getattr(self.core.botnet, 'peers', {})   # handle -> BotLink
+        peers = getattr(self.core.botnet, 'peers', {})
         bot_nicks = {
             (link.nick or link.name).lower(): handle
             for handle, link in peers.items()
@@ -71,61 +69,48 @@ class netopPlugin(Plugin):
         sign = '+'
         arg_idx = 0
 
-        for i, char in enumerate(modes):
+        for char in modes:
             if char in '+-':
                 sign = char
                 continue
-
             if char != 'o':
                 continue
-
             if arg_idx >= len(victims):
-                self.log.warning(f"Malformed MODE {chan} {modes}: missing arg for +o/-o")
                 break
 
             victim = victims[arg_idx]
             arg_idx += 1
 
-            # self got opped/deopped
             if victim == self.core.botname.lower():
                 if sign == '-':
                     await self.msg_to_bots(f"reqop {self.core.botname} {chan}")
-                    self.reqop[chan] = now
+                    self.reqop[(chan, victim)] = now
                     self.log.info(f"Got deopped on {chan}, requesting op.")
-                #else:
-                #    last_sugop = self.sugop.get(chan, 0)
-                #    if now - last_sugop > 10:
-                #        await self.msg_to_bots(f"sugop {self.core.botname} {chan}")
-                #        self.sugop[chan] = now
-                #        self.log.debug(f"Got opped on {chan}, suggesting op.")
+                else:
+                    # Bot got opped — clear cooldown so we can reqop others freely
+                    self.reqop.pop((chan, victim), None)
                 continue
 
-            # linked bot got opped/deopped
             if victim in bot_nicks:
-                if sign == '-':
-                    #self.core.irc_q.put_nowait({
-                    #    'cmd': 'mode',
-                    #    'channel': chan,
-                    #    'modes': f"+o {victim}"
-                    #})
-                    #log.info(f"Reopped linked bot {victim} on {chan}")
-                    pass
-                else:
-                    #if not self.core.bot_isop(chan):
-                    last_req = self.reqop.get(chan, 0)
+                if sign == '+':
+                    # Linked bot got opped — clear their cooldown, request op for self if needed
+                    self.reqop.pop((chan, victim), None)
+                    last_req = self.reqop.get((chan, self.core.botname.lower()), 0)
                     if now - last_req > 10:
                         await self.msg_to_bot(victim, f"reqop {self.core.botname} {chan}")
-                        self.reqop[chan] = now
+                        self.reqop[(chan, self.core.botname.lower())] = now
                         self.log.debug(f"Linked bot {victim} got opped on {chan}, requesting op.")
+                elif sign == '-':
+                    pass  # deop handling if needed later
 
-    async def on_JOIN(self, event):
-        channel = event.get('channel', '').lower()
-        nick = event.get('nick', '').lower()
-        
-        # Check if a linked bot joined - request ops for them
-        if nick in self.core.botnet.peers.keys():
-            await self.msg_to_bots(f"reqop {nick} {channel}")
-            self.log.info(f"Linked bot {nick} joined {channel}; suggesting op")
+    #async def on_JOIN(self, event):
+    #    channel = event.get('channel', '').lower()
+    #    nick = event.get('nick', '').lower()
+    #    
+    #    # Check if a linked bot joined - request ops for them
+    #    if nick in self.core.botnet.peers.keys():
+    #        await self.msg_to_bots(f"reqop {nick} {channel}")
+    #        self.log.info(f"Linked bot {nick} joined {channel}; suggesting op")
 
     async def on_NEWCHAN(self, event):
         channel = event.get('channel', '').lower()
@@ -134,16 +119,14 @@ class netopPlugin(Plugin):
         self.log.info(f"Joined {channel}; requested ops from peers")            
 
     async def on_reqop(self, cmd: BotCommand, args: list, from_peer: str = ''):
-        """Handle reqop from botnet peer."""
         target = args[0].lower() if args else ''
         channel = args[1].lower() if len(args) > 1 else ''
-        
-        #now = time.time()
-        #if self.reqop.get(channel, 0) + 30 > now:
-        #    log.debug(f"Reqop cooldown {channel}")
-        #    return
-        #
-        #self.reqop[channel] = now
+        now = time.time()
+        key = (channel, target)
+        if self.reqop.get(key, 0) + 10 > now:
+            self.log.debug(f"Reqop cooldown {channel}/{target}, skipping")
+            return
+
         try:
             if not self.core.nick_isop(target, channel) and self.core.bot_isop(channel):
                 self.core.irc_q.put_nowait({
@@ -151,6 +134,7 @@ class netopPlugin(Plugin):
                     'channel': channel,
                     'modes': f"+o {target}"
                 })
+                self.reqop[key] = now
                 self.log.info(f"Giving op to {target} in {channel} (req)")
         except Exception as e:
             self.log.error(f"Op failed {channel} {target}: {e}")

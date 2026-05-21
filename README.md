@@ -41,10 +41,6 @@ options:
 - try to fix duckhunt cheating.
 
 ## Bugs
-- Some channel sync issues, probably missing some irc numerics
-
-- Background mode is not totally going to background.
-
 - blackjack: 
     <cyco> !bjjoin
     <WBS> [Blackjack] cyco joined with $750.
@@ -56,14 +52,24 @@ options:
     2026-03-17 09:38:09,867 ERROR CVE fetch error: 
     2026-03-17 11:03:00,402 WARNING 
 
-- if nick is taken bot will not join irc
-    2026-03-23 12:38:00,449 WARNING Disconnected from server
-    2026-03-23 12:38:00,489 ERROR IRC error: disconnect
-    2026-03-23 12:38:04,658 INFO Rejoined #tohands
-    2026-03-23 12:38:04,658 INFO Rejoined #wbs
-
-- botnet op
-    * WBS (~WBS@wbs.bot) has joined
-    * WBS2 gives channel operator status to WBS
-    * WBS gives channel operator status to WBS2
-    * WBS2 gives channel operator status to WBS
+- pubcom
+2026-05-15 09:14:50,656 ERROR Plugin pubcom.on_PUBMSG error: cannot access local variable 'severity_str' where it is not associated with a value
+Traceback (most recent call last):
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/__init__.py", line 163, in dispatch
+    await method(event)
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 165, in on_PUBMSG
+    await handler(nick, uhost, channel, arg)
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 328, in cmd_cve
+    msg = f"{products_str} - CVSS: {score}{severity_str} | {summary}"
+                                           ^^^^^^^^^^^^
+UnboundLocalError: cannot access local variable 'severity_str' where it is not associated with a value
+2026-05-15 09:15:04,101 ERROR Plugin pubcom.on_PUBMSG error: cannot access local variable 'severity_str' where it is not associated with a value
+Traceback (most recent call last):
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/__init__.py", line 163, in dispatch
+    await method(event)
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 165, in on_PUBMSG
+    await handler(nick, uhost, channel, arg)
+  File "/home/loco/Code/eggdrop/wbs6.0.0/src/plugins/pubcom.py", line 328, in cmd_cve
+    msg = f"{products_str} - CVSS: {score}{severity_str} | {summary}"
+                                           ^^^^^^^^^^^^
+UnboundLocalError: cannot access local variable 'severity_str' where it is not associated with a value

@@ -9,6 +9,8 @@ import time
 import logging
 import json
 import asyncio
+import random
+import string
 import irc.bot
 import irc.client
 from datetime import datetime, timedelta
@@ -40,6 +42,173 @@ class EventType:
     WHOIS_USER = 'WHOIS_USER'
     WHOIS_END = 'WHOIS_END'
 
+class ServerCaps:
+    """
+    Parses RFC-documented IRC server capabilities from 005 RPL_ISUPPORT.
+    Only known tokens are stored — unknown tokens are silently ignored.
+    In-memory only, lives on WbsIrcBot, reset on disconnect.
+    """
+
+    # Integer-valued tokens
+    _INT_TOKENS = {
+        'NICKLEN', 'CHANNELLEN', 'TOPICLEN', 'KICKLEN',
+        'AWAYLEN', 'MODES', 'MONITOR', 'MAXCHANNELS', 'ACCEPT'
+    }
+
+    # All RFC/ISUPPORT tokens we care about.
+    # Value tokens expect '=<value>'; bool tokens are presence-only flags.
+    _KNOWN_VALUE  = {
+        'CHANTYPES', 'CHANMODES', 'CHANLIMIT', 'PREFIX', 'MAXLIST',
+        'MODES', 'NETWORK', 'NICKLEN', 'CHANNELLEN', 'TOPICLEN',
+        'KICKLEN', 'AWAYLEN', 'CASEMAPPING', 'CHARSET', 'MONITOR',
+        'TARGMAX', 'MAXCHANNELS', 'ELIST', 'STATUSMSG', 'CALLERID',
+        'DEAF', 'ACCEPT',
+    }
+    _KNOWN_BOOL = {
+        'EXCEPTS', 'INVEX', 'SAFELIST', 'KNOCK', 'MAP', 'FNC',
+        'ETRACE', 'CPRIVMSG', 'CNOTICE', 'WALLCHOPS', 'USERIP',
+    }
+    _KNOWN = _KNOWN_VALUE | _KNOWN_BOOL
+
+    def __init__(self):
+        self._raw: dict[str, str | bool] = {}
+        self._parsed: dict[str, object] = {}
+
+    def ingest(self, arguments: list[str]) -> None:
+        """
+        Feed one 005 line's argument list.
+        Only whitelisted tokens are stored; everything else is ignored.
+        Safe to call multiple times as the server sends several 005 lines.
+        """
+        for token in arguments:
+            if '=' in token:
+                key, _, raw_val = token.partition('=')
+                if key not in self._KNOWN_VALUE:
+                    continue
+                self._raw[key] = raw_val
+                self._parsed[key] = self._coerce(key, raw_val)
+            else:
+                if token not in self._KNOWN_BOOL:
+                    continue
+                self._raw[token] = True
+                self._parsed[token] = True
+
+    def _coerce(self, key: str, value: str) -> object:
+        if key in self._INT_TOKENS:
+            try:
+                return int(value)
+            except ValueError:
+                return value
+        return value
+
+    def reset(self) -> None:
+        """Clear on disconnect so stale caps don't survive a server change."""
+        self._raw.clear()
+        self._parsed.clear()
+
+    # ── Typed accessors ───────────────────────────────────────────────────────
+    @property
+    def nicklen(self) -> int:
+        return int(self._parsed.get('NICKLEN', 9))
+
+    @property
+    def channellen(self) -> int:
+        return int(self._parsed.get('CHANNELLEN', 200))
+
+    @property
+    def topiclen(self) -> int:
+        return int(self._parsed.get('TOPICLEN', 307))
+
+    @property
+    def kicklen(self) -> int:
+        return int(self._parsed.get('KICKLEN', 255))
+
+    @property
+    def modes(self) -> int:
+        return int(self._parsed.get('MODES', 3))
+
+    @property
+    def network(self) -> str:
+        return str(self._parsed.get('NETWORK', ''))
+
+    @property
+    def chantypes(self) -> str:
+        return str(self._parsed.get('CHANTYPES', '#&'))
+
+    @property
+    def casemapping(self) -> str:
+        return str(self._parsed.get('CASEMAPPING', 'rfc1459'))
+
+    @property
+    def prefix(self) -> dict[str, str]:
+        """{'o': '@', 'v': '+'} from PREFIX=(ov)@+"""
+        raw = str(self._parsed.get('PREFIX', '(ov)@+'))
+        try:
+            modes_part, chars_part = raw[1:].split(')')
+            return dict(zip(modes_part, chars_part))
+        except (ValueError, IndexError):
+            return {'o': '@', 'v': '+'}
+
+    @property
+    def chanmodes(self) -> dict[str, str]:
+        """{'A': 'eIb', 'B': 'k', 'C': 'l', 'D': 'imnpst'}"""
+        raw = str(self._parsed.get('CHANMODES', 'beI,k,l,imnpst'))
+        labels = ['A', 'B', 'C', 'D']
+        parts = raw.split(',')
+        return dict(zip(labels, parts + [''] * (4 - len(parts))))
+
+    @property
+    def chanlimit(self) -> dict[str, int]:
+        """{'#': 25, '&': 25} from CHANLIMIT=&#:25"""
+        raw = str(self._parsed.get('CHANLIMIT', '#:25'))
+        result = {}
+        for part in raw.split(','):
+            if ':' in part:
+                prefixes, limit = part.split(':', 1)
+                for ch in prefixes:
+                    try:
+                        result[ch] = int(limit)
+                    except ValueError:
+                        pass
+        return result
+
+    @property
+    def maxlist(self) -> dict[str, int]:
+        """{'b': 100, 'e': 100, 'I': 100} from MAXLIST=beI:100"""
+        raw = str(self._parsed.get('MAXLIST', ''))
+        result = {}
+        for part in raw.split(','):
+            if ':' in part:
+                modes, limit = part.split(':', 1)
+                for ch in modes:
+                    try:
+                        result[ch] = int(limit)
+                    except ValueError:
+                        pass
+        return result
+
+    @property
+    def targmax(self) -> dict[str, int | None]:
+        """{'PRIVMSG': 4, 'NOTICE': 4, 'NAMES': 1}"""
+        raw = str(self._parsed.get('TARGMAX', ''))
+        result = {}
+        for part in raw.split(','):
+            if ':' in part:
+                cmd, limit = part.split(':', 1)
+                result[cmd.upper()] = int(limit) if limit else None
+        return result
+
+    def supports(self, token: str) -> bool:
+        """caps.supports('KNOCK'), caps.supports('EXCEPTS') etc."""
+        return bool(self._parsed.get(token.upper(), False))
+
+    def get(self, token: str, default=None):
+        """Typed value for any known token not covered by a property."""
+        return self._parsed.get(token.upper(), default)
+
+    def __repr__(self) -> str:
+        return (f"<ServerCaps network={self.network!r} nicklen={self.nicklen} "
+                f"tokens={list(self._raw.keys())}>")
 
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
     """IRC bot instance - pure dispatcher, no business logic"""
@@ -51,6 +220,9 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         self.maintenance_state.setdefault('join_cooldown_until', {})
         self.chan = ChannelManager(self.config['db']['path'])
         self.user = UserManager(self.config['db']['path'])
+        self.server_caps = ServerCaps()
+        self._desired_nick: str = config.get('bot', {}).get('nick', 'wbs')
+        self._nick_adjusted: str = self._desired_nick
         self.core_q = core_q
         self.irc_q = irc_q
         self.config_id = config.get('id', 1)
@@ -162,6 +334,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             '471': self.on_471,    # ERR_CHANNELISFULL
             '473': self.on_473,    # ERR_INVITEONLYCHAN
             '474': self.on_474,    # ERR_BANNEDFROMCHAN
+            '433': self.on_nicknameinuse,    # ERR_NICKNAMEINUSE 
+            '432': self.on_erroneusnickname, # ERR_ERRONEUSNICKNAME 
         }
         for numeric, handler in numerics.items():
             conn.add_global_handler(numeric, handler, -20)
@@ -175,6 +349,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_disconnect(self, conn, event):
         """Connection lost"""
         log.warning("Disconnected from server")
+        self.server_caps.reset()
+        self._nick_adjusted = self._desired_nick
         self._emit_event({
             'type': EventType.ERROR,
             'data': 'disconnect'
@@ -488,6 +664,56 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'nick': nick
             })
         
+    def on_featurelist(self, conn, event):
+        """005 RPL_ISUPPORT — ingest capabilities."""
+        self.server_caps.ingest(event.arguments)
+        log.info(f"[IRC] {self.server_caps}")
+
+        # Enforce NICKLEN immediately if nick is too long
+        nicklen = self.server_caps.nicklen
+        if len(self._desired_nick) > nicklen:
+            truncated = self._desired_nick[:nicklen]
+            log.info(f"[IRC] Nick truncated to '{truncated}' (NICKLEN={nicklen})")
+            self._nick_adjusted = truncated
+            conn.nick(truncated)
+
+    def on_nicknameinuse(self, conn, event):
+        """
+        433 ERR_NICKNAMEINUSE — pick an alternative nick per spec:
+
+        • nick length > NICKLEN          → already handled in on_featurelist
+        • len(nick) >= NICKLEN - 1       → truncate to NICKLEN-2, append 2 random digits
+        • len(nick) <= NICKLEN - 2       → append 2 random digits directly
+        """
+        current = conn.get_nickname()           # what we tried (may be '*' pre-reg)
+        desired = self._nick_adjusted           # last attempted nick
+        nicklen = int(self.server_caps.get('NICKLEN', 9))
+
+        suffix = ''.join(random.choices(string.digits, k=2))
+
+        if len(desired) >= nicklen - 1:
+            # Need to carve room for 2 digits
+            base = desired[:nicklen - 2]
+        else:
+            # Already have ≥2 chars of slack
+            base = desired
+
+        alt_nick = base + suffix
+        log.warning(
+            f"[IRC] Nick '{desired}' in use (NICKLEN={nicklen}), "
+            f"trying '{alt_nick}'"
+        )
+        self._nick_adjusted = alt_nick
+        conn.nick(alt_nick)
+
+    def on_erroneusnickname(self, conn, event):
+        """
+        432 — nick is syntactically invalid or too long for this server.
+        Same fallback strategy as 433.
+        """
+        log.warning(f"[IRC] Erroneous nick '{self._nick_adjusted}', applying fallback")
+        self.on_nicknameinuse(conn, event)
+
     def execute_command(self, cmd_data: dict):
         """Execute command from cmd_queue (called by poller thread)"""
         cmd = cmd_data.get('cmd')
@@ -644,20 +870,26 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             log.error(f"_check_channels error: {e}", exc_info=True)
 
     async def _check_nick(self):
-        """Enforce bot nick if taken"""
-        current_nick = self.connection.get_nickname()
-        desired_nick = self.config['bot'].get('nick', 'wbs')
+        """Periodically try to reclaim the desired nick if on a fallback."""
+        if not self.is_connected:
+            return
 
-        if self.is_connected:
-            if current_nick != desired_nick:
-                now = datetime.now()
-                attempts = self.maintenance_state['last_nick']
-                last = attempts.get('last', now)
-                
-                if now - last > timedelta(minutes=1):
-                    self.connection.nick(desired_nick)
-                    attempts['last'] = now
-                    log.info(f"Regaining nick: {desired_nick}")
+        current = self.connection.get_nickname()
+        desired = self._desired_nick
+
+        nicklen = self.server_caps.nicklen
+        if len(desired) > nicklen:
+            desired = desired[:nicklen]
+
+        if current != desired:
+            now = datetime.now()
+            last = self.maintenance_state.get('last_nick_attempt', datetime.min)
+
+            if now - last > timedelta(minutes=1):
+                self.connection.nick(desired)
+                self._nick_adjusted = desired
+                self.maintenance_state['last_nick_attempt'] = now
+                log.info(f"[IRC] Trying to reclaim nick: '{desired}'")
 
     async def _enforce_settings(self):
         """Apply locks/limits/topiclock from DB"""
