@@ -225,29 +225,21 @@ class Core:
         await self.partyline.handle_input(session_id, text)
 
     async def on_bot_connect(self, event: dict):
-        """Handle incoming bot connection - create bot session."""
         bot_name = event['handle']
         peer = event.get('peer', 'unknown')
-        dup_fd = event.get('sockfd')
-        
-        log.debug(f"New bot connection: {bot_name} fd={dup_fd}")
-        
-        if dup_fd is None:
-            log.warning(f"No dup_fd for bot {bot_name}")
+
+        # Get pre-negotiated streams (TLS already done)
+        streams = self.net_listener._pending_streams.pop(bot_name.lower(), None)
+        if streams is None:
+            log.warning(f"No pending streams for {bot_name}")
             return
-        
+
+        reader, writer = streams
+
         try:
-            dup_sock = socket.socket(fileno=dup_fd)
-            dup_sock.setblocking(False)
-            
-            reader, writer = await asyncio.open_connection(sock=dup_sock)
-            
-            # Generate session ID
             bot_id = len(self.bot_sessions)
-            
             response_q = mp.Queue()
-            
-            # Create bot session
+
             bot_session = Session(
                 session_id=bot_id,
                 session_type='bot',
@@ -256,31 +248,15 @@ class Core:
                 writer=writer,
                 core_q=self.core_q,
                 response_q=response_q,
-                subnet_id=1  # Get from config if needed
+                subnet_id=1
             )
-            
+
             self.bot_sessions[bot_name.lower()] = bot_session
-            
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
-            # Send handshake response
-            #await bot_session.send(f"BOTLINK {self.botname} {bot_name} 1 :WBS {__version__}")
-            #self.botnet_q.put_nowait({
-            #    'type': 'botlink',
-            #    'botname': bot_name,
-            #    'line': event['line'],
-            #    'request_id': request_id,
-            #})
-            #asyncio.create_task(bot_session.run())
-            
             log.debug(f"Bot session {bot_id} created for {bot_name}")
-            #self.partyline.broadcast(f"*** {bot_name} linked to botnet")
-            
+
         except Exception as e:
             log.error(f"Bot session {bot_name} failed: {e}")
-            try:
-                os.close(dup_fd)
-            except:
-                pass
 
     async def on_bot_disconnect(self, event: dict):
         """Handle bot disconnection."""
