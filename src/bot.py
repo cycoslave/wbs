@@ -281,4 +281,155 @@ class BotManager:
                 """,
                 (subnet_id,)
             )
-        return [row["handle"] for row in rows]            
+        return [row["handle"] for row in rows]
+    
+    async def merge_from_peer(self, bots: list[dict], from_bot: str) -> None:
+        """
+        Merge bot records received from a botnet peer.
+        - Never overwrites local password
+        - Last-write-wins on updated_at
+        - Skips self-reference
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            for bot in bots:
+                handle = bot['handle'].lower()
+
+                if handle == from_bot.lower():
+                    # Don't overwrite our own record with peer's copy
+                    continue
+
+                cur = await db.execute(
+                    "SELECT password, updated_at FROM bots WHERE handle = ?", (handle,)
+                )
+                existing = await cur.fetchone()
+                remote_updated = bot.get('updated_at') or 0
+
+                if existing:
+                    if remote_updated <= (existing[1] or 0):
+                        continue  # Local is newer or equal
+                    # Keep local password — never accept it from a peer
+                    await db.execute(
+                        """
+                        UPDATE bots SET
+                            hostmasks = ?, address = ?, port = ?,
+                            role = ?, share_level = ?, comment = ?,
+                            updated_at = ?, updated_by = ?
+                        WHERE handle = ? AND (updated_at IS NULL OR updated_at < ?)
+                        """,
+                        (
+                            bot.get('hostmasks', '[]'), bot.get('address', 'localhost'),
+                            bot.get('port', 3333), bot.get('role', 'none'),
+                            bot.get('share_level', 'subnet'), bot.get('comment', ''),
+                            remote_updated, from_bot,
+                            handle, remote_updated
+                        )
+                    )
+                else:
+                    await db.execute(
+                        """
+                        INSERT INTO bots
+                            (handle, hostmasks, address, port, role, share_level,
+                            comment, created_at, updated_at, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            handle, bot.get('hostmasks', '[]'),
+                            bot.get('address', 'localhost'), bot.get('port', 3333),
+                            bot.get('role', 'none'), bot.get('share_level', 'subnet'),
+                            bot.get('comment', ''), bot.get('created_at', 0),
+                            remote_updated, from_bot
+                        )
+                    )
+
+            await db.commit()
+        log.info(f"BotManager.merge_from_peer: merged {len(bots)} bots from {from_bot}")
+
+    async def merge_access_from_peer(self, access_list: list[dict], from_bot: str) -> None:
+        """
+        Merge bot_access records from a peer.
+        PK is (handle, channel). Last-write-wins.
+        Skips own bot's access records.
+        Only writes columns that exist in bot_access schema.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+
+            for acc in access_list:
+                handle = acc['handle'].lower()
+                channel = acc.get('channel')  # May be NULL
+                remote_updated = acc.get('updated_at') or 0
+
+                if handle == from_bot.lower():
+                    log.debug(f"merge_access_from_peer: skipping own record from {from_bot}")
+                    continue
+
+                cur = await db.execute(
+                    """SELECT updated_at FROM bot_access
+                    WHERE handle = ?
+                        AND (channel = ? OR (channel IS NULL AND ? IS NULL))""",
+                    (handle, channel, channel)
+                )
+                existing = await cur.fetchone()
+
+                if existing:
+                    if remote_updated <= (existing[0] or 0):
+                        continue
+                    await db.execute(
+                        """
+                        UPDATE bot_access SET
+                            has_partyline = ?, is_op = ?, is_deop = ?,
+                            is_voice = ?, is_devoice = ?, is_friend = ?,
+                            updated_at = ?, updated_by = ?
+                        WHERE handle = ?
+                        AND (channel = ? OR (channel IS NULL AND ? IS NULL))
+                        """,
+                        (
+                            acc.get('has_partyline', 0), acc.get('is_op', 0),
+                            acc.get('is_deop', 0), acc.get('is_voice', 0),
+                            acc.get('is_devoice', 0), acc.get('is_friend', 0),
+                            remote_updated, from_bot,
+                            handle, channel, channel
+                        )
+                    )
+                else:
+                    await db.execute(
+                        """
+                        INSERT INTO bot_access
+                            (handle, channel, has_partyline, is_op, is_deop,
+                            is_voice, is_devoice, is_friend,
+                            created_at, updated_at, created_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            handle, channel,
+                            acc.get('has_partyline', 0), acc.get('is_op', 0),
+                            acc.get('is_deop', 0), acc.get('is_voice', 0),
+                            acc.get('is_devoice', 0), acc.get('is_friend', 0),
+                            acc.get('created_at', 0), remote_updated, from_bot
+                        )
+                    )
+
+            await db.commit()
+        log.info(f"BotManager.merge_access_from_peer: merged {len(access_list)} rows from {from_bot}")
+
+    async def serialize_for_peer(self, exclude_handle: str) -> list[dict]:
+        """Return bots for botnet share — exclude self, strip passwords."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM bots WHERE handle != ?", (exclude_handle.lower(),)
+            )
+            rows = await cursor.fetchall()
+        bots = [dict(row) for row in rows]
+        for b in bots:
+            b['password'] = None  # Never share passwords
+        return bots
+
+    async def serialize_access_for_peer(self) -> list[dict]:
+        """Return bot_access rows for botnet share."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM bot_access")
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]    

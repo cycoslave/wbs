@@ -667,38 +667,111 @@ class ChannelManager:
 
         return channel
 
-    async def sync_channel_settings(self, channel: str, settings: dict, updated_by: Optional[str] = None) -> bool:
+    async def merge_from_peer(self, channels: list[dict], from_bot: str) -> None:
         """
-        Upsert channel settings from a botnet peer or internal call.
-        Only columns in _SYNC_ALLOWED_COLUMNS are written — all others are silently dropped.
-        Returns True if any row was affected.
+        Merge channel records from a botnet peer.
+        Last-write-wins on updated_at. channel_subnets merged idempotently.
         """
-        if not channel or not settings:
-            return False
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
 
-        # Filter to allowlist only — prevents arbitrary column injection
-        safe = {k: v for k, v in settings.items() if k in _SYNC_ALLOWED_COLUMNS}
-        if not safe:
-            log.warning(f"sync_channel_settings: no valid columns for {channel}")
-            return False
+            for ch in channels:
+                name = ch['name']
+                remote_updated = ch.get('updated_at') or 0
+                remote_deleted = ch.get('deleted_at')
 
-        now = int(__import__('time').time())
-        safe['updated_at'] = now
-        safe['updated_by'] = updated_by
+                cur = await db.execute(
+                    "SELECT updated_at, deleted_at FROM channels WHERE name = ?", (name,)
+                )
+                existing = await cur.fetchone()
 
-        set_clause = ', '.join(f"{col} = ?" for col in safe)
-        values = list(safe.values())
+                if existing:
+                    local_updated = existing[0] or 0
+                    local_deleted = existing[1]
+                    if remote_updated <= local_updated:
+                        pass  # Skip channel row but still sync subnets below
+                    else:
+                        final_deleted = remote_deleted
+                        if remote_deleted is None and local_deleted and local_deleted > remote_updated:
+                            final_deleted = local_deleted
 
-        async with get_db(self.db_path) as db:
-            cursor = await db.execute(
-                f"UPDATE channels SET {set_clause} WHERE name = ? AND deleted_at IS NULL",
-                (*values, channel)
-            )
+                        # Use the allowlist — same safe columns as sync_channel_settings
+                        safe = {k: ch.get(k) for k in _SYNC_ALLOWED_COLUMNS if k in ch}
+                        if safe:
+                            safe['updated_at'] = remote_updated
+                            safe['updated_by'] = from_bot
+                            safe['deleted_at'] = final_deleted
+                            set_clause = ', '.join(f"{col} = ?" for col in safe)
+                            await db.execute(
+                                f"UPDATE channels SET {set_clause} WHERE name = ?",
+                                (*safe.values(), name)
+                            )
+                else:
+                    await db.execute(
+                        """INSERT INTO channels
+                            (name, comment, modes, bans, invites, exempts,
+                            is_bitch, is_autoop, is_autovoice, is_revenge, is_revengebots,
+                            is_protectfriends, is_protectops, is_dontkickops, is_inactive,
+                            is_enforcebans, is_dynamicbans, is_dynamicexempts, is_dynamicinvites,
+                            is_locked, lock_by, lock_at, lock_reason,
+                            is_topiclock, topiclock, topiclock_by, topiclock_at, topiclock_reason,
+                            is_limit, limit_add, limit_rand, limit_tolerance, limit_delta,
+                            flood_pub, flood_pub_time, flood_ctcp, flood_ctcp_time,
+                            flood_join, flood_join_time, flood_kick, flood_kick_time,
+                            flood_deop, flood_deop_time, flood_nick, flood_nick_time,
+                            created_at, updated_at, created_by, deleted_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            name, ch.get('comment', ''), ch.get('modes', ''),
+                            ch.get('bans', '[]'), ch.get('invites', '[]'), ch.get('exempts', '[]'),
+                            ch.get('is_bitch', 0), ch.get('is_autoop', 0), ch.get('is_autovoice', 0),
+                            ch.get('is_revenge', 0), ch.get('is_revengebots', 0),
+                            ch.get('is_protectfriends', 0), ch.get('is_protectops', 0),
+                            ch.get('is_dontkickops', 0), ch.get('is_inactive', 0),
+                            ch.get('is_enforcebans', 0), ch.get('is_dynamicbans', 0),
+                            ch.get('is_dynamicexempts', 0), ch.get('is_dynamicinvites', 0),
+                            ch.get('is_locked', 0), ch.get('lock_by'), ch.get('lock_at', 0),
+                            ch.get('lock_reason', ''), ch.get('is_topiclock', 0),
+                            ch.get('topiclock', ''), ch.get('topiclock_by'), ch.get('topiclock_at', 0),
+                            ch.get('topiclock_reason', ''), ch.get('is_limit', 0),
+                            ch.get('limit_add', 15), ch.get('limit_rand', 200),
+                            ch.get('limit_tolerance', 2), ch.get('limit_delta', 300),
+                            ch.get('flood_pub', 15), ch.get('flood_pub_time', 60),
+                            ch.get('flood_ctcp', 3), ch.get('flood_ctcp_time', 60),
+                            ch.get('flood_join', 5), ch.get('flood_join_time', 60),
+                            ch.get('flood_kick', 3), ch.get('flood_kick_time', 10),
+                            ch.get('flood_deop', 3), ch.get('flood_deop_time', 10),
+                            ch.get('flood_nick', 5), ch.get('flood_nick_time', 60),
+                            ch.get('created_at', 0), remote_updated, from_bot, remote_deleted
+                        )
+                    )
+
+                # Merge channel_subnets — idempotent
+                for sid in ch.get('subnet_ids', []):
+                    await db.execute(
+                        """INSERT OR IGNORE INTO channel_subnets
+                        (channel_name, subnet_id, created_by)
+                        VALUES (?, ?, ?)""",
+                        (name, sid, from_bot)   # created_by — not added_by
+                    )
+
             await db.commit()
+        log.info(f"ChannelManager.merge_from_peer: merged {len(channels)} channels from {from_bot}")
 
-        if cursor.rowcount == 0:
-            log.warning(f"sync_channel_settings: channel '{channel}' not found or deleted")
-            return False
-
-        log.info(f"sync_channel_settings: updated {channel} ({list(safe.keys())})")
-        return True
+    async def serialize_for_peer(self) -> list[dict]:
+        """Return all channels with their subnet_ids for botnet share."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM channels")
+            rows = await cursor.fetchall()
+            channels = []
+            for row in rows:
+                ch = dict(row)
+                # Attach subnet_ids so receiver can merge channel_subnets
+                sub_cur = await db.execute(
+                    "SELECT subnet_id FROM channel_subnets WHERE channel_name = ?",
+                    (ch['name'],)
+                )
+                ch['subnet_ids'] = [r[0] for r in await sub_cur.fetchall()]
+                channels.append(ch)
+        return channels        

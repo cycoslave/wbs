@@ -63,7 +63,6 @@ class UserAccess:
     subnet_id: Optional[int] = None
     has_partyline: bool = False
     is_admin: bool = False
-    is_bot: bool = False
     is_op: bool = False
     is_deop: bool = False
     is_voice: bool = False
@@ -74,9 +73,7 @@ class UserAccess:
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
-
 class UserManager:
-
     def __init__(self, db_path):
         self.db_path = db_path
 
@@ -506,60 +503,153 @@ class UserManager:
 
         return User(**dict(row))
 
-    async def sync_user(self, user: User, updated_by: Optional[str] = None) -> None:
-        """
-        Upsert a User into the database.
+    async def merge_from_peer(self, users: list[dict], from_bot: str) -> None:
+        """Merge user records from a botnet peer. Last-write-wins on updated_at."""
+        async with aiosqlite.connect(self.db_path) as db:
+            for user in users:
+                handle = user['handle'].lower()
+                remote_updated = user.get('updated_at') or 0
+                remote_deleted = user.get('deleted_at')
 
-        - Inserts if handle doesn't exist
-        - Updates real schema columns on conflict
-        - Updates last_seen on the global user_access row (channel IS NULL)
-        """
-        now = int(time.time())
-        hostmasks_json = json.dumps(user.hostmasks)
-
-        async with get_db(self.db_path) as db:
-            # Upsert the users row
-            await db.execute(
-                """
-                INSERT INTO users (
-                    handle, password, hostmasks, is_locked, comment,
-                    created_at, updated_at, created_by, updated_by
+                cur = await db.execute(
+                    "SELECT updated_at, deleted_at FROM users WHERE handle = ?", (handle,)
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(handle) DO UPDATE SET
-                    password    = excluded.password,
-                    hostmasks   = excluded.hostmasks,
-                    is_locked   = excluded.is_locked,
-                    comment     = excluded.comment,
-                    updated_at  = ?,
-                    updated_by  = ?
-                """,
-                (
-                    user.handle,
-                    user.password,
-                    hostmasks_json,
-                    user.is_locked,
-                    user.comment,
-                    user.created_at,
-                    now,
-                    user.created_by,
-                    updated_by,
-                    # ON CONFLICT SET bindings
-                    now,
-                    updated_by,
-                )
-            )
+                existing = await cur.fetchone()
 
-            # Update last_seen on the global access row if it exists
-            await db.execute(
-                """
-                UPDATE user_access
-                SET last_seen = ?
-                WHERE handle = ?
-                AND channel IS NULL
-                AND deleted_at IS NULL
-                """,
-                (now, user.handle)
-            )
+                if existing:
+                    if remote_updated <= (existing[0] or 0):
+                        continue
+                    final_deleted = remote_deleted
+                    if remote_deleted is None and existing[1] and existing[1] > remote_updated:
+                        final_deleted = existing[1]  # Keep more-recent local delete
 
+                    await db.execute(
+                        """UPDATE users SET
+                            password = ?, hostmasks = ?, is_locked = ?, comment = ?,
+                            updated_at = ?, updated_by = ?, deleted_at = ?
+                        WHERE handle = ?""",
+                        (
+                            user.get('password'), user.get('hostmasks', '[]'),
+                            user.get('is_locked', 0), user.get('comment', ''),
+                            remote_updated, from_bot, final_deleted, handle
+                        )
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO users
+                            (handle, password, hostmasks, is_locked, comment,
+                            created_at, updated_at, created_by, deleted_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            handle, user.get('password'), user.get('hostmasks', '[]'),
+                            user.get('is_locked', 0), user.get('comment', ''),
+                            user.get('created_at', 0), remote_updated,
+                            from_bot, remote_deleted
+                        )
+                    )
             await db.commit()
+        log.info(f"UserManager.merge_from_peer: merged {len(users)} users from {from_bot}")
+
+
+    async def merge_access_from_peer(self, access_list: list[dict], from_bot: str) -> None:
+        """Merge user_access records from a botnet peer. Last-write-wins on updated_at."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+
+            for acc in access_list:
+                handle = acc['handle'].lower()
+                channel = acc.get('channel')
+                subnet_id = acc.get('subnet_id')
+                remote_updated = acc.get('updated_at') or 0
+                remote_deleted = acc.get('deleted_at')
+
+                cur = await db.execute(
+                    """SELECT updated_at, deleted_at FROM user_access
+                    WHERE handle = ?
+                        AND (channel = ? OR (channel IS NULL AND ? IS NULL))
+                        AND (subnet_id = ? OR (subnet_id IS NULL AND ? IS NULL))""",
+                    (handle, channel, channel, subnet_id, subnet_id)
+                )
+                existing = await cur.fetchone()
+
+                if existing:
+                    if remote_updated <= (existing[0] or 0):
+                        continue
+                    final_deleted = remote_deleted
+                    if remote_deleted is None and existing[1] and existing[1] > remote_updated:
+                        final_deleted = existing[1]
+
+                    await db.execute(
+                        """UPDATE user_access SET
+                            has_partyline=?, is_admin=?, is_owner=?, is_friend=?,
+                            is_autoop=?, is_op=?, is_deop=?,
+                            is_autohop=?, is_hop=?, is_dehop=?,
+                            is_voice=?, is_devoice=?, is_autokick=?,
+                            last_seen=?,
+                            updated_at=?, updated_by=?, deleted_at=?
+                        WHERE handle=?
+                            AND (channel=? OR (channel IS NULL AND ? IS NULL))
+                            AND (subnet_id=? OR (subnet_id IS NULL AND ? IS NULL))""",
+                        (
+                            acc.get('has_partyline', 0), acc.get('is_admin', 0),
+                            acc.get('is_owner', 0), acc.get('is_friend', 0),
+                            acc.get('is_autoop', 0), acc.get('is_op', 0), acc.get('is_deop', 0),
+                            acc.get('is_autohop', 0), acc.get('is_hop', 0), acc.get('is_dehop', 0),
+                            acc.get('is_voice', 0), acc.get('is_devoice', 0), acc.get('is_autokick', 0),
+                            acc.get('last_seen'),
+                            remote_updated, from_bot, final_deleted,
+                            handle, channel, channel, subnet_id, subnet_id
+                        )
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO user_access (
+                            handle, channel, subnet_id,
+                            has_partyline, is_admin, is_owner, is_friend,
+                            is_autoop, is_op, is_deop,
+                            is_autohop, is_hop, is_dehop,
+                            is_voice, is_devoice, is_autokick,
+                            last_seen, created_at, updated_at, created_by, deleted_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            handle, channel, subnet_id,
+                            acc.get('has_partyline', 0), acc.get('is_admin', 0),
+                            acc.get('is_owner', 0), acc.get('is_friend', 0),
+                            acc.get('is_autoop', 0), acc.get('is_op', 0), acc.get('is_deop', 0),
+                            acc.get('is_autohop', 0), acc.get('is_hop', 0), acc.get('is_dehop', 0),
+                            acc.get('is_voice', 0), acc.get('is_devoice', 0), acc.get('is_autokick', 0),
+                            acc.get('last_seen'),
+                            acc.get('created_at', 0), remote_updated, from_bot, remote_deleted
+                        )
+                    )
+            await db.commit()
+        log.info(f"UserManager.merge_access_from_peer: merged {len(access_list)} rows from {from_bot}")
+
+    async def serialize_for_peer(self) -> list[dict]:
+        """Return all users (including soft-deleted) for botnet share. Passwords included."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT handle, password, hostmasks, is_locked, comment,
+                        created_at, updated_at, created_by, updated_by,
+                        deleted_at, deleted_by
+                FROM users"""
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def serialize_access_for_peer(self) -> list[dict]:
+        """Return all user_access rows for botnet share."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT handle, channel, subnet_id,
+                        has_partyline, is_admin, is_owner, is_friend,
+                        is_autoop, is_op, is_deop,
+                        is_autohop, is_hop, is_dehop,
+                        is_voice, is_devoice, is_autokick,
+                        last_seen, created_at, updated_at, created_by, deleted_at
+                FROM user_access"""
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]        

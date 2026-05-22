@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 from . import __version__
 from .bot import BotManager
+from .user import UserManager
+from .channel import ChannelManager
 from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
@@ -53,6 +55,8 @@ class BotnetManager:
         self.db_path = self.core.db_path
         self.config = self.core.config
         self.irc_q = self.core.irc_q
+        self.user = UserManager(self.db_path)
+        self.chan = ChannelManager(self.db_path)
         self.bot = BotManager(self.db_path)
         self.subnet = SubnetManager(self.db_path)
         self.peers: Dict[BotLink] = {}
@@ -522,270 +526,6 @@ class BotnetManager:
         await self._safe_send(link.writer, msg)
         log.info(f"Shared {len(subnets)} subnets to {link.name}")
 
-    async def share_bots(self, link: BotLink, exclude_bot: str):
-        """Share bot registry, exclude target and strip passwords."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            if link.share_level == 'subnet':
-                cursor = await db.execute(
-                    """SELECT * FROM bots 
-                    WHERE handle != ? AND (subnet_id = ? OR subnet_id IS NULL)""",
-                    (exclude_bot.lower(), link.subnet_id)
-                )
-            else:  # 'full'
-                cursor = await db.execute(
-                    "SELECT * FROM bots WHERE handle != ?",
-                    (exclude_bot.lower(),)
-                )
-            
-            rows = await cursor.fetchall()
-            bots = []
-            for row in rows:
-                bot = dict(row)
-                bot['password'] = None  # Never share bot passwords
-                bots.append(bot)
-        
-        msg = f"SHARE BOTS {json.dumps(bots)}\n"
-        await self._safe_send(link.writer, msg)
-        log.info(f"Shared {len(bots)} bots to {link.name} (excluded {exclude_bot})")
-
-    async def share_bot_access(self, link: BotLink):
-        """Share bot permissions to peer."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM bot_access")
-            rows = await cursor.fetchall()
-            access = [dict(row) for row in rows]
-
-        msg = f"SHARE BOTACCESS {json.dumps(access)}\n"
-        await self._safe_send(link.writer, msg)
-        log.info(f"Shared {len(access)} bot_access to {link.name}")
-
-    async def handle_share_bots(self, data: str, from_bot: str):
-        """Merge received bots with conflict resolution."""
-        bots = json.loads(data)
-        
-        async with aiosqlite.connect(self.db_path) as db:
-            for bot in bots:
-                handle = bot['handle'].lower()
-                
-                # CRITICAL: Skip self-reference
-                if handle == self.my_handle.lower():
-                    log.warning(f"Skipping self-reference from {from_bot}")
-                    continue
-                
-                # Check if bot exists locally
-                cursor = await db.execute(
-                    "SELECT password, updated_at FROM bots WHERE handle = ?",
-                    (handle,)
-                )
-                existing = await cursor.fetchone()
-                
-                if existing:
-                    # Merge strategy: keep local password, update metadata
-                    await db.execute("""
-                        UPDATE bots SET
-                            hostmasks = ?,
-                            address = ?,
-                            port = ?,
-                            role = ?,
-                            subnet_id = ?,
-                            share_level = ?,
-                            comment = ?
-                        WHERE handle = ? AND updated_at < ?
-                    """, (
-                        bot['hostmasks'], bot['address'], bot['port'],
-                        bot['role'], bot['subnet_id'], bot['share_level'],
-                        bot['comment'], handle, bot['updated_at']
-                    ))
-                else:
-                    # New bot: insert without password
-                    await db.execute("""
-                        INSERT INTO bots (handle, hostmasks, address, port, role,
-                                        subnet_id, share_level, comment, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        handle, bot['hostmasks'], bot['address'], bot['port'],
-                        bot['role'], bot['subnet_id'], bot['share_level'],
-                        bot['comment'], bot['created_at']
-                    ))
-            
-            await db.commit()
-        
-        log.info(f"Merged {len(bots)} bots from {from_bot}")
-
-
-    async def share_users(self, link: BotLink):
-        """Share ALL users (including soft-deleted) with passwords."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM users")
-            rows = await cursor.fetchall()
-            users = [dict(row) for row in rows]
-
-        msg = f"SHARE USERS {json.dumps(users)}\n"
-        await self._safe_send(link.writer, msg)
-        log.info(f"Shared {len(users)} users to {link.name}")
-
-    async def handle_share_users(self, data: str, from_bot: str):
-        """
-        Merge users. Last-write-wins on updated_at.
-        Soft-deletes propagate but cannot resurrect a more-recently-deleted local row.
-        """
-        users = json.loads(' '.join(data) if isinstance(data, list) else data)
-
-        async with aiosqlite.connect(self.db_path) as db:
-            for user in users:
-                handle = user["handle"].lower()
-
-                cur = await db.execute(
-                    "SELECT updated_at, deleted_at FROM users WHERE handle = ?", (handle,)
-                )
-                existing = await cur.fetchone()
-                remote_updated = user.get("updated_at") or 0
-                remote_deleted = user.get("deleted_at")
-
-                if existing:
-                    local_updated = existing[0] or 0
-                    local_deleted = existing[1]
-
-                    if remote_updated <= local_updated:
-                        continue  # Local is newer or equal
-
-                    # Remote is newer — compute final deleted_at
-                    if remote_deleted is not None:
-                        final_deleted = remote_deleted
-                    elif local_deleted is not None and local_deleted > remote_updated:
-                        final_deleted = local_deleted  # Keep more-recent local delete
-                    else:
-                        final_deleted = None  # Active
-
-                    await db.execute("""
-                        UPDATE users SET
-                            password=?, hostmasks=?, is_locked=?, comment=?,
-                            updated_at=?, updated_by=?, deleted_at=?
-                        WHERE handle=?
-                    """, (
-                        user.get("password"), user.get("hostmasks","[]"),
-                        user.get("is_locked",0), user.get("comment",""),
-                        remote_updated, from_bot, final_deleted, handle
-                    ))
-                else:
-                    await db.execute("""
-                        INSERT INTO users
-                            (handle, password, hostmasks, is_locked, comment,
-                             created_at, updated_at, created_by, deleted_at)
-                        VALUES (?,?,?,?,?,?,?,?,?)
-                    """, (
-                        handle, user.get("password"), user.get("hostmasks","[]"),
-                        user.get("is_locked",0), user.get("comment",""),
-                        user.get("created_at",0), remote_updated,
-                        from_bot, remote_deleted
-                    ))
-
-            await db.commit()
-        log.info(f"Merged {len(users)} users from {from_bot}")
-
-    async def share_user_access(self, link: BotLink):
-        """Share ALL user_access rows (all subnets, including soft-deleted)."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM user_access")
-            rows = await cursor.fetchall()
-            access = [dict(row) for row in rows]
-
-        msg = f"SHARE USERACCESS {json.dumps(access)}\n"
-        await self._safe_send(link.writer, msg)
-        log.info(f"Shared {len(access)} user_access rows to {link.name}")
-
-    async def handle_share_user_access(self, data: str, from_bot: str):
-        """
-        Merge user_access. PK is (handle, channel, subnet_id).
-        Last-write-wins. Soft-deletes propagate safely.
-        """
-        access_list = json.loads(' '.join(data) if isinstance(data, list) else data)
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-
-            for acc in access_list:
-                handle = acc["handle"].lower()
-                channel = acc.get("channel")         # May be NULL
-                subnet_id = acc.get("subnet_id")     # May be NULL
-                remote_updated = acc.get("updated_at") or 0
-                remote_deleted = acc.get("deleted_at")
-
-                # Match on the composite PK, accounting for NULL values
-                cur = await db.execute(
-                    """SELECT updated_at, deleted_at FROM user_access
-                       WHERE handle=?
-                         AND (channel=? OR (channel IS NULL AND ? IS NULL))
-                         AND (subnet_id=? OR (subnet_id IS NULL AND ? IS NULL))""",
-                    (handle, channel, channel, subnet_id, subnet_id)
-                )
-                existing = await cur.fetchone()
-
-                if existing:
-                    local_updated = existing[0] or 0
-                    local_deleted = existing[1]
-
-                    if remote_updated <= local_updated:
-                        continue
-
-                    if remote_deleted is not None:
-                        final_deleted = remote_deleted
-                    elif local_deleted is not None and local_deleted > remote_updated:
-                        final_deleted = local_deleted
-                    else:
-                        final_deleted = None
-
-                    await db.execute("""
-                        UPDATE user_access SET
-                            has_partyline=?, is_admin=?, is_owner=?, is_friend=?,
-                            is_autoop=?, is_op=?, is_deop=?,
-                            is_autohop=?, is_hop=?, is_dehop=?,
-                            is_voice=?, is_devoice=?,
-                            is_autokick=?,
-                            updated_at=?, updated_by=?, deleted_at=?
-                        WHERE handle=?
-                          AND (channel=? OR (channel IS NULL AND ? IS NULL))
-                          AND (subnet_id=? OR (subnet_id IS NULL AND ? IS NULL))
-                    """, (
-                        acc.get("has_partyline",0), acc.get("is_admin",0),
-                        acc.get("is_owner",0), acc.get("is_friend",0),
-                        acc.get("is_autoop",0), acc.get("is_op",0), acc.get("is_deop",0),
-                        acc.get("is_autohop",0), acc.get("is_hop",0), acc.get("is_dehop",0),
-                        acc.get("is_voice",0), acc.get("is_devoice",0),
-                        acc.get("is_autokick",0),
-                        remote_updated, from_bot, final_deleted,
-                        handle, channel, channel, subnet_id, subnet_id
-                    ))
-                else:
-                    await db.execute("""
-                        INSERT INTO user_access (
-                            handle, channel, subnet_id,
-                            has_partyline, is_admin, is_owner, is_friend,
-                            is_autoop, is_op, is_deop,
-                            is_autohop, is_hop, is_dehop,
-                            is_voice, is_devoice, is_autokick,
-                            created_at, updated_at, created_by, deleted_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, (
-                        handle, channel, subnet_id,
-                        acc.get("has_partyline",0), acc.get("is_admin",0),
-                        acc.get("is_owner",0), acc.get("is_friend",0),
-                        acc.get("is_autoop",0), acc.get("is_op",0), acc.get("is_deop",0),
-                        acc.get("is_autohop",0), acc.get("is_hop",0), acc.get("is_dehop",0),
-                        acc.get("is_voice",0), acc.get("is_devoice",0),
-                        acc.get("is_autokick",0),
-                        acc.get("created_at",0), remote_updated, from_bot,
-                        remote_deleted
-                    ))
-
-            await db.commit()
-        log.info(f"Merged {len(access_list)} user_access from {from_bot}")
-
     async def handle_share_subnets(self, data: str, from_bot: str):
         """Merge subnets with conflict resolution."""
         subnets = json.loads(data)
@@ -820,216 +560,47 @@ class BotnetManager:
         
         log.info(f"Merged {len(subnets)} subnets from {from_bot}")
 
+    async def share_users(self, link: BotLink):
+        users = await self.user.serialize_for_peer()
+        await self._safe_send(link.writer, f"SHARE USERS {json.dumps(users)}\n")
+        log.info(f"Shared {len(users)} users to {link.name}")
+
+    async def share_user_access(self, link: BotLink):
+        access = await self.user.serialize_access_for_peer()
+        await self._safe_send(link.writer, f"SHARE USERACCESS {json.dumps(access)}\n")
+        log.info(f"Shared {len(access)} user_access rows to {link.name}")
+
     async def share_channels(self, link: BotLink):
-        """Share ALL channel rows (including soft-deleted) for full sync."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            # Always share everything — receiver filters by subnet for IRC joins,
-            # not for storage.
-            cursor = await db.execute("SELECT * FROM channels")
-            rows = await cursor.fetchall()
-
-            # Enrich with subnet_ids from join table
-            channels = []
-            for row in rows:
-                data = dict(row)
-                sub_cur = await db.execute(
-                    "SELECT subnet_id FROM channel_subnets WHERE channel_name = ?",
-                    (data["name"],)
-                )
-                data["subnet_ids"] = [r[0] for r in await sub_cur.fetchall()]
-                channels.append(data)
-
-        msg = f"SHARE CHANNELS {json.dumps(channels)}\n"
-        await self._safe_send(link.writer, msg)
+        channels = await self.chan.serialize_for_peer()
+        await self._safe_send(link.writer, f"SHARE CHANNELS {json.dumps(channels)}\n")
         log.info(f"Shared {len(channels)} channels to {link.name}")
 
-    async def handle_share_channels(self, data: str, from_bot: str):
-        """
-        Merge channels. Rules:
-        - Share entire table (both active and soft-deleted rows).
-        - Last-write-wins on updated_at.
-        - A deleted_at is never cleared by an older record.
-        - channel_subnets rows are merged independently.
-        """
-        channels = json.loads(' '.join(data) if isinstance(data, list) else data)
+    async def share_bots(self, link: BotLink, exclude_bot: str):
+        bots = await self.bot.serialize_for_peer(exclude_bot)
+        await self._safe_send(link.writer, f"SHARE BOTS {json.dumps(bots)}\n")
+        log.info(f"Shared {len(bots)} bots to {link.name}")
 
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+    async def share_bot_access(self, link: BotLink):
+        access = await self.bot.serialize_access_for_peer()
+        await self._safe_send(link.writer, f"SHARE BOTACCESS {json.dumps(access)}\n")
+        log.info(f"Shared {len(access)} bot_access rows to {link.name}")
 
-            for ch in channels:
-                name = ch["name"]
+    async def handle_share_users(self, data: str, from_bot: str) -> None:
+        users = json.loads(data)
+        await self.user.merge_from_peer(users, from_bot)
 
-                cur = await db.execute(
-                    "SELECT updated_at, deleted_at FROM channels WHERE name = ?", (name,)
-                )
-                existing = await cur.fetchone()
-
-                if existing:
-                    local_updated = existing[0] or 0
-                    local_deleted = existing[1]
-                    remote_updated = ch.get("updated_at") or 0
-                    remote_deleted = ch.get("deleted_at")
-
-                    if remote_updated <= local_updated:
-                        # Local is newer or equal — skip channel row, still sync subnets
-                        pass
-                    else:
-                        # Remote is newer
-                        # Protect against resurrection: if locally deleted MORE RECENTLY,
-                        # keep local deleted_at
-                        final_deleted = local_deleted
-                        if remote_deleted is not None:
-                            # Remote is deleting — accept if remote_updated > local_updated
-                            final_deleted = remote_deleted
-                        elif local_deleted is not None and local_deleted > remote_updated:
-                            # Local was deleted after remote's last update — keep deleted
-                            final_deleted = local_deleted
-                        else:
-                            final_deleted = remote_deleted  # None = active
-
-                        await db.execute("""
-                            UPDATE channels SET
-                                modes=?, bans=?, invites=?, exempts=?,
-                                flood_pub=?, flood_pub_time=?,
-                                flood_ctcp=?, flood_ctcp_time=?,
-                                flood_join=?, flood_join_time=?,
-                                flood_kick=?, flood_kick_time=?,
-                                flood_deop=?, flood_deop_time=?,
-                                flood_nick=?, flood_nick_time=?,
-                                is_bitch=?, is_autoop=?, is_autovoice=?,
-                                is_revenge=?, is_revengebots=?,
-                                is_protectfriends=?, is_protectops=?,
-                                is_dontkickops=?, is_inactive=?,
-                                is_enforcebans=?, is_dynamicbans=?,
-                                is_dynamicexempts=?, is_dynamicinvites=?,
-                                comment=?, updated_at=?, updated_by=?,
-                                deleted_at=?
-                            WHERE name=?
-                        """, (
-                            ch.get("modes",""), ch.get("bans","[]"),
-                            ch.get("invites","[]"), ch.get("exempts","[]"),
-                            ch.get("flood_pub",15), ch.get("flood_pub_time",60),
-                            ch.get("flood_ctcp",3), ch.get("flood_ctcp_time",60),
-                            ch.get("flood_join",5), ch.get("flood_join_time",60),
-                            ch.get("flood_kick",3), ch.get("flood_kick_time",10),
-                            ch.get("flood_deop",3), ch.get("flood_deop_time",10),
-                            ch.get("flood_nick",5), ch.get("flood_nick_time",60),
-                            ch.get("is_bitch",0), ch.get("is_autoop",0), ch.get("is_autovoice",0),
-                            ch.get("is_revenge",0), ch.get("is_revengebots",0),
-                            ch.get("is_protectfriends",0), ch.get("is_protectops",0),
-                            ch.get("is_dontkickops",0), ch.get("is_inactive",0),
-                            ch.get("is_enforcebans",0), ch.get("is_dynamicbans",0),
-                            ch.get("is_dynamicexempts",0), ch.get("is_dynamicinvites",0),
-                            ch.get("comment",""), remote_updated, from_bot,
-                            final_deleted, name
-                        ))
-                else:
-                    # New row — insert as-is
-                    await db.execute("""
-                        INSERT INTO channels (
-                            name, modes, bans, invites, exempts,
-                            flood_pub, flood_pub_time, flood_ctcp, flood_ctcp_time,
-                            flood_join, flood_join_time, flood_kick, flood_kick_time,
-                            flood_deop, flood_deop_time, flood_nick, flood_nick_time,
-                            is_bitch, is_autoop, is_autovoice, is_revenge, is_revengebots,
-                            is_protectfriends, is_protectops, is_dontkickops, is_inactive,
-                            is_enforcebans, is_dynamicbans, is_dynamicexempts, is_dynamicinvites,
-                            comment, created_at, updated_at, created_by, deleted_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, (
-                        name, ch.get("modes",""), ch.get("bans","[]"),
-                        ch.get("invites","[]"), ch.get("exempts","[]"),
-                        ch.get("flood_pub",15), ch.get("flood_pub_time",60),
-                        ch.get("flood_ctcp",3), ch.get("flood_ctcp_time",60),
-                        ch.get("flood_join",5), ch.get("flood_join_time",60),
-                        ch.get("flood_kick",3), ch.get("flood_kick_time",10),
-                        ch.get("flood_deop",3), ch.get("flood_deop_time",10),
-                        ch.get("flood_nick",5), ch.get("flood_nick_time",60),
-                        ch.get("is_bitch",0), ch.get("is_autoop",0), ch.get("is_autovoice",0),
-                        ch.get("is_revenge",0), ch.get("is_revengebots",0),
-                        ch.get("is_protectfriends",0), ch.get("is_protectops",0),
-                        ch.get("is_dontkickops",0), ch.get("is_inactive",0),
-                        ch.get("is_enforcebans",0), ch.get("is_dynamicbans",0),
-                        ch.get("is_dynamicexempts",0), ch.get("is_dynamicinvites",0),
-                        ch.get("comment",""), ch.get("created_at",0),
-                        ch.get("updated_at",0), from_bot, ch.get("deleted_at")
-                    ))
-
-                # Merge channel_subnets (idempotent inserts)
-                for sid in ch.get("subnet_ids", []):
-                    await db.execute(
-                        "INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by) "
-                        "VALUES (?, ?, ?)",
-                        (name, sid, from_bot)
-                    )
-
-            await db.commit()
-        log.info(f"Merged {len(channels)} channels from {from_bot}")
-
-    async def handle_share_bot_access(self, data: str, from_bot: str):
-        """Merge bot_access with conflict resolution."""
+    async def handle_share_user_access(self, data: str, from_bot: str) -> None:
         access_list = json.loads(data)
-        
-        async with aiosqlite.connect(self.db_path) as db:
-            for access in access_list:
-                handle = access['handle'].lower()
-                channel = access['channel']
-                
-                # Skip if this is the receiving bot's own access
-                if handle == self.my_handle.lower():
-                    log.debug(f"Skipping own bot_access from {from_bot}")
-                    continue
-                
-                # Check if exists
-                cursor = await db.execute(
-                    "SELECT updated_at FROM bot_access WHERE handle = ? AND channel = ?",
-                    (handle, channel)
-                )
-                existing = await cursor.fetchone()
-                
-                if existing:
-                    # Update if remote is newer
-                    if access['updated_at'] > existing[0]:
-                        await db.execute("""
-                            UPDATE bot_access SET
-                                subnet_id = ?,
-                                has_partyline = ?,
-                                is_admin = ?,
-                                is_bot = ?,
-                                is_op = ?,
-                                is_deop = ?,
-                                is_voice = ?,
-                                is_devoice = ?,
-                                is_friend = ?,
-                                updated_at = ?,
-                                updated_by = ?
-                            WHERE handle = ? AND channel = ?
-                        """, (
-                            access['subnet_id'], access['has_partyline'],
-                            access['is_admin'], access['is_bot'], access['is_op'],
-                            access['is_deop'], access['is_voice'], access['is_devoice'],
-                            access['is_friend'], access['updated_at'], from_bot,
-                            handle, channel
-                        ))
-                        log.debug(f"Updated bot_access for {handle} on {channel}")
-                else:
-                    # Insert new access
-                    await db.execute("""
-                        INSERT INTO bot_access (
-                            handle, channel, subnet_id, has_partyline, is_admin,
-                            is_bot, is_op, is_deop, is_voice, is_devoice, is_friend,
-                            created_at, updated_at, created_by
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        handle, channel, access['subnet_id'], access['has_partyline'],
-                        access['is_admin'], access['is_bot'], access['is_op'],
-                        access['is_deop'], access['is_voice'], access['is_devoice'],
-                        access['is_friend'], access['created_at'], access['updated_at'],
-                        from_bot
-                    ))
-                    log.info(f"Added bot_access for {handle} on {channel}")
-            
-            await db.commit()
-        
-        log.info(f"Merged {len(access_list)} bot_access from {from_bot}")
+        await self.user.merge_access_from_peer(access_list, from_bot)
+
+    async def handle_share_bots(self, data: str, from_bot: str) -> None:
+        bots = json.loads(data)
+        await self.bot.merge_from_peer(bots, from_bot)
+
+    async def handle_share_bot_access(self, data: str, from_bot: str) -> None:
+        access_list = json.loads(data)
+        await self.bot.merge_access_from_peer(access_list, from_bot)
+
+    async def handle_share_channels(self, data: str, from_bot: str) -> None:
+        channels = json.loads(data)
+        await self.chan.merge_from_peer(channels, from_bot)
