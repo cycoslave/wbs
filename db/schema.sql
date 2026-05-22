@@ -53,7 +53,6 @@ CREATE TABLE IF NOT EXISTS user_access (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     created_by TEXT DEFAULT NULL,
     updated_by TEXT DEFAULT NULL,
-    last_seen TIMESTAMP DEFAULT NULL,
     subnet_id INTEGER DEFAULT NULL, -- NULL = all subnets, <id> = subnet-scoped
     deleted_at INTEGER DEFAULT NULL,
     deleted_by TEXT DEFAULT NULL,

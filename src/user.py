@@ -15,6 +15,22 @@ from dataclasses import dataclass, asdict, field
 from .db import get_db 
 
 log = logging.getLogger("wbs.user")
+GLOBAL_FLAGS: dict[str, str] = {
+    'p': 'has_partyline',
+    'A': 'is_admin',
+    'n': 'is_owner',
+    'f': 'is_friend',
+    'a': 'is_autoop',
+    'o': 'is_op',
+    'd': 'is_deop',
+    'y': 'is_autohop',
+    'l': 'is_hop',
+    'r': 'is_dehop',
+    'v': 'is_voice',
+    'q': 'is_devoice',
+    'k': 'is_autokick',
+}
+CHAN_FLAGS = GLOBAL_FLAGS 
 
 @dataclass
 class User:
@@ -26,13 +42,18 @@ class User:
     comment: str = ''
     created_at: int = field(default_factory=lambda: int(time.time()))
     updated_at: int = field(default_factory=lambda: int(time.time()))
+    deleted_at: Optional[int] = None
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
+    deleted_by: Optional[str] = None
 
     def __post_init__(self):
-        # Normalize hostmasks if it comes from DB as JSON string
+        # Normalize hostmasks: DB stores as JSON string, dataclass expects list
         if isinstance(self.hostmasks, str):
-            self.hostmasks = json.loads(self.hostmasks) if self.hostmasks else []
+            try:
+                self.hostmasks = json.loads(self.hostmasks) if self.hostmasks else []
+            except (json.JSONDecodeError, ValueError):
+                self.hostmasks = []
 
 @dataclass
 class UserAccess:
@@ -148,7 +169,6 @@ class UserManager:
                     hostmasks,
                     is_locked,
                     comment,
-                    last_seen,
                     created_at,
                     updated_at
                 FROM users
@@ -166,9 +186,17 @@ class UserManager:
                     subnet_id,
                     has_partyline,
                     is_admin,
+                    is_owner,
+                    is_autoop,                                          
                     is_op,
+                    is_deop,
+                    is_autohop,
+                    is_hop,
+                    is_dehop,                                        
                     is_voice,
+                    is_devoice,                         
                     is_friend,
+                    is_autokick,
                     created_at
                 FROM user_access
                 WHERE handle = ?
@@ -180,7 +208,6 @@ class UserManager:
             result.append(f"  Password: {'Set' if user['has_pass'] else 'None'}")
             result.append(f"  Locked: {'Yes' if user['is_locked'] else 'No'}")
             result.append(f"  Hostmasks: {user['hostmasks']}")
-            result.append(f"  Last seen: {user['last_seen'] or 'Never'}")
             result.append("  Access:")
 
             has_access = False
@@ -189,20 +216,36 @@ class UserManager:
                 flags = []
 
                 if row['has_partyline']:
-                    flags.append('P')
+                    flags.append('p')
                 if row['is_admin']:
                     flags.append('A')
                 if row['is_op']:
-                    flags.append('O')
+                    flags.append('o')
                 if row['is_voice']:
-                    flags.append('V')
+                    flags.append('v')
                 if row['is_friend']:
-                    flags.append('F')
+                    flags.append('f')
+                if row['is_owner']:
+                    flags.append('n')
+                if row['is_autoop']:
+                    flags.append('a')
+                if row['is_deop']:
+                    flags.append('d')
+                if row['is_autohop']:
+                    flags.append('y')
+                if row['is_hop']:
+                    flags.append('l')
+                if row['is_dehop']:
+                    flags.append('r')
+                if row['is_devoice']:
+                    flags.append('q')
+                if row['is_autokick']:
+                    flags.append('k')
 
                 subnet = "all subnets" if row['subnet_id'] is None else f"subnet {row['subnet_id']}"
                 flag_str = ''.join(flags) if flags else '-'
 
-                result.append(f"    {row['channel']} ({subnet}): +{flag_str}")
+                result.append(f"    {row['channel'] or '*'} ({subnet}): +{flag_str}")
 
             await access_cursor.close()
 
@@ -265,20 +308,134 @@ class UserManager:
                 await db.commit()            
 
     async def matchattr(self, handle: str, flags: str, channel: Optional[str] = None) -> bool:
-        user = await self.get(handle)
-        if not user:
-            return False
-        if channel:
-            flags = user.chan_flags.get(channel, '')
-        return all(f in flags for f in flags[1:]) if flags.startswith('+') else not any(f in flags for f in flags[1:])
+        """
+        Replicates Eggdrop's matchattr behavior exactly.
 
-    async def list_users(self, flag_filter: str = "") -> List[User]:
+        flags format: [+/-]<global>[|/&<channel>]
+        +oA        → user has global o AND A
+        -k         → user does NOT have global k
+        o|o        → user has global o AND channel o (channel arg required)
+        *|o        → user has channel o only (skip global check)
+        o&o        → same as o|o (& and | are interchangeable in this impl)
+        +o|v       → has global o AND channel v
+
+        Returns False if handle is unknown.
+        """
+        if not flags or not handle:
+            return False
+
+        # Parse +/- prefix
+        positive = True
+        if flags.startswith('-'):
+            positive = False
+            flags = flags[1:]
+        elif flags.startswith('+'):
+            flags = flags[1:]
+
+        # Split on | or & (only one separator allowed per Eggdrop spec)
+        if '|' in flags:
+            global_part, chan_part = flags.split('|', 1)
+        elif '&' in flags:
+            global_part, chan_part = flags.split('&', 1)
+        else:
+            global_part = flags
+            chan_part = None
+
+        # '*' as global_part means "skip global check, only check channel flags"
+        skip_global = (global_part == '*')
+
+        async with get_db(self.db_path) as db:
+            # --- Global flag check ---
+            if not skip_global and global_part:
+                for char in global_part:
+                    col = GLOBAL_FLAGS.get(char)
+                    if col is None:
+                        log.warning(f"matchattr: unknown global flag '{char}'")
+                        return False
+
+                    row = await db.execute_fetchone(
+                        f"""
+                        SELECT 1 FROM user_access
+                        WHERE handle = ?
+                        AND channel IS NULL
+                        AND deleted_at IS NULL
+                        AND {col} = 1
+                        LIMIT 1
+                        """,
+                        (handle,)
+                    )
+                    has_flag = row is not None
+                    if positive and not has_flag:
+                        return False
+                    if not positive and has_flag:
+                        return False
+
+            # --- Channel flag check ---
+            if chan_part is not None:
+                if not channel:
+                    # Channel flags requested but no channel given → False
+                    return False
+
+                for char in chan_part:
+                    col = CHAN_FLAGS.get(char)
+                    if col is None:
+                        log.warning(f"matchattr: unknown channel flag '{char}'")
+                        return False
+
+                    row = await db.execute_fetchone(
+                        f"""
+                        SELECT 1 FROM user_access
+                        WHERE handle = ?
+                        AND channel = ?
+                        AND deleted_at IS NULL
+                        AND {col} = 1
+                        LIMIT 1
+                        """,
+                        (handle, channel)
+                    )
+                    has_flag = row is not None
+                    if positive and not has_flag:
+                        return False
+                    if not positive and has_flag:
+                        return False
+
+        return True
+
+    async def list_users(self) -> List[User]:
+        """Return all active users as User dataclasses."""
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
-                "SELECT * FROM users WHERE flags LIKE ? OR chan_flags LIKE ?",
-                (f"%{flag_filter}%", f"%{flag_filter}%")
+                """
+                SELECT handle, password, hostmasks, is_locked, comment,
+                    created_at, updated_at, created_by, updated_by,
+                    deleted_at, deleted_by
+                FROM users
+                WHERE deleted_at IS NULL
+                ORDER BY handle
+                """
             )
-            return [User(**self._row_to_data(r)) for r in rows]
+        return [User(**dict(r)) for r in rows]
+    
+    async def list_users_with_flag(self, flag: str) -> List[User]:
+        """
+        Example: flag='is_admin' returns users who have at least one
+        admin access row.  Extend as needed.
+        """
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT DISTINCT u.handle, u.password, u.hostmasks, u.is_locked,
+                    u.comment, u.created_at, u.updated_at, u.created_by,
+                    u.updated_by, u.deleted_at, u.deleted_by
+                FROM users u
+                JOIN user_access ua ON ua.handle = u.handle
+                WHERE u.deleted_at IS NULL
+                AND ua.deleted_at IS NULL
+                AND ua.{flag} = 1
+                ORDER BY u.handle
+                """
+            )
+        return [User(**dict(r)) for r in rows]    
         
     def exist(self, user: str):
         """Check if user exists."""
@@ -300,28 +457,109 @@ class UserManager:
         """Convert UserAccess to dict for DB INSERT/UPDATE."""
         return asdict(access)
 
-    async def get(self, handle: str) -> User:
+    async def get(self, handle: str) -> Optional[User]:
+        """
+        Fetch a single active user by handle.
+        Returns None if not found or soft-deleted.
+        """
         async with get_db(self.db_path) as db:
-            row = await db.execute(
-                "SELECT * FROM users WHERE handle = ?", (handle,)
-            ).fetchone()
-            
-            if not row:
-                raise ValueError(f"User '{handle}' not found")
-            return User(**row)
+            cursor = await db.execute(
+                """
+                SELECT handle, password, hostmasks, is_locked, comment,
+                    created_at, updated_at, created_by, updated_by,
+                    deleted_at, deleted_by
+                FROM users
+                WHERE handle = ?
+                AND deleted_at IS NULL
+                """,
+                (handle,)
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
 
-    def _row_to_data(self, row: Dict) -> Dict:
-        data = dict(row)
-        data['hostmasks'] = (data.get('hostmasks', '') or '').split()
-        data['chan_flags'] = json.loads(data.get('chan_flags', '{}'))
-        data['xtra'] = json.loads(data.get('xtra', '{}'))
-        return data
+        if row is None:
+            return None
 
-    async def sync_user(self, nick: str, host: str, channel: str = None, bot_id: int = None):
+        return User(**dict(row))
+    
+    async def get_deleted(self, handle: str) -> Optional[User]:
+        """
+        Fetch a user by handle regardless of deleted status.
+        Use only for admin inspection — not for permission checks.
+        """
         async with get_db(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO users (handle, hostmasks, laston, chan_flags, xtra)
-                VALUES (?, ?, strftime('%s','now'), ?, json_object('synced_by_bot', ?))
-            """, (nick, host, json.dumps({channel: ''}) if channel else '{}', bot_id))
+            cursor = await db.execute(
+                """
+                SELECT handle, password, hostmasks, is_locked, comment,
+                    created_at, updated_at, created_by, updated_by,
+                    deleted_at, deleted_by
+                FROM users
+                WHERE handle = ?
+                """,
+                (handle,)
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+
+        if row is None:
+            return None
+
+        return User(**dict(row))
+
+    async def sync_user(self, user: User, updated_by: Optional[str] = None) -> None:
+        """
+        Upsert a User into the database.
+
+        - Inserts if handle doesn't exist
+        - Updates real schema columns on conflict
+        - Updates last_seen on the global user_access row (channel IS NULL)
+        """
+        now = int(time.time())
+        hostmasks_json = json.dumps(user.hostmasks)
+
+        async with get_db(self.db_path) as db:
+            # Upsert the users row
+            await db.execute(
+                """
+                INSERT INTO users (
+                    handle, password, hostmasks, is_locked, comment,
+                    created_at, updated_at, created_by, updated_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(handle) DO UPDATE SET
+                    password    = excluded.password,
+                    hostmasks   = excluded.hostmasks,
+                    is_locked   = excluded.is_locked,
+                    comment     = excluded.comment,
+                    updated_at  = ?,
+                    updated_by  = ?
+                """,
+                (
+                    user.handle,
+                    user.password,
+                    hostmasks_json,
+                    user.is_locked,
+                    user.comment,
+                    user.created_at,
+                    now,
+                    user.created_by,
+                    updated_by,
+                    # ON CONFLICT SET bindings
+                    now,
+                    updated_by,
+                )
+            )
+
+            # Update last_seen on the global access row if it exists
+            await db.execute(
+                """
+                UPDATE user_access
+                SET last_seen = ?
+                WHERE handle = ?
+                AND channel IS NULL
+                AND deleted_at IS NULL
+                """,
+                (now, user.handle)
+            )
+
             await db.commit()
-        # TODO: from .botnet import propagate_user_sync

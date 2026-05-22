@@ -29,101 +29,28 @@ class Bot:
     created_at: int = field(default_factory=lambda: int(time.time()))
 
     def __post_init__(self):
-        # Safe JSON parse
-        if self.hostmasks and self.hostmasks.strip():
+        if isinstance(self.hostmasks, str):
             try:
-                self._hostmasks_list = json.loads(self.hostmasks)
+                self.hostmasks = json.loads(self.hostmasks) if self.hostmasks.strip() else []
             except json.JSONDecodeError:
                 log.warning(f"Invalid hostmasks JSON for {self.handle}: {self.hostmasks}")
-                self._hostmasks_list = []
-        else:
-            self._hostmasks_list = []
-        
-        # Property access
-        self.hostmask = self._hostmasks_list[0] if self._hostmasks_list else None
+                self.hostmasks = []
 
-    async def get_subnet_ids(self, handle: str) -> list[int]:
-        async with get_db(self.db_path) as db:
-            rows = await db.execute_fetchall(
-                "SELECT subnet_id FROM bot_subnets WHERE bot_handle = ? ORDER BY subnet_id",
-                (handle,)
-            )
-            return [row["subnet_id"] for row in rows]
+    @property
+    def hostmasks_list(self) -> list[str]:       # was orphaned outside the class
+        return self.hostmasks
 
-    async def is_global(self, handle: str) -> bool:
-        subnet_ids = await self.get_subnet_ids(handle)
-        return len(subnet_ids) == 0
-
-    async def bind_to_subnet(self, handle: str, subnet_id: int, added_by: str = None) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
-                """
-                INSERT OR IGNORE INTO bot_subnets (bot_handle, subnet_id, added_by)
-                VALUES (?, ?, ?)
-                """,
-                (handle, subnet_id, added_by)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-
-    async def unbind_from_subnet(self, handle: str, subnet_id: int) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
-                "DELETE FROM bot_subnets WHERE bot_handle = ? AND subnet_id = ?",
-                (handle, subnet_id)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-
-    async def make_global(self, handle: str) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
-                "DELETE FROM bot_subnets WHERE bot_handle = ?",
-                (handle,)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-
-    async def get_bots_for_subnet(self, subnet_id: int) -> list[str]:
-        async with get_db(self.db_path) as db:
-            rows = await db.execute_fetchall(
-                """
-                SELECT b.handle
-                FROM bots b
-                WHERE
-                    EXISTS (
-                        SELECT 1
-                        FROM bot_subnets bs
-                        WHERE bs.bot_handle = b.handle
-                        AND bs.subnet_id = ?
-                    )
-                    OR NOT EXISTS (
-                        SELECT 1
-                        FROM bot_subnets bs2
-                        WHERE bs2.bot_handle = b.handle
-                    )
-                ORDER BY b.handle
-                """,
-                (subnet_id,)
-            )
-            return [row["handle"] for row in rows]        
-
-@property
-def hostmasks_list(self):
-    return self._hostmasks_list
+    @property
+    def hostmask(self) -> Optional[str]:          # first mask or None
+        return self.hostmasks[0] if self.hostmasks else None  
 
 @dataclass
 class BotAccess:
-    """Maps to the 'bot_access' table."""
+    """Maps to the 'bot_access' table — exactly mirrors the schema, no more."""
     handle: str
     channel: Optional[str] = None
-    subnet_id: Optional[int] = None
+    # Removed: subnet_id, is_admin, is_bot — none exist in bot_access schema
     has_partyline: bool = False
-    is_admin: bool = False
-    is_bot: bool = False
     is_op: bool = False
     is_deop: bool = False
     is_voice: bool = False
@@ -133,7 +60,6 @@ class BotAccess:
     updated_at: int = field(default_factory=lambda: int(time.time()))
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
-
 
 class BotManager:
 
@@ -253,19 +179,106 @@ class BotManager:
         data['hostmasks'] = json.dumps(data['hostmasks'])  # Convert list back to JSON
         return data
 
-    async def save(self, bot: Bot):
-        data = self.to_dict(bot)
+    async def save(self, bot: Bot, updated_by: Optional[str] = None) -> None:
+        """Upsert a Bot into the database."""
+        now = int(time.time())
         async with get_db(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO bots (handle, password, hostmasks, address, port, 
-                                        role, subnet_id, share_level, comment, created_at)
-                VALUES (:handle, :password, :hostmasks, :address, :port,
-                        :role, :subnet_id, :share_level, :comment, :created_at)
-            """, data)
+            await db.execute(
+                """
+                INSERT INTO bots (handle, password, hostmasks, address, port,
+                                role, share_level, comment, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(handle) DO UPDATE SET
+                    password     = excluded.password,
+                    hostmasks    = excluded.hostmasks,
+                    address      = excluded.address,
+                    port         = excluded.port,
+                    role         = excluded.role,
+                    share_level  = excluded.share_level,
+                    comment      = excluded.comment,
+                    updated_at   = ?
+                """,
+                (
+                    bot.handle, bot.password,
+                    json.dumps(bot.hostmasks),
+                    bot.address, bot.port,
+                    bot.role, bot.share_level,
+                    bot.comment, bot.created_at, now,
+                    now,  # ON CONFLICT updated_at binding
+                )
+            )
+            await db.commit()
 
-    def _row_to_data(self, row: Dict) -> Dict:
-        data = dict(row)
-        data['hostmasks'] = (data.get('hostmasks', '') or '').split()
-        data['chan_flags'] = json.loads(data.get('chan_flags', '{}'))
-        data['xtra'] = json.loads(data.get('xtra', '{}'))
-        return data
+    async def get_subnet_ids(self, handle: str) -> list[int]:
+        """Return all subnet_ids bound to this bot. Empty list = global."""
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM bot_subnets WHERE bot_handle = ? ORDER BY subnet_id",
+                (handle,)
+            )
+        return [row["subnet_id"] for row in rows]
+
+    async def is_global(self, handle: str) -> bool:
+        """A bot with no subnet bindings is active on all subnets."""
+        return len(await self.get_subnet_ids(handle)) == 0
+
+    async def bind_to_subnet(self, handle: str, subnet_id: int,
+                              created_by: Optional[str] = None) -> bool:
+        """Bind a bot to a specific subnet."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                """INSERT OR IGNORE INTO bot_subnets (bot_handle, subnet_id, created_by)
+                   VALUES (?, ?, ?)""",
+                (handle, subnet_id, created_by)
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def unbind_from_subnet(self, handle: str, subnet_id: int) -> bool:
+        """Remove a specific subnet binding from a bot."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM bot_subnets WHERE bot_handle = ? AND subnet_id = ?",
+                (handle, subnet_id)
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def make_global(self, handle: str) -> bool:
+        """Remove all subnet bindings — bot becomes active on all subnets."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            cursor = await db.execute(
+                "DELETE FROM bot_subnets WHERE bot_handle = ?",
+                (handle,)
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def get_bots_for_subnet(self, subnet_id: int) -> list[str]:
+        """
+        Return handles of all bots active on a given subnet:
+        bots explicitly bound to it OR bots with no subnet binding (global).
+        """
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                """
+                SELECT b.handle FROM bots b
+                WHERE b.deleted_at IS NULL
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM bot_subnets bs
+                      WHERE bs.bot_handle = b.handle AND bs.subnet_id = ?
+                    )
+                    OR NOT EXISTS (
+                      SELECT 1 FROM bot_subnets bs2
+                      WHERE bs2.bot_handle = b.handle
+                    )
+                  )
+                ORDER BY b.handle
+                """,
+                (subnet_id,)
+            )
+        return [row["handle"] for row in rows]            

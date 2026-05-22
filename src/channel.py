@@ -13,6 +13,19 @@ from dataclasses import dataclass, field, asdict
 from .db import get_db
 
 log = logging.getLogger("wbs.channel")
+_SYNC_ALLOWED_COLUMNS = frozenset({
+    'comment', 'is_inactive', 'is_bitch', 'is_autoop', 'is_autovoice',
+    'is_revenge', 'is_revengebots', 'is_protectfriends', 'is_protectops',
+    'is_dontkickops', 'is_enforcebans', 'is_dynamicbans', 'is_dynamicexempts',
+    'is_dynamicinvites', 'is_pubcom', 'is_news', 'is_url', 'is_stats',
+    'is_locked', 'lock_by', 'lock_at', 'lock_reason',
+    'is_topiclock', 'topiclock', 'topiclock_by', 'topiclock_at', 'topiclock_reason',
+    'is_limit', 'limit_add', 'limit_rand', 'limit_tolerance', 'limit_delta',
+    'modes', 'bans', 'invites', 'exempts',
+    'flood_pub', 'flood_pub_time', 'flood_ctcp', 'flood_ctcp_time',
+    'flood_join', 'flood_join_time', 'flood_kick', 'flood_kick_time',
+    'flood_deop', 'flood_deop_time', 'flood_nick', 'flood_nick_time',
+})
 
 @dataclass
 class Channel:
@@ -155,27 +168,33 @@ class Channel:
 
     # DB — subnet binding
     async def get_subnet_ids(self, channel: str) -> list[int]:
+        """Return all subnet_ids bound to this channel. Empty = global."""
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
                 "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
                 (channel,)
             )
-            return [row["subnet_id"] for row in rows]
+        return [row["subnet_id"] for row in rows]
 
     async def is_global(self, channel: str) -> bool:
+        """A channel with no subnet bindings is active on all subnets."""
         return len(await self.get_subnet_ids(channel)) == 0
 
-    async def bind_to_subnet(self, channel: str, subnet_id: int, added_by: str = None) -> bool:
+    async def bind_to_subnet(self, channel: str, subnet_id: int, created_by: Optional[str] = None) -> bool:
+        """Bind a channel to a specific subnet."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             cursor = await db.execute(
-                "INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by) VALUES (?, ?, ?)",
-                (channel, subnet_id, added_by)
+                """INSERT OR IGNORE INTO channel_subnets
+                (channel_name, subnet_id, created_by)
+                VALUES (?, ?, ?)""",
+                (channel, subnet_id, created_by)
             )
             await db.commit()
-            return cursor.rowcount > 0
+        return cursor.rowcount > 0
 
     async def unbind_from_subnet(self, channel: str, subnet_id: int) -> bool:
+        """Remove a specific subnet binding."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             cursor = await db.execute(
@@ -183,9 +202,10 @@ class Channel:
                 (channel, subnet_id)
             )
             await db.commit()
-            return cursor.rowcount > 0
+        return cursor.rowcount > 0
 
     async def make_global(self, channel: str) -> bool:
+        """Remove all subnet bindings — channel becomes active on all subnets."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             cursor = await db.execute(
@@ -193,7 +213,7 @@ class Channel:
                 (channel,)
             )
             await db.commit()
-            return cursor.rowcount > 0
+        return cursor.rowcount > 0
 
     async def get_channels_for_subnet(self, subnet_id: int) -> list[str]:
         async with get_db(self.db_path) as db:
@@ -201,15 +221,22 @@ class Channel:
                 """
                 SELECT name FROM channels
                 WHERE is_inactive = 0
+                AND deleted_at IS NULL
                 AND (
-                    EXISTS (SELECT 1 FROM channel_subnets cs WHERE cs.channel_name = channels.name AND cs.subnet_id = ?)
-                    OR NOT EXISTS (SELECT 1 FROM channel_subnets cs2 WHERE cs2.channel_name = channels.name)
+                    EXISTS (
+                    SELECT 1 FROM channel_subnets cs
+                    WHERE cs.channel_name = channels.name AND cs.subnet_id = ?
+                    )
+                    OR NOT EXISTS (
+                    SELECT 1 FROM channel_subnets cs2
+                    WHERE cs2.channel_name = channels.name
+                    )
                 )
                 ORDER BY name
                 """,
                 (subnet_id,)
             )
-            return [row["name"] for row in rows]
+        return [row["name"] for row in rows]
 
     # DB — config properties (lazy)
     async def get_modes(self) -> str:
@@ -444,7 +471,7 @@ class ChannelManager:
     def __init__(self, db_path):
         self.db_path = db_path
 
-    async def addchan(self, channel: str, subnet_id: int = None, added_by: str = None) -> bool:
+    async def addchan(self, channel: str, subnet_id: int = None, created_by: str = None) -> bool:
         """
         Add a channel. If subnet_id is None the channel is global (joins on all subnets).
         Handles resurrection of soft-deleted channels.
@@ -460,24 +487,27 @@ class ChannelManager:
 
             if row:
                 if row[1] is None:
-                    # Already exists and not deleted
                     raise ValueError(f"Channel {channel} already exists")
                 # Resurrect soft-deleted channel
                 await db.execute(
                     "UPDATE channels SET deleted_at = NULL, updated_at = ?, updated_by = ? WHERE name = ?",
-                    (now, added_by, channel)
+                    (now, created_by, channel)
                 )
             else:
+                # No subnet_id column on channels — global/subnet scope
+                # is handled exclusively via channel_subnets
                 await db.execute(
                     "INSERT INTO channels (name, created_by, updated_at) VALUES (?, ?, ?)",
-                    (channel, added_by, now)
+                    (channel, created_by, now)
                 )
 
             if subnet_id is not None:
+                # Schema uses created_by — not added_by
                 await db.execute(
-                    """INSERT OR IGNORE INTO channel_subnets (channel_name, subnet_id, added_by)
-                       VALUES (?, ?, ?)""",
-                    (channel, subnet_id, added_by)
+                    """INSERT OR IGNORE INTO channel_subnets
+                    (channel_name, subnet_id, created_by)
+                    VALUES (?, ?, ?)""",
+                    (channel, subnet_id, created_by)
                 )
 
             await db.commit()
@@ -566,7 +596,6 @@ class ChannelManager:
             
             result = [f"Channel: {chan['name']}"]
             result.append(f"  Comment: {chan['comment'] or 'None'}")
-            result.append(f"  Locked: {'Yes' if chan['is_locked'] else 'No'}")
             return "\n".join(result)
 
     def exist(self, channel: str):
@@ -609,60 +638,67 @@ class ChannelManager:
             rows = await db.execute("SELECT * FROM channels ORDER BY name").fetchall()
             return [Channel(**dict(row)) for row in rows]
 
-    async def create_channel(self, name: str, subnet_id: Optional[int] = None) -> Channel:
-        """Create new channel."""
-        channel = Channel(name=name, subnet_id=subnet_id)
-        data = self.channel_to_dict(channel)
-        
+    async def create_channel(self, name: str, subnet_id: Optional[int] = None,
+                            created_by: Optional[str] = None) -> Channel:
+        """
+        Create a new channel row. Subnet binding goes to channel_subnets, not channels.
+        """
+        now = int(__import__('time').time())
+        channel = Channel(name=name)
+
         async with get_db(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO channels (
-                    name, subnet_id, modes, bans, invites, exempts,
-                    comment, created_at, updated_at
-                ) VALUES (
-                    :name, :subnet_id, :modes, :bans, :invites, :exempts,
-                    :comment, :created_at, :updated_at
+            await db.execute(
+                """
+                INSERT INTO channels (name, comment, created_at, updated_at, created_by)
+                VALUES (?, '', ?, ?, ?)
+                """,
+                (channel.name, now, now, created_by)
+            )
+
+            if subnet_id is not None:
+                await db.execute(
+                    """INSERT OR IGNORE INTO channel_subnets
+                    (channel_name, subnet_id, created_by)
+                    VALUES (?, ?, ?)""",
+                    (channel.name, subnet_id, created_by)
                 )
-            """, data)
+
             await db.commit()
-            
+
         return channel
 
-    async def sync_from_peer(self, channel_data: Dict):
+    async def sync_channel_settings(self, channel: str, settings: dict, updated_by: Optional[str] = None) -> bool:
         """
-        Sync channel settings/bans/flags from botnet peer.
-        
-        Args:
-            channel_data: Dict containing 'channel', 'settings', 'userflags', etc.
+        Upsert channel settings from a botnet peer or internal call.
+        Only columns in _SYNC_ALLOWED_COLUMNS are written — all others are silently dropped.
+        Returns True if any row was affected.
         """
-        channel = channel_data.get('channel')
-        if not channel:
-            log.warning("sync_from_peer called without channel name")
-            return
-        
-        try:
-            async with get_db(self.db_path) as db:
-                # Upsert channel settings
-                settings = channel_data.get('settings', {})
-                if settings:
-                    columns = list(settings.keys())
-                    placeholders = ', '.join(['?'] * len(columns))
-                    values = list(settings.values())
-                    
-                    await db.execute(
-                        f"INSERT OR REPLACE INTO channel_settings (channel, {', '.join(columns)}) VALUES (?, {placeholders})",
-                        (channel.lower(), *values)
-                    )
-                
-                # Sync user flags
-                for user_flags in channel_data.get('userflags', []):
-                    await db.execute(
-                        "INSERT OR REPLACE INTO user_chan_flags (handle, channel, flags) VALUES (?, ?, ?)",
-                        (user_flags['handle'], channel.lower(), user_flags['flags'])
-                    )
-            
-            # Reload channel from DB
-            await self._load_channels()
-            log.info(f"Synced channel {channel} from botnet peer")
-        except Exception as e:
-            log.error(f"Failed to sync channel {channel}: {e}")
+        if not channel or not settings:
+            return False
+
+        # Filter to allowlist only — prevents arbitrary column injection
+        safe = {k: v for k, v in settings.items() if k in _SYNC_ALLOWED_COLUMNS}
+        if not safe:
+            log.warning(f"sync_channel_settings: no valid columns for {channel}")
+            return False
+
+        now = int(__import__('time').time())
+        safe['updated_at'] = now
+        safe['updated_by'] = updated_by
+
+        set_clause = ', '.join(f"{col} = ?" for col in safe)
+        values = list(safe.values())
+
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                f"UPDATE channels SET {set_clause} WHERE name = ? AND deleted_at IS NULL",
+                (*values, channel)
+            )
+            await db.commit()
+
+        if cursor.rowcount == 0:
+            log.warning(f"sync_channel_settings: channel '{channel}' not found or deleted")
+            return False
+
+        log.info(f"sync_channel_settings: updated {channel} ({list(safe.keys())})")
+        return True
