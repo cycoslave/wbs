@@ -1,4 +1,4 @@
-# WBS 6.0.0 RC1
+# WBS 6.0.0 RC2
 An Eggdrop like bot system in Python.
 
 
