@@ -331,3 +331,19 @@ class SubnetManager:
             f"Merged subnets from {from_bot}: "
             f"{inserted} inserted, {len(subnets) - inserted} skipped"
         )
+
+    async def serialize_for_peer(self, scope: str = 'full', subnet_id: int = None) -> list[dict]:
+        """Return subnet rows for botnet share. scope='subnet' sends only the given subnet_id."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if scope == 'subnet' and subnet_id is not None:
+                cur = await db.execute(
+                    "SELECT id, name, created_at, created_by FROM subnets WHERE id = ?",
+                    (subnet_id,)
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT id, name, created_at, created_by FROM subnets"
+                )
+            rows = await cur.fetchall()
+        return [dict(row) for row in rows]        

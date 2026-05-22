@@ -505,61 +505,6 @@ class BotnetManager:
         await self.share_bot_access(link)
         await self.share_channels(link)
 
-    async def share_subnets(self, link: BotLink):
-        """Share subnet definitions."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            if link.share_level == 'subnet':
-                # Only share the specific subnet
-                cursor = await db.execute(
-                    "SELECT * FROM subnets WHERE id = ?",
-                    (link.subnet_id,)
-                )
-            else:  # 'full'
-                cursor = await db.execute("SELECT * FROM subnets")
-            
-            rows = await cursor.fetchall()
-            subnets = [dict(row) for row in rows]
-        
-        msg = f"SHARE SUBNETS {json.dumps(subnets)}\n"
-        await self._safe_send(link.writer, msg)
-        log.info(f"Shared {len(subnets)} subnets to {link.name}")
-
-    async def handle_share_subnets(self, data: str, from_bot: str):
-        """Merge subnets with conflict resolution."""
-        subnets = json.loads(data)
-        await self.subnet.merge_from_peer(subnets, from_bot)
-        
-        async with aiosqlite.connect(self.db_path) as db:
-            for subnet in subnets:
-                subnet_id = subnet['id']
-                name = subnet['name']
-                
-                # Check if exists by ID or name
-                cursor = await db.execute(
-                    "SELECT id, created_at FROM subnets WHERE id = ? OR name = ?",
-                    (subnet_id, name)
-                )
-                existing = await cursor.fetchone()
-                
-                if existing:
-                    # Subnet exists - keep local version (subnets rarely change)
-                    log.debug(f"Subnet {name} (id={subnet_id}) already exists, keeping local")
-                else:
-                    # Insert new subnet with same ID
-                    await db.execute("""
-                        INSERT INTO subnets (id, name, created_at, created_by)
-                        VALUES (?, ?, ?, ?)
-                    """, (
-                        subnet_id, name, subnet['created_at'], from_bot
-                    ))
-                    log.info(f"Added subnet {name} (id={subnet_id}) from {from_bot}")
-            
-            await db.commit()
-        
-        log.info(f"Merged {len(subnets)} subnets from {from_bot}")
-
     async def share_users(self, link: BotLink):
         users = await self.user.serialize_for_peer()
         await self._safe_send(link.writer, f"SHARE USERS {json.dumps(users)}\n")
@@ -584,6 +529,15 @@ class BotnetManager:
         access = await self.bot.serialize_access_for_peer()
         await self._safe_send(link.writer, f"SHARE BOTACCESS {json.dumps(access)}\n")
         log.info(f"Shared {len(access)} bot_access rows to {link.name}")
+
+    async def share_subnets(self, link: BotLink):
+        subnets = await self.subnet.serialize_for_peer(link.share_level, link.subnet_id)
+        await self._safe_send(link.writer, f"SHARE SUBNETS {json.dumps(subnets)}\n")
+        log.info(f"Shared {len(subnets)} subnets to {link.name}")
+
+    async def handle_share_subnets(self, data: str, from_bot: str):
+        subnets = json.loads(data)
+        await self.subnet.merge_from_peer(subnets, from_bot)
 
     async def handle_share_users(self, data: str, from_bot: str) -> None:
         users = json.loads(data)
