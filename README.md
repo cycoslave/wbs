@@ -41,4 +41,7 @@ options:
 - try to fix duckhunt cheating.
 
 ## Bugs
-- None, for now.
+- .net issue
+console> .net lag
+2026-05-23 16:36:23,834 ERROR Command 'net' error: 'BotnetManager' object has no attribute 'broadcast'
+Error executing .net

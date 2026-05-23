@@ -6,10 +6,10 @@ Handles bot-to-bot linking, command routing, and data sharing.
 import asyncio
 import json
 import logging
-import aiosqlite
 import secrets
 import hashlib
 import ssl as ssl_lib
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Any, Literal, Callable
 from dataclasses import dataclass
@@ -21,6 +21,7 @@ from .channel import ChannelManager
 from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
+CLOCK_SKEW_WARN_SECONDS = 30
 
 @dataclass
 class BotLink:
@@ -61,6 +62,7 @@ class BotnetManager:
         self.subnet = SubnetManager(self.db_path)
         self.peers: Dict[BotLink] = {}
         self.cmds: Dict[BotCommand, Callable] = {}
+        self._peer_skew: dict[str, int] = {}
         
         # Settings
         self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
@@ -258,7 +260,7 @@ class BotnetManager:
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                     chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
-                    challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
+                    challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                     #log.info(f"Sending authentication token {challenge}")
                     await self._safe_send(writer, challenge)
                 else:
@@ -266,39 +268,49 @@ class BotnetManager:
                     writer.close()
                     return
             else:
-                #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                 chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
-                challenge = f"LINKAUTH {self.my_handle} {chalhash}\n"
-                #log.info(f"Sending authentication token {challenge}")
+                challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                 await self._safe_send(writer, challenge)
             return
         
         elif cmd == "LINKAUTH":
-            # Validate authentication
-            #log.info(f"auth string: {parts[1]}{link.password}{self.my_handle}")
             expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
-            
-            #log.info(f"expected: {expectedhash} - got: {parts[2]}")
             if len(parts) < 2 or parts[2] != expectedhash:
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
                 return
-            
+
+            if len(parts) >= 4:
+                try:
+                    peer_ts = int(parts[3])
+                    if not await self.check_clock_skew(peer_ts, from_bot):
+                        await self._safe_send(writer, f"ERROR :clock skew too large\n")
+                        writer.close()
+                        return
+                except ValueError:
+                    log.warning(f"LINKAUTH from {from_bot} missing valid timestamp — skew check skipped")
+
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
-            #log.info(f"Auth success: {from_bot}")
-            #self.core.bot_sessions[from_bot.lower()] = link
             link.connected_at = datetime.now(timezone.utc)
             self.subnet.register_peer(from_bot, link.subnet_id)
-            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__}\n")
+            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\n")
             asyncio.create_task(self.share_all_data(from_bot))
             return
         
         elif cmd == "LINKREADY":
-            # Link established
+            if len(parts) >= 4:
+                try:
+                    peer_ts = int(parts[4])
+                    if not await self.check_clock_skew(peer_ts, from_bot):
+                        await self._safe_send(writer, f"ERROR :clock skew too large\n")
+                        writer.close()
+                        return
+                except ValueError:
+                    log.warning(f"LINKREADY from {from_bot} missing valid timestamp — skew check skipped")
+
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
-            #log.info(f"Link established with {from_bot}")
             self.subnet.register_peer(from_bot, link.subnet_id)
             self.core.bot_sessions[from_bot.lower()] = link
             link.connected_at = datetime.now(timezone.utc)
@@ -490,6 +502,24 @@ class BotnetManager:
             removed += 1
         log.info(f"Unregistered {removed} cmds for {plugin}")
         return removed            
+
+    async def check_clock_skew(self, peer_timestamp: int, peer_name: str) -> bool:
+        """
+        Called during handshake. Returns False if skew is unacceptable.
+        Caller must abort the link if False is returned.
+        """
+        skew = abs(int(time.time()) - peer_timestamp)
+        self._peer_skew[peer_name] = skew
+        if skew > CLOCK_SKEW_WARN_SECONDS:
+            log.error(
+                "Rejecting link from %s: clock skew is %ds (max %ds). "
+                "Ensure NTP is running on both hosts.",
+                peer_name, skew, CLOCK_SKEW_WARN_SECONDS
+            )
+            return False
+        if skew > 0:
+            log.debug("Clock skew with %s: %ds (acceptable)", peer_name, skew)
+        return True
 
     async def share_all_data(self, target_bot: str):
         """Comprehensive data sharing based on share_level."""
