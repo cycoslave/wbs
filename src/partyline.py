@@ -9,6 +9,103 @@ from .user import UserManager
 
 log = logging.getLogger("wbs.partyline")
 
+# Centralized partyline authorization policy.
+# Maps command name (without leading dot) -> required global flag using
+# UserManager.matchattr. None means no additional flags beyond having a
+# partyline session.
+COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
+    # Low‑impact / informational
+    "help": None,
+    "version": None,
+    "date": None,
+    "time": None,
+    "uptime": None,
+
+    # Basic partyline usage
+    "whoami": "p",
+    "who": "p",
+    "whom": "p",
+    "handle": "p",
+    "chpass": "p",
+    "whois": "p",
+
+    # Channel‑op style actions (require global +o)
+    "mode": "o",
+    "op": "o",
+    "deop": "o",
+    "voice": "o",
+    "devoice": "o",
+    "mass": "o",
+
+    # High‑impact admin/maintenance commands (require +A)
+    "quit": "A",
+    "die": "A",
+    "restart": "A",
+    "backup": "A",
+    "status": "A",
+
+    # User / access management
+    "chattr": "A",
+    "+user": "A",
+    "-user": "A",
+    "userinfo": "A",
+    "users": "A",
+    "addaccess": "A",
+    "delaccess": "A",
+    "lockuser": "A",
+    "unlockuser": "A",
+    "nopass": "A",
+    "fixpass": "A",
+
+    # Bot / botnet management
+    "+bot": "A",
+    "-bot": "A",
+    "bots": "A",
+    "link": "A",
+    "unlink": "A",
+    "chaddr": "A",
+    "infoleaf": "A",
+    "addleaf": "A",
+    "addhub": "A",
+    "net": "A",
+    "subnet": "A",
+    "relay": "A",
+
+    # Channel list / lifecycle
+    "channels": "A",
+    "+chan": "A",
+    "-chan": "A",
+    "lockchan": "A",
+    "unlockchan": "A",
+    "topiclock": "A",
+    "topicunlock": "A",
+
+    # Scheduler / timers
+    "taskset": "A",
+    "tasks": "A",
+    "timers": "A",
+
+    # IRC identity / presence for the bot
+    "baway": "A",
+    "bback": "A",
+    "nick": "A",
+
+    # Plugins and games (can run arbitrary code / network IO)
+    "plugins": "A",
+    "load": "A",
+    "unload": "A",
+    "games": "A",
+    "gload": "A",
+    "gunload": "A",
+    "gstart": "A",
+    "gstop": "A",
+    "gsessions": "A",
+}
+
+# Default minimum flag for commands not explicitly listed above.
+DEFAULT_MIN_FLAG = "p"
+
+
 class Partyline:
     """Central partyline hub - runs in core process, manages all sessions"""
     
@@ -94,24 +191,41 @@ class Partyline:
             return
 
         # Normal local dispatch
-        # Normal local dispatch
         await self._handle_command(session_id, session['handle'], text)
     
     async def _handle_command(self, session_id: int, handle: str, text: str):
-        """Handle partyline command"""
+        """Handle partyline command.
+
+        This is the single choke‑point for partyline authorization. All
+        .commands must pass through here so we can enforce UserManager
+        matchattr() checks before dispatching to commands.py.
+        """
+        if not text.startswith('.'):
+            # Non‑command input is treated as chat on the partyline.
+            self.broadcast(f"{handle}: {text}", exclude_session=session_id)
+            return
+
         parts = text[1:].split(maxsplit=1)
+        if not parts:
+            return
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
         
         # Console has full access
-        #is_console = self.sessions[session_id]['type'] == 'console'
-        
-        #if not is_console:
-        #    # Check user flags
-        #    user = await self.user.get(handle)
-        #    if not user or 'n' not in user.flags:
-        #        self.send_to_session(session_id, "Access denied.")
-        #        return
+        is_console = self.sessions.get(session_id, {}).get('type') == 'console'
+
+        if not is_console:
+            # Map command to minimum required flag; fall back to +p for
+            # commands that are not explicitly listed.
+            required_flag = COMMAND_MIN_FLAGS.get(cmd, DEFAULT_MIN_FLAG)
+
+            if required_flag:
+                # matchattr defaults to positive semantics when no +/- prefix
+                flagspec = required_flag
+                allowed = await self.user.matchattr(handle, flagspec)
+                if not allowed:
+                    self.send_to_session(session_id, f"Access denied for .{cmd} (need +{required_flag}).")
+                    return
         
         # Dispatch to commands.py
         from .commands import COMMANDS
