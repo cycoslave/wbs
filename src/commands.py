@@ -1808,6 +1808,27 @@ async def cmd_addhub(core, handle: str, session_id: int, arg: str, respond):
     else:
         await respond(f"Bot {botnick} already exists. Use .chaddr to update.")
 
+async def cmd_whois(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .whois <handle>
+    Display user info, flags, hostmasks, and access. Delegates to UserManager.
+    """
+    target = arg.strip().split()[0] if arg.strip() else ""
+    if not target:
+        await respond("Usage: .whois <handle>")
+        return
+
+    # core.user.get() returns a User dataclass or None
+    user = await core.user.get(target)
+    if not user:
+        await respond(f"No such user: {target}")
+        return
+
+    # showuser() returns the full formatted multi-line string
+    info = await core.user.showuser(target)
+    for line in info.split("\n"):
+        await respond(line)
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -1856,6 +1877,7 @@ COMMANDS = {
     'addleaf':      cmd_addleaf,
     'addhub':       cmd_addhub,
     # user
+    'whois':       cmd_whois,
     '+user': cmd_adduser,
     '-user': cmd_deluser,
     'userinfo': cmd_showuser,
