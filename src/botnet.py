@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import hashlib
+import hmac
 import ssl as ssl_lib
 import time
 from datetime import datetime, timezone
@@ -259,7 +260,8 @@ class BotnetManager:
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
-                    chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                    #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                    chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), "sha256").hexdigest()
                     challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                     #log.info(f"Sending authentication token {challenge}")
                     await self._safe_send(writer, challenge)
@@ -268,13 +270,15 @@ class BotnetManager:
                     writer.close()
                     return
             else:
-                chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
+                chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), "sha256").hexdigest()
                 challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                 await self._safe_send(writer, challenge)
             return
         
         elif cmd == "LINKAUTH":
-            expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
+            #expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
+            expectedhash = hmac.new(link.password.encode(), f"{parts[1]}{self.my_handle}".encode(), "sha256").hexdigest()
             if len(parts) < 2 or parts[2] != expectedhash:
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
