@@ -13,6 +13,9 @@ from contextlib import asynccontextmanager
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("wbs.db")
+ALLOWED_TABLES = {'subnets', 'users', 'user_access', 'bots', 'bot_access', 'bot_subnets', 'servers', 'channels', 'channel_subnets', 'runtime', 'ignores', 
+                  'loaded_modules', 'game_sessions', ' blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings' , 
+                  'poker_cash', 'werewolf_stats', 'chanlock', 'limit_settings', 'seen', 'stats_global', 'stats_channel', 'stats_history', 'topiclock'}
 
 async def get_schema_sql() -> str:
     """Load schema.sql."""
@@ -42,7 +45,7 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
             async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
                 tables = await cur.fetchall()
             for (table,) in tables:
-                if table not in {'sqlite_master', 'sqlite_sequence'}:
+                if table in ALLOWED_TABLES:
                     await db.execute(f"DROP TABLE IF EXISTS {table}")
             await db.commit()
         

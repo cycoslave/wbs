@@ -51,7 +51,7 @@
     "botnet": false,
     "listen_port": 3333,
     "ssl": true,
-    "ssl_verify": false,
+    "ssl_verify": true,
     "certfile": "wbs.crt",
     "keyfile":  "wbs.key",
     "auto_update": false,

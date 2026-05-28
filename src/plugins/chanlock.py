@@ -5,6 +5,7 @@ version: 0.1.0
 by: cyco
 Description: Set and watch channel limit
 """
+import sqlite3
 import time
 from contextlib import asynccontextmanager  
 from typing import Dict
@@ -146,18 +147,30 @@ class limitPlugin(Plugin):
 
     async def _load_settings(self, chan: str) -> dict:
         db_path = self.core.db_path
-        defaults = {"enabled": 0, "maxusers": 20, "kick_threshold": 5, "reset_interval": 60}
-        
+        defaults = {
+            "enabled": 0,
+            "maxusers": 20,
+            "kick_threshold": 5,
+            "reset_interval": 60,
+        }
+
         async with _db(db_path) as db:
+            db.row_factory = sqlite3.Row  # ensures dict(row) works
             try:
                 async with db.execute(
-                    "SELECT * FROM limit_settings WHERE channel = ?", (chan,)
+                    """SELECT enabled, maxusers, kick_threshold, reset_interval
+                    FROM limit_settings WHERE channel = ?""",
+                    (chan,),
                 ) as cursor:
                     row = await cursor.fetchone()
                     return dict(row) if row else defaults
-            except sqlite3.OperationalError:
-                self.log.warning("limit_settings missing for %s, using defaults", chan)
-                return defaults
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    self.log.warning(
+                        "limit_settings table missing for %s, using defaults", chan
+                    )
+                    return defaults
+                raise  # re-raise unexpected DB errors
 
     async def _save_setting(self, channel: str, **kwargs):
         cols = ", ".join(f"{k}=?" for k in kwargs)
