@@ -292,7 +292,11 @@ class BotnetManager:
                         writer.close()
                         return
                 except ValueError:
-                    log.warning(f"LINKAUTH from {from_bot} missing valid timestamp — skew check skipped")
+                    #log.warning(f"LINKAUTH from {from_bot} missing valid timestamp — skew check skipped")
+                    log.error(f"LINKAUTH from {from_bot} has invalid or missing timestamp — rejecting link")
+                    await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
+                    writer.close()
+                    return
 
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
@@ -311,7 +315,11 @@ class BotnetManager:
                         writer.close()
                         return
                 except ValueError:
-                    log.warning(f"LINKREADY from {from_bot} missing valid timestamp — skew check skipped")
+                    #log.warning(f"LINKREADY from {from_bot} missing valid timestamp — skew check skipped")
+                    log.error(f"LINKREADY from {from_bot} has invalid or missing timestamp — rejecting link")
+                    await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
+                    writer.close()
+                    return
 
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
