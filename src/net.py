@@ -34,7 +34,20 @@ class NetListener:
         log.info(f"TLS enabled (cert={certfile})")
         return ctx
 
-    async def listen(self, host: str = '0.0.0.0', port: int = 3333):
+    async def listen(self) -> None:
+        """
+        Start the TCP listener.
+
+        Bind address is read from config['settings']['listen_host'].
+        If the key is absent or empty, defaults to '0.0.0.0' (all interfaces).
+        Set 'listen_host' to '127.0.0.1' to restrict to loopback only.
+
+        Port is read from config['settings']['listen_port'], default 3333.
+        """
+        cfg = self.config.get('settings', {})
+        host = cfg.get('listen_host') or '0.0.0.0'   # empty string → 0.0.0.0
+        port = int(cfg.get('listen_port', 3333))
+
         ssl_ctx = self._build_ssl_context()
         self.server = await asyncio.start_server(
             self.handle_connection, host, port, ssl=ssl_ctx
@@ -47,7 +60,7 @@ class NetListener:
     async def handle_connection(self, reader, writer):
         peer = writer.get_extra_info('peername')
         try:
-            data = await asyncio.wait_for(reader.readline(), 30.0)
+            data = await asyncio.wait_for(reader.read(4096), 30.0)
             line = data.decode('utf-8', errors='ignore').strip()
 
             if line.startswith('BOTLINK'):

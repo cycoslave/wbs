@@ -49,6 +49,7 @@
   "settings": {
     "pid_file": "wbs.pid",
     "botnet": false,
+    "listen_host": "127.0.0.1",
     "listen_port": 3333,
     "ssl": true,
     "ssl_verify": true,

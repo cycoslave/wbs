@@ -119,7 +119,7 @@ class Core:
                 log.error(f"Failed auto-load {plugin_name}: {e}")
 
         if hasattr(self, 'net_listener'):
-            asyncio.create_task(self.net_listener.listen(port=self.config['settings']['listen_port']))
+            asyncio.create_task(self.net_listener.listen())
 
         if foreground:
             log.info("Foreground mode: Using console.")
