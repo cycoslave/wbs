@@ -9,6 +9,7 @@ import json
 from typing import Optional
 
 log = logging.getLogger("wbs.session")
+MAX_LINE_BYTES = 4096
 
 class Session:
     """partyline session - handles console/telnet/DCC"""
@@ -63,17 +64,38 @@ class Session:
             if self.session_type == 'console':
                 if self.prompt_session:
                     return await self.prompt_session.prompt_async(f"{self.handle}> ")
-            
+
             elif self.session_type in ('telnet', 'socket', 'bot'):
                 if self.reader:
-                    data = await self.reader.readline()
+                    try:
+                        data = await self.reader.readuntil(b'\n')
+                    except asyncio.LimitOverrunError:
+                        # Line exceeded buffer limit — drain and discard
+                        await self.reader.read(MAX_LINE_BYTES)
+                        log.warning(
+                            f"Session {self.session_id} ({self.handle}): "
+                            f"oversized line discarded (>{MAX_LINE_BYTES}B)"
+                        )
+                        return ''   # triggers 'not line.strip()' → continue in run()
                     if not data:
                         return None
+                    if len(data) > MAX_LINE_BYTES:
+                        log.warning(
+                            f"Session {self.session_id}: line too long "
+                            f"({len(data)}B), discarding"
+                        )
+                        return ''
                     return data.decode('utf-8', errors='ignore').strip()
-            
+
             elif self.session_type == 'dcc':
                 if self.dcc:
                     return await self.dcc.receive()
+
+        except (EOFError, KeyboardInterrupt):
+            return None
+        except Exception as e:
+            log.error(f"Receive error ({self.session_type}): {e}")
+            return None
         
         except (EOFError, KeyboardInterrupt):
             return None

@@ -302,7 +302,7 @@ class Core:
             dup_sock = socket.socket(fileno=dup_fd)
             dup_sock.setblocking(False)
             
-            reader, writer = await asyncio.open_connection(sock=dup_sock)
+            reader, writer = await asyncio.open_connection(sock=dup_sock, limit=4096)
             
             response_q = mp.Queue()
             session_id = self.partyline.register_remote('telnet', handle, response_q)

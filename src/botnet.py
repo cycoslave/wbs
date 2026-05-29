@@ -89,9 +89,9 @@ class BotnetManager:
                 ssl_ctx = ssl_lib.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl_lib.CERT_NONE
-                reader, writer = await asyncio.open_connection(bot.address, bot.port, ssl=ssl_ctx)
+                reader, writer = await asyncio.open_connection(bot.address, bot.port, ssl=ssl_ctx, limit=4096)
             else:
-                reader, writer = await asyncio.open_connection(bot.address, bot.port)
+                reader, writer = await asyncio.open_connection(bot.address, bot.port, limit=4096)
             
             # Create link and assign streams
             link = BotLink(
