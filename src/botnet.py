@@ -279,7 +279,7 @@ class BotnetManager:
         elif cmd == "LINKAUTH":
             #expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
             expectedhash = hmac.new(link.password.encode(), f"{parts[1]}{self.my_handle}".encode(), "sha256").hexdigest()
-            if len(parts) < 2 or parts[2] != expectedhash:
+            if len(parts) < 4 or not hmac.compare_digest(parts[2], expectedhash):
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
                 return
