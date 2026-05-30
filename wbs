@@ -2,6 +2,9 @@
 # wbs (main.py)
 """
 WBS Launcher
+version: 6.0.0
+by: cycoslave
+link: https://github.com/cycoslave/wbs
 """
 import argparse
 import asyncio
@@ -9,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from src.core import Core
 from src import __version__
 
@@ -17,12 +21,18 @@ log = logging.getLogger("wbs")
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="wbs")
-    parser.add_argument("-f", "--foreground", action="store_true",
-                        help="Run in foreground with console")
     parser.add_argument("-c", "--config", default="config.json",
                         help="Path to config file")
     parser.add_argument("-d", "--db-path",
                         help="Override database path from config")
+    parser.add_argument("-f", "--foreground", action="store_true",
+                        help="Run in foreground with console")
+    parser.add_argument("-p", "--mkpasswd", action="store_true",
+                        help="Interactively prompt for a password and print its bcrypt hash. "
+                            "Use the output in config.json with encryption=bcrypt.")
+    parser.add_argument("-s", "--seed", action="store_true",
+                        help="Initialize the database and seed from config.json, then exit. "
+                            "Must be run once before first launch.")
     parser.add_argument("--pidfile", default=None,
                         help="Override pid file path (default: from config settings.pid_file)")
     parser.add_argument("--logfile", default=None,
@@ -58,17 +68,46 @@ def remove_pidfile(path: str):
 
 def main():
     args = parse_args()
+    if args.mkpasswd:
+        import bcrypt
+        import getpass
+        pw = getpass.getpass("Password: ")
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw != pw2:
+            print("ERROR: passwords do not match.", file=sys.stderr)
+            sys.exit(1)
+        if not pw:
+            print("ERROR: password cannot be empty.", file=sys.stderr)
+            sys.exit(1)
+        hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+        print(hashed)
+        sys.exit(0)
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
+        print("       Copy config.json.example to config.json and edit it first.", file=sys.stderr)
+        sys.exit(1)
 
-    # Load config first — needed to resolve pidfile/logfile paths
-    with open(args.config) as f:
+    with open(config_path) as f:
         config = json.load(f)
-
+    db_path = args.db_path or config.get('db', {}).get('path', 'db/wbs.db')
     settings = config.get('settings', {})
     log_cfg  = config.get('logging', {})
+    pidfile  = args.pidfile or settings.get('pid_file', 'wbs.pid')
+    logfile  = args.logfile or log_cfg.get('file', 'logs/wbs.log')
 
-    # Resolve paths: CLI arg > config section > hardcoded default
-    pidfile = args.pidfile or settings.get('pid_file',  'wbs.pid')
-    logfile = args.logfile or log_cfg.get('file', 'logs/wbs.log')
+    if args.seed:
+        from src.db import init_db, seed_db
+        async def _seed():
+            await init_db(db_path)
+            await seed_db(db_path, config)
+            log.info("Database seeded. Continuing startup...")
+        asyncio.run(_seed())
+
+    if not Path(db_path).exists():
+        print(f"ERROR: database not found at {db_path}", file=sys.stderr)
+        print("       Run './wbs --seed' first to initialize.", file=sys.stderr)
+        sys.exit(1)
 
     log.info(f"Launching WBS {__version__}")
     if not args.foreground:
@@ -81,7 +120,6 @@ def main():
             filemode='a',
             force=True
         )
-
     try:
         core = Core(args=args)
         asyncio.run(core.run(foreground=args.foreground))

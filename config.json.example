@@ -11,7 +11,10 @@
   "users": [
     {
       "handle": "owner",
-      "password": "changeme",
+      "password": {
+        "pass": "changeme",
+        "encryption": "none"
+      },
       "hosts": ["owner!user@host.example.com"],
       "access": [
         {"is_admin": 1}
@@ -19,7 +22,10 @@
     },
     {
       "handle": "user2",
-      "password": "changeme2",
+      "password": {
+        "pass": "$2b$12$examplehashexamplehashexamplehashexamplehashexampleha2", 
+        "encryption": "bcrypt"
+      },
       "hosts": ["user2!user2@another.example.com"],
       "access": [
         {"is_op": 1, "channel": "#randomchannel", "subnet": 1}

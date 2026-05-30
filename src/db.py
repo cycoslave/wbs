@@ -6,6 +6,7 @@ Supports multi-process (WAL mode).
 import aiosqlite
 import time
 import logging
+import bcrypt
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -21,13 +22,30 @@ async def get_schema_sql() -> str:
     """Load schema.sql."""
     return SCHEMA_PATH.read_text(encoding="utf-8")
 
-
 async def ensure_schema(db: aiosqlite.Connection) -> None:
     """Idempotent schema apply."""
     schema = await get_schema_sql()
     await db.executescript(schema)
     await db.commit()
 
+def _hash_password(password_cfg) -> str | None:
+    """
+    Accept a password config block and return a bcrypt hash, or None.
+      {"pass": "plaintext",  "encryption": "none"}   → bcrypt hash
+      {"pass": "$2b$...",    "encryption": "bcrypt"}  → validate + use as-is
+      None / missing / {"pass": null}                 → return None (NULL in DB)
+    """
+    if not password_cfg:
+        return None
+    raw = password_cfg.get("pass") if isinstance(password_cfg, dict) else None
+    if not raw:
+        return None
+    enc = password_cfg.get("encryption", "none").lower() if isinstance(password_cfg, dict) else "none"
+    if enc == "bcrypt":
+        if not raw.startswith(("$2b$", "$2a$", "$2y$")):
+            raise ValueError(f"encryption=bcrypt but value is not a valid bcrypt hash")
+        return raw
+    return bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
 
 async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool = False) -> None:
     """Unified init: config path, schema file, WAL multi-process."""
@@ -52,19 +70,19 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
         await ensure_schema(db)
         log.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
 
-
 async def seed_db(db_path: str, config: dict):
-    """Seed from config.json: subnet, bot record, channels, users."""
+    """Seed from config.json: subnet, bot record, channels, users.
+    Only called via './wbs --seed'. Never called on normal startup.
+    """
     bot_config = config.get('bot', {})
     nick = bot_config['nick']
 
-    # Parse subnet from config — coerce id to int
     subnet_cfg = config.get('subnet', {})
-    subnet_id = int(subnet_cfg.get('id', 1))
+    subnet_id  = int(subnet_cfg.get('id', 1))
     subnet_name = subnet_cfg.get('name', 'default')
 
     async with aiosqlite.connect(db_path) as db:
-        # Subnet must exist before anything references it as a FK
+        # Subnet
         await db.execute("""
             INSERT INTO subnets (id, name, created_by)
             VALUES (?, ?, 'config')
@@ -88,16 +106,47 @@ async def seed_db(db_path: str, config: dict):
                 ON CONFLICT(name) DO NOTHING
             """, (ch, subnet_id))
 
-        # Owner user
-        owner = bot_config.get('owners', ['owner'])[0]
-        await db.execute("""
-            INSERT INTO users (handle, flags, password)
-            VALUES (?, '+fhoimn', '')
-            ON CONFLICT(handle) DO NOTHING
-        """, (owner,))
+        # Users — process the top-level users[] array
+        for user_cfg in config.get('users', []):
+            handle = user_cfg.get('handle')
+            if not handle:
+                log.warning("seed_db: skipping user entry with no handle")
+                continue
+
+            try:
+                pw_hash = _hash_password(user_cfg.get('password'))
+            except ValueError as exc:
+                log.error("seed_db: bad password config for '%s': %s", handle, exc)
+                continue
+
+            # Determine flags from access block
+            flags = '+n'
+            for acc in user_cfg.get('access', []):
+                if acc.get('is_admin'):
+                    flags = '+fhoimn'
+                    break
+                if acc.get('is_op'):
+                    flags = '+omn'
+
+            await db.execute("""
+                INSERT INTO users (handle, flags, password)
+                VALUES (?, ?, ?)
+                ON CONFLICT(handle) DO NOTHING
+            """, (handle, flags, pw_hash))  # pw_hash is None → NULL if no password
+
+            # Host masks
+            for hostmask in user_cfg.get('hosts', []):
+                await db.execute("""
+                    INSERT INTO user_access (handle, hostmask)
+                    VALUES (?, ?)
+                    ON CONFLICT DO NOTHING
+                """, (handle, hostmask))
 
         await db.commit()
-        log.info(f"DB seeded: subnet={subnet_name}(id={subnet_id}), bot={nick}, owner={owner}")
+        log.info(
+            "DB seeded: subnet=%s(id=%d), bot=%s, users=%d",
+            subnet_name, subnet_id, nick, len(config.get('users', []))
+        )
 
 @asynccontextmanager
 async def get_db(db_path: str):
@@ -110,7 +159,6 @@ async def get_db(db_path: str):
         await db.commit()
     finally:
         await db.close()
-
 
 async def init_runtime_state(db_path: str):
     """
@@ -136,7 +184,6 @@ async def init_runtime_state(db_path: str):
         
         await db.commit()
         log.info(f"Runtime state initialized: start_time={start_time}")
-
 
 async def get_runtime(key: str, db_path: str) -> Optional[int]:
     """Get typed runtime value from DB."""
