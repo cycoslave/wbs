@@ -69,19 +69,31 @@ def remove_pidfile(path: str):
 def main():
     args = parse_args()
     if args.mkpasswd:
-        import bcrypt
-        import getpass
-        pw = getpass.getpass("Password: ")
-        pw2 = getpass.getpass("Confirm password: ")
-        if pw != pw2:
-            print("ERROR: passwords do not match.", file=sys.stderr)
-            sys.exit(1)
-        if not pw:
-            print("ERROR: password cannot be empty.", file=sys.stderr)
-            sys.exit(1)
-        hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-        print(hashed)
-        sys.exit(0)
+        logging.basicConfig(level=logging.WARNING)
+    else:
+        try:
+            with open(args.config) as f:
+                _cfg = json.load(f)
+        except Exception:
+            _cfg = {}
+        _log_cfg = _cfg.get('logging', {})
+        _level   = getattr(logging, _log_cfg.get('level', 'INFO').upper(), logging.INFO)
+        _logfile = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
+
+        if args.foreground:
+            logging.basicConfig(
+                level=_level,
+                format='%(asctime)s %(levelname)s %(message)s',
+                stream=sys.stdout
+            )
+        else:
+            os.makedirs(os.path.dirname(_logfile) or '.', exist_ok=True)
+            logging.basicConfig(
+                level=_level,
+                format='%(asctime)s %(levelname)s %(message)s',
+                filename=_logfile,
+                filemode='a'
+            )
     config_path = Path(args.config)
     if not config_path.exists():
         print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
@@ -116,13 +128,6 @@ def main():
     if not args.foreground:
         daemonize(logfile)
         write_pidfile(pidfile)
-        logging.basicConfig(
-            level=getattr(logging, log_cfg.get('level', 'INFO').upper(), logging.INFO),
-            format='%(asctime)s %(levelname)s %(message)s',
-            filename=logfile,
-            filemode='a',
-            force=True
-        )
     try:
         core = Core(args=args)
         asyncio.run(core.run(foreground=args.foreground))
