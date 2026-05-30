@@ -79,6 +79,7 @@ class Core:
         self.bot_sessions = {} 
         self.event_handlers = {}  # type → [plugins]
         self.timers = {}  # name → task
+        self._console_task = None
         self.foreground = False
         self._lag_ping_sent: float | None = None
         self._last_lag_ms: float = 0.0
@@ -416,37 +417,45 @@ class Core:
 
     async def _main_loop_with_console(self):
         """Foreground: console + child events."""
-        console_task = asyncio.create_task(
+        self._console_task = asyncio.create_task(
             Console(self.partyline, self.console_session_id, "console").run()
         )
         last_periodic = time.time()
         try:
-            while not self.quit_event.is_set() and console_task.done() == False:
-                # Drain event buffer
+            while not self.quit_event.is_set():
+                # Exit if console task ended (e.g. EOF / .die)
+                if self._console_task.done():
+                    if not self.quit_event.is_set():
+                        await self._shutdown("Console exited")
+                    break
+
                 events = []
                 with self._buffer_lock:
                     while self._event_buffer:
                         events.append(self._event_buffer.popleft())
+
                 for event in events:
                     if isinstance(event, dict) and event.get('cmd') == 'quit':
                         await self._shutdown(event.get('message', 'Quit'))
-                        self.quit_event.set()
-                        console_task.cancel()
                         return
                     await self.handle_event(event)
-                # Periodic
+
                 if time.time() - last_periodic >= 5.0:
                     await self._periodic_tasks()
                     last_periodic = time.time()
+
                 await asyncio.sleep(0.05)
         finally:
-            console_task.cancel()
+            if self._console_task and not self._console_task.done():
+                self._console_task.cancel()
             try:
-                await console_task
-            except asyncio.CancelledError:
+                await self._console_task
+            except (asyncio.CancelledError, Exception):
                 pass
 
     async def _shutdown(self, message):
+        if self.quit_event.is_set():
+            return  # already shutting down, don't re-enter
         self.running = False
         self.quit_event.set()
         log.info(f"Shutdown: {message}")
@@ -454,15 +463,17 @@ class Core:
             self.irc_q.put_nowait({'cmd': 'quit', 'message': message})
         except Exception:
             pass
-
         await asyncio.sleep(1.5)
         for child in self.children:
             if child.is_alive():
-                child.join(timeout=3.0)
+                child.terminate()          # SIGTERM
+                child.join(timeout=2.0)
                 if child.is_alive():
-                    child.terminate()
+                    child.kill()           # SIGKILL fallback
                     child.join(timeout=1.0)
-        sys.exit(0)
+
+        log.info("All children terminated. Exiting.")
+        os._exit(0)
 
     async def on_command(self, event):
         """
@@ -1003,6 +1014,14 @@ class Core:
     def _setup_signals(self):
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(
-                self._shutdown("Signal received")
-            ))
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: asyncio.create_task(self._handle_signal(s))
+            )
+
+    async def _handle_signal(self, sig):
+        log.info(f"Signal {sig.name} received — shutting down")
+        # Cancel console task first so stdin read unblocks
+        if hasattr(self, '_console_task') and self._console_task:
+            self._console_task.cancel()
+        await self._shutdown("Signal received")

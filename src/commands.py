@@ -1573,7 +1573,7 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
     async with get_db(core.db_path) as db:
         cursor = await db.execute("SELECT * FROM bots WHERE handle = ??", (botname,))
         row = await cursor.fetchone()
-        if not bot:
+        if not row:
             await respond(f"Bot {botname} not found!")
             return
         
