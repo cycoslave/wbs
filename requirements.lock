@@ -125,8 +125,6 @@ requests==2.34.2
     #   whoisit
 rich==15.0.0
     # via typer
-sgmllib3k==1.0.0
-    # via feedparser
 shellingham==1.5.4
     # via typer
 six==1.17.0
