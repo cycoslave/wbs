@@ -595,7 +595,6 @@ class UserManager:
                             is_autoop=?, is_op=?, is_deop=?,
                             is_autohop=?, is_hop=?, is_dehop=?,
                             is_voice=?, is_devoice=?, is_autokick=?,
-                            last_seen=?,
                             updated_at=?, updated_by=?, deleted_at=?
                         WHERE handle=?
                             AND (channel=? OR (channel IS NULL AND ? IS NULL))
@@ -606,7 +605,6 @@ class UserManager:
                             acc.get('is_autoop', 0), acc.get('is_op', 0), acc.get('is_deop', 0),
                             acc.get('is_autohop', 0), acc.get('is_hop', 0), acc.get('is_dehop', 0),
                             acc.get('is_voice', 0), acc.get('is_devoice', 0), acc.get('is_autokick', 0),
-                            acc.get('last_seen'),
                             remote_updated, from_bot, final_deleted,
                             handle, channel, channel, subnet_id, subnet_id
                         )
@@ -619,7 +617,7 @@ class UserManager:
                             is_autoop, is_op, is_deop,
                             is_autohop, is_hop, is_dehop,
                             is_voice, is_devoice, is_autokick,
-                            last_seen, created_at, updated_at, created_by, deleted_at
+                            created_at, updated_at, created_by, deleted_at
                         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             handle, channel, subnet_id,
@@ -628,7 +626,6 @@ class UserManager:
                             acc.get('is_autoop', 0), acc.get('is_op', 0), acc.get('is_deop', 0),
                             acc.get('is_autohop', 0), acc.get('is_hop', 0), acc.get('is_dehop', 0),
                             acc.get('is_voice', 0), acc.get('is_devoice', 0), acc.get('is_autokick', 0),
-                            acc.get('last_seen'),
                             acc.get('created_at', 0), remote_updated, from_bot, remote_deleted
                         )
                     )
@@ -658,7 +655,7 @@ class UserManager:
                         is_autoop, is_op, is_deop,
                         is_autohop, is_hop, is_dehop,
                         is_voice, is_devoice, is_autokick,
-                        last_seen, created_at, updated_at, created_by, deleted_at
+                        created_at, updated_at, created_by, deleted_at
                 FROM user_access"""
             )
             rows = await cursor.fetchall()
