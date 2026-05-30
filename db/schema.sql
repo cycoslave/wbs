@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS bots (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_by TEXT DEFAULT NULL,
     deleted_at INTEGER DEFAULT NULL,
-    deleted_by TEXT DEFAULT NULL,
+    deleted_by TEXT DEFAULT NULL
 );
 
 -- Bot access
