@@ -131,15 +131,15 @@ class BotnetManager:
             log.error(f"Failed to connect to {handle}: {e}")
 
     async def disconnect_peer(self, botname: str):
-            """Disconnect specific bot"""
-            if self.peer_socket and self.connected_bots.get(botname):
-                self.peer_socket.close()
-                self.peer_socket = None
-                del self.connected_bots[botname]
-                self.core.irc_q.put({
-                    'type': 'BOTLINK_UNLINK', 
-                    'handle': botname
-                })
+        link = self.peers.pop(botname.lower(), None)
+        if not link:
+            return
+        if link.writer and not link.writer.is_closing():
+            link.writer.close()
+            await link.writer.wait_closed()
+        self.subnet.unregister_peer(botname)
+        self.core.partyline.broadcast(f"*** {botname} unlinked from botnet", True)
+        log.info(f"Peer {botname} disconnected.")
 
     async def read_peer(self, handle: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Continuously read messages from a peer connection."""
