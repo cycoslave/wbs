@@ -46,5 +46,5 @@ console> .net lag
 2026-05-23 16:36:23,834 ERROR Command 'net' error: 'BotnetManager' object has no attribute 'broadcast'
 Error executing .net
 
-- Botnet Key Exchange Uses Raw SHA-256 for Shared Secret Derivation
-This is a KDF (key derivation), not an auth hash, so length-extension is less of a concern here. However: (a) the entropy of two secrets.token_hex(16) values XOR'd together and hashed is fine, but (b) there is no domain separation — an attacker who can observe both partials on the wire and forge the hash has a direct path. Use hashlib.sha256(f"wbs-keyex:{min_p}:{max_p}".encode()).hexdigest() at minimum, or preferably HKDF
+- schema.sql — hostmasks / bans / invites as JSON Strings
+Storing structured data as JSON blobs (TEXT DEFAULT '[]') in SQLite is functional but unindexed. The index on users.hostmasks (idx_users_hostmasks) won't help with LIKE-style searches. For RC2 this is acceptable, but for production at scale, normalize hostmasks to a proper junction table.
