@@ -6,7 +6,7 @@ An Eggdrop like bot system in Python.
 It is recommended that you use pyenv to create a virtual environment to run WBS.
 Works best with Python 3.12.7.
 
-- Run 'pip install -e .' to install the dependencies
+- Run 'pip install -r requirements.lock' to install the dependencies
 
 
 ## Usage
