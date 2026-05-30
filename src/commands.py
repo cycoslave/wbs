@@ -1960,6 +1960,140 @@ async def cmd_blocklist(core, session_id, args, respond):
                if e.expires_at else "never")
         await respond(f"{e.ip:<18} {e.reason:<14} {e.added_by:<12} {exp:<20} {e.note}")
 
+async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .botattr <bothandle> [+/-<flags>] [key=value ...]
+
+    Flags:
+      +/-a  autolink          (auto-connect on startup/retry loop)
+      +/-h  role=hub
+      +/-b  role=backup
+      +/-l  role=leaf
+      +/-n  role=none
+
+    Key=value pairs (no flag prefix):
+      retry=<seconds>         autolink_retry_interval (15–600)
+      share=full|subnet|none  share_level
+      pass=<password>         bot password
+      comment=<text>          comment field
+
+    .botattr <bothandle>      (no flags) → show current attrs
+    """
+    parts = arg.split()
+    if not parts:
+        await respond("Usage: .botattr <bothandle> [+/-flags] [key=value ...]")
+        return
+
+    target = parts[0]
+    tokens = parts[1:]
+
+    # Verify bot exists
+    async with get_db(core.db_path) as db:
+        row = await db.fetchone(
+            "SELECT * FROM bots WHERE handle = ? AND deleted_at IS NULL", (target,)
+        )
+    if not row:
+        await respond(f"Bot not found: {target}")
+        return
+
+    # No further args → display current attrs
+    if not tokens:
+        role   = row["role"] or "none"
+        share  = row["share_level"] or "subnet"
+        al     = "yes" if row["autolink"] else "no"
+        retry  = row["autolink_retry_interval"] or 60
+        addr   = f"{row['address']}:{row['port']}"
+        flags  = ""
+        if row["autolink"]:        flags += "a"
+        if role == "hub":          flags += "h"
+        elif role == "backup":     flags += "b"
+        elif role == "leaf":       flags += "l"
+        await respond(f"Bot {target}: flags=[{flags or 'none'}] role={role} "
+                      f"share={share} autolink={al} retry={retry}s addr={addr}")
+        return
+
+    # ---- Parse tokens ----
+    flag_updates: dict[str, object] = {}
+    kv_updates:   dict[str, object] = {}
+
+    VALID_SHARE  = {"full", "subnet", "none"}
+    VALID_ROLES  = {"hub", "backup", "leaf", "none"}
+
+    for token in tokens:
+        if token[0] in ("+", "-") and len(token) > 1:
+            adding = token[0] == "+"
+            for ch in token[1:].lower():
+                if ch == "a":
+                    flag_updates["autolink"] = 1 if adding else 0
+                elif ch == "h":
+                    if adding: flag_updates["role"] = "hub"
+                elif ch == "b":
+                    if adding: flag_updates["role"] = "backup"
+                elif ch == "l":
+                    if adding: flag_updates["role"] = "leaf"
+                elif ch == "n":
+                    if adding: flag_updates["role"] = "none"
+                else:
+                    await respond(f"Unknown flag: {ch!r}  (valid: a h b l n)")
+                    return
+        elif "=" in token:
+            k, v = token.split("=", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            if k == "retry":
+                try:
+                    secs = int(v)
+                    if not (15 <= secs <= 600):
+                        await respond("retry must be 15–600 seconds")
+                        return
+                    kv_updates["autolink_retry_interval"] = secs
+                except ValueError:
+                    await respond(f"retry= requires an integer, got: {v!r}")
+                    return
+            elif k == "share":
+                if v not in VALID_SHARE:
+                    await respond(f"share= must be one of: {', '.join(VALID_SHARE)}")
+                    return
+                kv_updates["share_level"] = v
+            elif k == "pass":
+                if len(v) < 8:
+                    await respond("Bot password must be at least 8 characters.")
+                    return
+                kv_updates["password"] = v   # stored plain for botnet auth; hash if desired
+            elif k == "comment":
+                kv_updates["comment"] = v
+            elif k == "role":
+                if v not in VALID_ROLES:
+                    await respond(f"role= must be one of: {', '.join(VALID_ROLES)}")
+                    return
+                kv_updates["role"] = v
+            else:
+                await respond(f"Unknown key: {k!r}  (valid: retry share pass comment role)")
+                return
+        else:
+            await respond(f"Unrecognised token: {token!r}  (use +/-flags or key=value)")
+            return
+
+    all_updates = {**flag_updates, **kv_updates}
+    if not all_updates:
+        await respond("No changes specified.")
+        return
+
+    set_clause = ", ".join(f"{col} = ?" for col in all_updates)
+    values     = list(all_updates.values()) + [target]
+
+    async with get_db(core.db_path) as db:
+        await db.execute(
+            f"UPDATE bots SET {set_clause}, updated_at = strftime('%s','now'), "
+            f"updated_by = ? WHERE handle = ? AND deleted_at IS NULL",
+            values + [handle, target]
+        )
+        await db.commit()
+
+    changes = "  ".join(f"{k}={v}" for k, v in all_updates.items())
+    await respond(f"botattr {target}: {changes}")
+    log.info("botattr: %s updated %s → %s", handle, target, all_updates)
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -2042,6 +2176,7 @@ COMMANDS = {
     'link': cmd_link,
     'unlink': cmd_unlink,
     'chaddr': cmd_chaddr,
+    'botattr': cmd_botattr,
     # ignores    
     '+ignore': cmd_addignore,
     '-ignore': cmd_delignore,

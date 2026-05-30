@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import secrets
-import hashlib
 import hmac
 import ssl as ssl_lib
 import time
@@ -23,6 +22,91 @@ from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
 CLOCK_SKEW_WARN_SECONDS = 30
+
+class AutoLinkManager:
+    """
+    Periodically attempts to connect to peers marked autolink=1 in the DB.
+    Each peer has its own retry interval; connection attempts are jittered
+    slightly to avoid thundering herd on startup.
+    """
+
+    # Hard floor: never retry faster than this regardless of DB setting
+    MIN_RETRY_INTERVAL = 15   # seconds
+    # Cap: don't let DB set absurdly long intervals that mask problems
+    MAX_RETRY_INTERVAL = 600  # seconds
+
+    def __init__(self, botnet_manager: "BotnetManager"):
+        self._mgr = botnet_manager
+        self._running = False
+        self._task: asyncio.Task | None = None
+        # Track next-attempt time per peer handle (epoch float)
+        self._next_attempt: dict[str, float] = {}
+
+    def start(self):
+        """Launch the background loop."""
+        self._running = True
+        self._task = asyncio.create_task(self._loop(), name="autolink-loop")
+        log.info("AutoLinkManager started")
+
+    def stop(self):
+        """Cancel the background loop cleanly."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+        log.info("AutoLinkManager stopped")
+
+    async def _loop(self):
+        """
+        Main loop: polls DB for autolink peers, attempts connection
+        for any that are due and not already connected.
+        """
+        # Short initial delay so botnet manager finishes init
+        await asyncio.sleep(5)
+
+        while self._running:
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("AutoLink loop error: %s", exc, exc_info=True)
+            await asyncio.sleep(5)   # poll granularity
+
+    async def _tick(self):
+        """One pass: check all autolink peers and connect those that are due."""
+        peers_cfg = await self._mgr.bot.get_autolink_peers()
+        now = time.monotonic()
+
+        for peer in peers_cfg:
+            handle = peer["handle"].lower()
+
+            # Already linked and authenticated — skip
+            link = self._mgr.peers.get(handle)
+            if link and link.connected and link.authed:
+                # Reset the backoff counter since we're healthy
+                self._next_attempt.pop(handle, None)
+                continue
+
+            # Not yet due for a retry?
+            if now < self._next_attempt.get(handle, 0):
+                continue
+
+            # Clamp retry interval to safe bounds
+            raw_interval = peer.get("autolink_retry_interval", 60)
+            interval = max(
+                self.MIN_RETRY_INTERVAL,
+                min(raw_interval, self.MAX_RETRY_INTERVAL)
+            )
+
+            log.info("AutoLink: attempting connection to %s", handle)
+            try:
+                await self._mgr.connect_peer(peer["handle"])
+            except Exception as exc:
+                log.warning("AutoLink: connect to %s failed: %s", handle, exc)
+
+            # Schedule next attempt regardless of success/failure.
+            # On success, _tick will see authed=True next pass and skip.
+            self._next_attempt[handle] = now + interval
 
 @dataclass
 class BotLink:
@@ -68,12 +152,15 @@ class BotnetManager:
         # Settings
         self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
         self.my_handle = self.config.get('bot', {}).get('nick', 'WBS')
+        self.autolink = AutoLinkManager(self)
+        self.autolink.start()
         self.running = True
         self.loop = None
         
     def stop(self):
         """Shutdown."""
         self.running = False
+        self.autolink.stop()
         for _, writer in self.peers.values():
             writer.close()
 

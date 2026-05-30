@@ -75,6 +75,7 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "net": "A",
     "subnet": "A",
     "relay": "A",
+    "botattr": "A",
 
     # Channel list / lifecycle
     "channels": "A",

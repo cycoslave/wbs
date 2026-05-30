@@ -283,6 +283,21 @@ class BotManager:
             )
         return [row["handle"] for row in rows]
     
+    async def get_autolink_peers(self) -> list[dict]:
+        """Return all bots configured for auto-linking."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT handle, address, port, autolink_retry_interval
+                FROM bots
+                WHERE autolink = 1
+                AND deleted_at IS NULL
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
     async def merge_from_peer(self, bots: list[dict], from_bot: str) -> None:
         """
         Merge bot records received from a botnet peer.

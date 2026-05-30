@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS bots (
     port INTEGER NOT NULL DEFAULT 3333,
     role TEXT CHECK(role IN ('hub', 'backup', 'leaf', 'none')) DEFAULT 'none',
     share_level TEXT DEFAULT 'subnet', -- full/subnet/none
+    autolink BOOLEAN DEFAULT 0,  -- 1 = attempt
+    autolink_retry_interval INTEGER DEFAULT 60,
     comment TEXT DEFAULT '',
     subnet_id INTEGER DEFAULT NULL,  -- what subnet is this bot part of
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS bots (
     updated_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_by TEXT DEFAULT NULL,
     deleted_at INTEGER DEFAULT NULL,
-    deleted_by TEXT DEFAULT NULL
+    deleted_by TEXT DEFAULT NULL,
 );
 
 -- Bot access
