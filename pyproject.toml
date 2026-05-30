@@ -5,9 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "wbs"
 version = "6.0.0"
-description = "Python-based IRC bot with multiprocessing and botnet support (WBS)"
+description = "Fast Python-based IRC bot with multiprocessing and botnet support (WBS)"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = [
   "irc>=20.0.0",
   "aiosqlite>=0.19.0",

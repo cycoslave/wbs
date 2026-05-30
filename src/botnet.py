@@ -145,7 +145,12 @@ class BotnetManager:
         """Continuously read messages from a peer connection."""
         try:
             while self.running:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except asyncio.LimitOverrunError:
+                    await reader.read(4096)  # drain
+                    log.warning(f"Oversized line from {handle}, discarding")
+                    continue
                 if not line:
                     log.info(f"Connection closed by {handle}")
                     break
