@@ -103,7 +103,7 @@ async def seed_db(db_path: str, config: dict):
             INSERT INTO bots (handle, address, port, subnet_id, created_by)
             VALUES (?, '127.0.0.1', 3333, ?, 1)
             ON CONFLICT(handle) DO UPDATE SET
-                subnet_id = excluded.subnet_id,
+                subnet_id = excluded.subnet_id
         """, (nick, subnet_id))
 
         # Channels
