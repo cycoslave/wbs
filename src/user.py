@@ -525,6 +525,14 @@ class UserManager:
                     if remote_deleted is None and existing[1] and existing[1] > remote_updated:
                         final_deleted = existing[1]  # Keep more-recent local delete
 
+                    pw = user.get('password')
+                    if pw is not None and not pw.startswith(('$2b$', '$2a$', '$2y$')):
+                        log.warning("merge_from_peer: rejecting non-bcrypt password for %s from %s", handle, from_bot)
+                        # Keep existing local password — fetch it
+                        cur2 = await db.execute("SELECT password FROM users WHERE handle = ?", (handle,))
+                        existing_pw = await cur2.fetchone()
+                        pw = existing_pw[0] if existing_pw else None
+
                     await db.execute(
                         """UPDATE users SET
                             password = ?, hostmasks = ?, is_locked = ?, comment = ?,
