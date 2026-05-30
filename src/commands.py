@@ -1037,9 +1037,8 @@ async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
     else:
         # Named subnet — look it up
         async with get_db(core.db_path) as db:
-            row = await db.fetchone(
-                "SELECT id FROM subnets WHERE name = ?", (subnet_arg,)
-            )
+            cursor = await db.execute("SELECT id FROM subnets WHERE name = ?", (subnet_arg,))
+            row = await cursor.fetchone()
         if not row:
             await respond(f"Unknown subnet: {subnet_arg}")
             return
@@ -1100,9 +1099,8 @@ async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
         subnet_id = None  # Global
     else:
         async with get_db(core.db_path) as db:
-            row = await db.fetchone(
-                "SELECT id FROM subnets WHERE name = ?", (subnet_arg,)
-            )
+            cursor = await db.execute("SELECT id FROM subnets WHERE name = ?", (subnet_arg,))
+            row = await cursor.fetchone()
         if not row:
             await respond(f"Unknown subnet: {subnet_arg}")
             return
@@ -1572,10 +1570,9 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
     botname = parts[0]
     address = parts[1]
     port = int(parts[2]) if len(parts) > 2 else 3333
-    
     async with get_db(core.db_path) as db:
-        # Verify bot exists
-        bot = await db.fetchone("SELECT * FROM bots WHERE handle = ?", (botname,))
+        cursor = await db.execute("SELECT * FROM bots WHERE handle = ??", (botname,))
+        row = await cursor.fetchone()
         if not bot:
             await respond(f"Bot {botname} not found!")
             return
@@ -2522,9 +2519,8 @@ async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
 
     # Verify bot exists
     async with get_db(core.db_path) as db:
-        row = await db.fetchone(
-            "SELECT * FROM bots WHERE handle = ? AND deleted_at IS NULL", (target,)
-        )
+        cursor = await db.execute("SELECT * FROM bots WHERE handle = ? AND deleted_at IS NULL", (target,))
+        row = await cursor.fetchone()
     if not row:
         await respond(f"Bot not found: {target}")
         return

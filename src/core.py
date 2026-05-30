@@ -98,7 +98,7 @@ class Core:
         irc_proc = mp.Process(
             target=irc_process_launcher,
             args=(self.config, self.core_q, self.irc_q, os.getpid()),
-            daemon=True,
+            daemon=False,
             name="IRC"
         )
         irc_proc.start()
@@ -384,6 +384,8 @@ class Core:
                     self._event_buffer.append(msg)
             except mp.queues.Empty:
                 pass
+            except (OSError, EOFError):
+                break
 
     async def _main_loop(self):
         """Core event loop: drain buffer, handle events, periodic tasks."""
@@ -448,15 +450,12 @@ class Core:
         self.running = False
         self.quit_event.set()
         log.info(f"Shutdown: {message}")
-        
-        # Send quit to irc child
-        quit_msg = {'cmd': 'quit', 'message': message}
         try:
-            self.irc_q.put_nowait(quit_msg)
-        except:
+            self.irc_q.put_nowait({'cmd': 'quit', 'message': message})
+        except Exception:
             pass
 
-        # Wait for children
+        await asyncio.sleep(1.5)
         for child in self.children:
             if child.is_alive():
                 child.join(timeout=3.0)
