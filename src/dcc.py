@@ -118,17 +118,20 @@ class DCCManager:
         port_min        int     — port range for active listen (default: 1024)
         port_max        int     — port range for active listen (default: 65535)
         max_sessions    int     — concurrent DCC sessions cap (default: 10)
+        listen_ip       str     — interface to bind the active DCC listener (default: '0.0.0.0' — all interfaces)
     """
 
     def __init__(self, core):
         self.core       = core
         self.cfg        = core.config.get('dcc', {})
+        self.settings = core.config.get('settings', {})
         self.enabled    = self.cfg.get('enabled', True)
         self.mode       = self.cfg.get('mode', 'auto')          # auto|active|passive|irc
         self.public_ip  = self.cfg.get('public_ip') or None
         self.port_min   = int(self.cfg.get('port_min', 1024))
         self.port_max   = int(self.cfg.get('port_max', 65535))
         self.max_sessions = int(self.cfg.get('max_sessions', 10))
+        self.listen_ip = self.settings.get('listen_host') or '0.0.0.0'
 
         # pending passive tokens: token → {'nick': str, 'future': Future}
         self._passive_pending: Dict[str, dict] = {}
@@ -242,10 +245,9 @@ class DCCManager:
             await self._irc_notice(nick, "DCC: no free port available.")
             return
 
-        # Start one-shot listener
         server = await asyncio.start_server(
             lambda r, w: asyncio.create_task(self._accept_active(nick, r, w, server)),
-            '0.0.0.0', port
+            self.listen_ip, port
         )
 
         ip_int = _ip_to_int(self.public_ip)
@@ -385,7 +387,7 @@ class DCCManager:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
-                    s.bind(('0.0.0.0', port))
+                    s.bind((self.listen_ip, port))
                     return port
                 except OSError:
                     continue
