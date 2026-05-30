@@ -1824,7 +1824,6 @@ async def cmd_addleaf(core, handle: str, session_id: int, arg: str, respond):
     else:
         await respond(f"Bot {botnick} already exists. Use .chaddr to update.")
 
-
 async def cmd_addhub(core, handle: str, session_id: int, arg: str, respond):
     """
     .addhub <botnick> <host> <port>
@@ -1890,6 +1889,76 @@ async def cmd_update(session, args):
         session.reply("Update installed. Restart the bot to load new code.")
     else:
         session.reply("Update failed — rolled back to previous version. Check logs.")        
+
+async def cmd_denyhost(core, session_id, args, respond):
+    """
+    .denyhost <ip|hostname> [duration_minutes] [reason]
+    Block an IP from connecting to the partyline.
+    Duration 0 or omitted = permanent.
+    Requires: master flag (n)
+    """
+    parts = args.split(None, 2)
+    if not parts:
+        await respond("Usage: .denyhost <ip> [minutes] [reason]")
+        return
+
+    ip = parts[0]
+    minutes = 0
+    note = ""
+    if len(parts) >= 2:
+        try:
+            minutes = int(parts[1])
+        except ValueError:
+            note = parts[1]
+    if len(parts) == 3:
+        note = parts[2]
+
+    expires = int(time.time()) + minutes * 60 if minutes > 0 else 0
+    caller = core.partyline.sessions[session_id].handle
+
+    await core.guard.block(
+        ip=ip, reason="manual", added_by=caller,
+        expires_at=expires, note=note
+    )
+    duration_str = f"for {minutes}m" if minutes > 0 else "permanently"
+    await respond(f"Blocked {ip} {duration_str}.")
+
+async def cmd_permithost(core, session_id, args, respond):
+    """
+    .permithost <ip>
+    Remove an IP from the blocklist.
+    Requires: master flag (n)
+    """
+    ip = args.strip()
+    if not ip:
+        await respond("Usage: .permithost <ip>")
+        return
+
+    caller = core.partyline.sessions[session_id].handle
+    removed = await core.guard.unblock(ip, removed_by=caller)
+    if removed:
+        await respond(f"Unblocked {ip}.")
+    else:
+        await respond(f"{ip} was not in the blocklist.")
+
+async def cmd_blocklist(core, session_id, args, respond):
+    """
+    .blocklist
+    Show all current blocklist entries.
+    Requires: master flag (n)
+    """
+    import datetime
+    entries = core.guard.list_blocked()
+    if not entries:
+        await respond("Blocklist is empty.")
+        return
+
+    await respond(f"{'IP':<18} {'Reason':<14} {'By':<12} {'Expires':<20} Note")
+    await respond("-" * 72)
+    for e in sorted(entries, key=lambda x: x.added_at):
+        exp = (datetime.datetime.fromtimestamp(e.expires_at).strftime("%Y-%m-%d %H:%M")
+               if e.expires_at else "never")
+        await respond(f"{e.ip:<18} {e.reason:<14} {e.added_by:<12} {exp:<20} {e.note}")
 
 # Command registry
 COMMANDS = {
@@ -1990,5 +2059,9 @@ COMMANDS = {
     'gsessions': cmd_gsessions,
     # updates
     'checkupdate': cmd_checkupdate,
-    'update': cmd_update
+    'update': cmd_update,
+    # block/allow list
+    'blocklist': cmd_blocklist,
+    'permithost': cmd_permithost,
+    'denyhost': cmd_denyhost
 }

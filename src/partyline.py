@@ -43,6 +43,11 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "restart": "A",
     "backup": "A",
     "status": "A",
+    "checkupdate": "A",
+    "update": "A",
+    "blocklist": "A",
+    "permithost": "A",
+    "denyhost": "A",
 
     # User / access management
     "chattr": "A",

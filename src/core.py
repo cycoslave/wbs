@@ -19,6 +19,7 @@ from collections import deque
 
 from . import __version__
 from .db import init_db, get_db
+from .net import AccessGuard
 from .net import NetListener
 from .channel import ChannelManager, Channel
 from .user import UserManager
@@ -54,7 +55,8 @@ class Core:
         self.quit_event = mp.Event()
         
         # Managers
-        self.net_listener = NetListener(self.core_q, config=self.config)
+        self.guard = AccessGuard(db_path=self.db_path, config=self.config)
+        self.net_listener = NetListener(self.core_q, config=self.config, access_guard=self.guard)
         self.user = UserManager(self.db_path)
         self.bot = BotManager(self.db_path)
         self.botnet = BotnetManager(self)
@@ -87,6 +89,7 @@ class Core:
     async def _async_init(self):
         """One-time async initialization."""
         await init_db(self.db_path) 
+        await self.guard.load()
         await self.botnet.subnet.load()
         await self._seed_modules()
         await self._autoload_modules()     

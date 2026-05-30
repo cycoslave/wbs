@@ -178,6 +178,16 @@ CREATE TABLE IF NOT EXISTS channel_subnets (
     FOREIGN KEY (subnet_id)    REFERENCES subnets(id)    ON DELETE CASCADE
 );
 
+-- Access control
+CREATE TABLE IF NOT EXISTS net_blocklist (
+    ip          TEXT    NOT NULL PRIMARY KEY,
+    reason      TEXT    NOT NULL DEFAULT 'manual',
+    added_by    TEXT    NOT NULL DEFAULT 'system',
+    added_at    INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL DEFAULT 0,  -- 0 = permanent
+    note        TEXT    NOT NULL DEFAULT ''
+);
+
 -- Runtime
 CREATE TABLE IF NOT EXISTS runtime (
     key TEXT PRIMARY KEY,
@@ -252,6 +262,9 @@ CREATE INDEX IF NOT EXISTS idx_ignores_hostmask ON ignores(hostmask);
 -- Modules
 CREATE INDEX IF NOT EXISTS idx_loaded_modules_type   ON loaded_modules(name, type);
 CREATE INDEX IF NOT EXISTS idx_game_sessions_lookup  ON game_sessions(game_name, scope, target);
+
+-- Access control
+CREATE INDEX IF NOT EXISTS idx_blocklist_expires ON net_blocklist (expires_at) WHERE expires_at > 0;
 
 -- =====================================================
 -- TRIGGERS - PERFORMANCE & INTEGRITY

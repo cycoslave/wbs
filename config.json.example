@@ -62,6 +62,11 @@
     "certfile": "wbs.crt",
     "keyfile":  "wbs.key",
     "auto_update": false,
-    "irc_throttle_ms": 100
+    "irc_throttle_ms": 100,
+    "access_mode": "blacklist",
+    "max_failures": 5,
+    "lockout_seconds": 300,
+    "handshake_timeout": 30,
+    "max_connections": 10
   }
 }
