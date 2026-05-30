@@ -274,7 +274,7 @@ class UserManager:
         return None
 
     async def set_password(self, handle: str, password: str):
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else ''
+        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else None
         async with get_db(self.db_path) as db:
             await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
             await db.commit()
