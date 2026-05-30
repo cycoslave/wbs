@@ -102,10 +102,6 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "gsessions": "A",
 }
 
-# Default minimum flag for commands not explicitly listed above.
-DEFAULT_MIN_FLAG = "p"
-
-
 class Partyline:
     """Central partyline hub - runs in core process, manages all sessions"""
     
@@ -217,7 +213,12 @@ class Partyline:
         if not is_console:
             # Map command to minimum required flag; fall back to +p for
             # commands that are not explicitly listed.
-            required_flag = COMMAND_MIN_FLAGS.get(cmd, DEFAULT_MIN_FLAG)
+            if cmd not in COMMAND_MIN_FLAGS:
+                self.send_to_session(session_id, f"Unknown command .{cmd}   (Type .help)")
+                log.warning("Blocked unknown command .%s from %s (not in COMMAND_MIN_FLAGS)", cmd, handle)
+                return
+
+            required_flag = COMMAND_MIN_FLAGS[cmd]
 
             if required_flag:
                 # matchattr defaults to positive semantics when no +/- prefix
