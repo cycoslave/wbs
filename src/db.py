@@ -54,8 +54,9 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
     
     async with aiosqlite.connect(db_path_obj) as db:
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")  # Multi-process safe
-        await db.execute("PRAGMA synchronous=NORMAL")  # Perf
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.commit()
         
         if force:
@@ -154,9 +155,13 @@ async def get_db(db_path: str):
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA foreign_keys = ON")
     try:
         yield db
         await db.commit()
+    except:
+        await db.rollback()
+        raise
     finally:
         await db.close()
 
