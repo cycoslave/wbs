@@ -25,261 +25,794 @@ log = logging.getLogger("wbs.commands")
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
-    # Extract the command (second word)
     words = arg.split()
     if len(words) < 1:
-        help_text = """
+        help_text = """\
 .: Wicked Bot System Help :.
    For all users:
-      help
-      date         time         uptime       version
-      who          quit         whom         chpass
-      handle       whoami       -host         
-   For ops:
-      mode         say          msg          op
-      deop         voice        devoice
-   For admins:
-      chattr       backup       status       die
-      modules      +user        +ignore      ignores      
-      -user        -ignore      restart      addleaf
-      +bot         botattr      chhandle     relay
-      +host        -bot         link         chaddr
-      unlink       update       channels     addhub
-      bots         join         part         subnet
-      lock         unlock       topiclock    topicunlock
-      taskset      timers       tasks        botinfo 
-      nopass       fixpass      mass         net
-      baway        bback        nick         lag 
-      infoleaf       
+      help         date         time         uptime
+      version      whoami       who          whom
+      whois        handle       chpass       quit
 
-All commands begin with '.', and all else goes to the party line.      
+   For ops:
+      mode         say          msg          act
+      op           deop         voice        devoice
+
+   For admins:
+      chattr       chhandle     chpass       backup
+      status       die          restart      nick
+      baway        bback        lag          botinfo
+
+   User management:
+      +user        -user        users        userinfo
+      chusercomment addaccess   delaccess    lockuser
+      unlockuser   +host        -host        nopass
+      fixpass
+
+   Channel management:
+      +chan        -chan        channels     chaninfo
+      join         part         lockchan     unlockchan
+      topiclock    topicunlock  mode
+
+   Bot/Botnet management:
+      +bot         -bot         bots         botattr
+      link         unlink       chaddr       relay
+      infoleaf     addleaf      addhub       subnet
+      net          mass
+
+   Ignore management:
+      +ignore      -ignore      ignores
+
+   Security:
+      denyhost     permithost   blocklist
+
+   Plugins & Games:
+      plugins      load         unload
+      games        gload        gunload
+      gstart       gstop        gsessions
+
+   IRC server tools:
+      sdns         swhois       swhowas      links
+
+   Tasks & Timers:
+      taskset      tasks        timers
+
+   Updates:
+      checkupdate  update
+
+All commands begin with '.', and all else goes to the party line.
 """
         for line in help_text.split('\n'):
             await respond(line)
         return
 
     cmd = words[0].lower()
-    if cmd == "date":
-        help_text = """
-###  date
-    Shows the current date and time.
 
-See also: time
+    if cmd == "help":
+        help_text = """\
+###  help [command]
+    Shows help. Optionally specify a command name for detailed help.
 """
 
-    elif cmd == "time":
-        help_text = """
-###  time
+    elif cmd == "date" or cmd == "time":
+        help_text = """\
+###  date / time
     Shows the current date and time.
-
-See also: date
 """
 
     elif cmd == "uptime":
-        help_text = """
+        help_text = """\
 ###  uptime
-    Shows the uptime of the bot.
+    Shows how long the bot has been running.
 """
 
     elif cmd == "version":
-        help_text = """
+        help_text = """\
 ###  version
     Shows the current version of the bot system.
 """
 
+    elif cmd == "whoami":
+        help_text = """\
+###  whoami
+    Shows your current handle and bot name.
+"""
+
+    elif cmd == "who":
+        help_text = """\
+###  who
+    Lists all users currently on the party line and connected bots.
+
+See also: whom
+"""
+
+    elif cmd == "whom":
+        help_text = """\
+###  whom
+    Shows party line members with their nick, bot, and host.
+
+See also: who
+"""
+
+    elif cmd == "whois":
+        help_text = """\
+###  whois <handle>
+    Shows detailed info for a user: flags, hostmasks, and access.
+
+See also: userinfo, users
+"""
+
+    elif cmd == "handle":
+        help_text = """\
+###  handle <new-handle>
+    Changes your own party line handle.
+
+See also: chhandle
+"""
+
+    elif cmd == "chpass":
+        help_text = """\
+###  chpass [user] <password>
+    Changes a password. With one argument, changes your own password.
+    With two arguments (requires +A), changes another user's password.
+    Password must be at least 8 characters.
+
+See also: nopass, fixpass
+"""
+
+    elif cmd == "quit":
+        help_text = """\
+###  quit [message]
+    Disconnects the bot from IRC and shuts it down.
+
+See also: die, restart
+"""
+
+    elif cmd == "die":
+        help_text = """\
+###  die [message]
+    Alias for quit. Disconnects the bot from IRC and shuts it down.
+
+See also: quit, restart
+"""
+
     elif cmd == "mode":
-        help_text = """
-###  mode <channel> <arguments>
-    Sets mode on a channel.
+        help_text = """\
+###  mode <#channel> <modes>
+    Sets modes on a channel.
+    Example: .mode #wbs +m
+
+See also: op, deop, voice, devoice
 """
 
-    elif cmd == "mnote":
-        help_text = """
-###  mnote <flag> \\[channel\\] <message>
-    Sends a private note to users with a certain flag on the party line.
+    elif cmd == "say" or cmd == "msg":
+        help_text = """\
+###  say <target> <message>
+###  msg <target> <message>
+    Sends a message to a channel or nick.
+    Example: .say #wbs Hello world
 
-See also: note, notes
+See also: act
 """
 
-    elif cmd == "bots":
-        help_text = """
-###  bots
-    Shows botnet information.
+    elif cmd == "act":
+        help_text = """\
+###  act <#channel> <action>
+    Sends a CTCP ACTION (/me) to a channel.
+    Example: .act #wbs waves hello
+
+See also: say, msg
 """
 
-    elif cmd == "lock":
-        help_text = """
-###  lock <channel> \\[reason\\]
-    Locks a channel.
+    elif cmd == "op":
+        help_text = """\
+###  op <nick> <#channel>
+    Gives channel operator status to a nick.
 
-See also: unlock
+See also: deop, mode, mass
 """
 
-    elif cmd == "unlock":
-        help_text = """
-###  unlock <channel>
-    Unlocks a channel.
+    elif cmd == "deop":
+        help_text = """\
+###  deop <nick> <#channel>
+    Removes channel operator status from a nick.
 
-See also: lock
+See also: op, mode, mass
 """
 
-    elif cmd == "topiclock":
-        help_text = """
-###  topiclock <channel> \\[topic\\]
-    Locks the topic of a channel.
+    elif cmd == "voice":
+        help_text = """\
+###  voice <nick> <#channel>
+    Gives voice status to a nick.
+
+See also: devoice, mode
 """
 
-    elif cmd == "sdns":
-        help_text = """
-###  sdns <ip/host>
-    Performs dns resolution on the bot's server.
+    elif cmd == "devoice":
+        help_text = """\
+###  devoice <nick> <#channel>
+    Removes voice status from a nick.
+
+See also: voice, mode
 """
 
-    elif cmd == "swhois":
-        help_text = """
-###  swhois <nickname>
-    Performs whois on the bot's server.
+    elif cmd == "chattr":
+        help_text = """\
+###  chattr <user> [#channel] +/-<flags>
+    Changes user flags. Global if no channel given, channel-specific otherwise.
+    Flags: A=admin P=partyline O=op V=voice F=friend D=deop E=devoice
+    Example: .chattr bob +A
+    Example: .chattr bob #wbs +O
+
+See also: +user, userinfo
 """
 
-    elif cmd == "swhowas":
-        help_text = """
-###  swhowas <nickname>
-    Performs whowas on the bot's server.
+    elif cmd == "chhandle":
+        help_text = """\
+###  chhandle <oldhandle> <newhandle>
+    Changes another user's handle (admin).
+
+See also: handle
 """
 
-    elif cmd == "links":
-        help_text = """
-###  links
-    Shows all the servers linked to the network.
+    elif cmd == "backup":
+        help_text = """\
+###  backup
+    Backs up the database and config file with a timestamped filename.
 """
 
-    elif cmd == "taskset":
-        help_text = """
-###  taskset <task> <0/1>
-    Configures tasks to enable or disable them.
+    elif cmd == "status":
+        help_text = """\
+###  status
+    Shows bot status: uptime, memory usage, active channels, PID, OS.
+
+See also: botinfo, uptime
 """
 
-    elif cmd == "timers":
-        help_text = """
-###  timers
-    Shows all the timers on the bot.
+    elif cmd == "restart":
+        help_text = """\
+###  restart
+    Restarts the bot process.
+
+See also: quit, die
 """
 
-    elif cmd == "tasks":
-        help_text = """
-###  tasks
-    Shows all the tasks configured.
-"""
-
-    elif cmd == "botinfo":
-        help_text = """
-###  botinfo
-    Shows bot information.
-"""
-
-    elif cmd == "nopass":
-        help_text = """
-###  nopass
-    Shows all the users without a password.
-
-See also: fixpass
-"""
-
-    elif cmd == "fixpass":
-        help_text = """
-###  fixpass
-    Sets random passwords to all users without one.
-
-See also: nopass
-"""
-
-    elif cmd == "mass":
-        help_text = """
-###  mass <command> \\[arguments\\]
-    Does mass commands.
-    Valid commands are: op deop
-"""
-
-    elif cmd == "net":
-        help_text = """
-###  net <channel> \\[topic\\]
-    Does commands at the botnet level.
-    Valid commands are: op deop save rehash restart chanset die chanfix chanset mode join part msg
+    elif cmd == "nick":
+        help_text = """\
+###  nick [newnick]
+    Shows the bot's current nick, or changes it if a new nick is given.
 """
 
     elif cmd == "baway":
-        help_text = """
-###  baway \\[reason\\]
-    Puts the bot in away mode.
+        help_text = """\
+###  baway [reason]
+    Puts the bot in IRC away mode.
 
 See also: bback
 """
 
     elif cmd == "bback":
-        help_text = """
+        help_text = """\
 ###  bback
-    Brings the bot back from away mode.
+    Returns the bot from IRC away mode.
 
 See also: baway
 """
 
-    elif cmd == "nick":
-        help_text = """
-###  nick \\[nick\\]
-    Configures the bot's nickname.
+    elif cmd == "lag":
+        help_text = """\
+###  lag
+    Shows the current measured lag to the IRC server in milliseconds.
 """
 
-    elif cmd == "lag":
-        help_text = """
-###  lag
-    Shows the botnet latency.
+    elif cmd == "botinfo":
+        help_text = """\
+###  botinfo
+    Shows bot system info: PID, working directory, OS, machine type.
+
+See also: status
+"""
+
+    elif cmd == "+user":
+        help_text = """\
+###  +user <handle> [hostmask] [subnet|*]
+    Adds a new user. Optionally set a hostmask and subnet scope.
+    Use '*' for global access (valid on all subnets).
+
+See also: -user, userinfo, chattr
+"""
+
+    elif cmd == "-user":
+        help_text = """\
+###  -user <handle>
+    Removes a user.
+
+See also: +user
+"""
+
+    elif cmd == "users":
+        help_text = """\
+###  users
+    Lists all users in the database.
+
+See also: whois, userinfo
+"""
+
+    elif cmd == "userinfo":
+        help_text = """\
+###  userinfo <handle>
+    Shows detailed info for a user.
+
+See also: whois, users
+"""
+
+    elif cmd == "chusercomment":
+        help_text = """\
+###  chusercomment <user> <comment>
+    Sets a comment on a user record.
+"""
+
+    elif cmd == "addaccess":
+        help_text = """\
+###  addaccess [options] <user> <access>
+    Adds access flags to a user.
+
+See also: delaccess, chattr
+"""
+
+    elif cmd == "delaccess":
+        help_text = """\
+###  delaccess [options] <user> <access>
+    Removes access flags from a user.
+
+See also: addaccess, chattr
+"""
+
+    elif cmd == "lockuser":
+        help_text = """\
+###  lockuser <user>
+    Locks a user account, preventing login.
+
+See also: unlockuser
+"""
+
+    elif cmd == "unlockuser":
+        help_text = """\
+###  unlockuser <user>
+    Unlocks a previously locked user account.
+
+See also: lockuser
+"""
+
+    elif cmd == "+host":
+        help_text = """\
+###  +host <hostmask>
+    Adds a hostmask to your user record. Format: nick!user@host
+    Wildcards are supported (e.g. *!user@*.example.com).
+
+See also: -host
+"""
+
+    elif cmd == "-host":
+        help_text = """\
+###  -host <hostmask>
+    Removes a hostmask from your user record.
+
+See also: +host
+"""
+
+    elif cmd == "nopass":
+        help_text = """\
+###  nopass
+    Lists all users that do not have a password set.
+
+See also: fixpass, chpass
+"""
+
+    elif cmd == "fixpass":
+        help_text = """\
+###  fixpass
+    Assigns a random 12-character password to all users without one.
+    Passwords are displayed once — users should change immediately with .chpass.
+
+See also: nopass, chpass
+"""
+
+    elif cmd == "+chan":
+        help_text = """\
+###  +chan <#channel> [subnet|*]
+    Adds a channel for the bot to join. Optionally bind to a subnet.
+    Use '*' for global (no subnet binding).
+
+See also: -chan, channels, chaninfo
+"""
+
+    elif cmd == "-chan":
+        help_text = """\
+###  -chan <#channel>
+    Removes a channel and makes the bot part it.
+
+See also: +chan, channels
+"""
+
+    elif cmd == "channels":
+        help_text = """\
+###  channels
+    Lists all active channels the bot is configured to be in.
+
+See also: +chan, -chan, chaninfo
+"""
+
+    elif cmd == "chaninfo":
+        help_text = """\
+###  chaninfo <#channel>
+    Shows settings and info for a channel.
+
+See also: channels, lockchan, topiclock
+"""
+
+    elif cmd == "join":
+        help_text = """\
+###  join <#channel> [key]
+    Makes the bot join a channel.
+
+See also: part
+"""
+
+    elif cmd == "part":
+        help_text = """\
+###  part <#channel> [reason]
+    Makes the bot leave a channel.
+
+See also: join
+"""
+
+    elif cmd == "lockchan":
+        help_text = """\
+###  lockchan <#channel>
+    Locks a channel, preventing configuration changes.
+
+See also: unlockchan
+"""
+
+    elif cmd == "unlockchan":
+        help_text = """\
+###  unlockchan <#channel>
+    Unlocks a previously locked channel.
+
+See also: lockchan
+"""
+
+    elif cmd == "topiclock":
+        help_text = """\
+###  topiclock <#channel> [topic]
+    Locks the topic on a channel. Optionally sets the locked topic.
+
+See also: topicunlock
+"""
+
+    elif cmd == "topicunlock":
+        help_text = """\
+###  topicunlock <#channel>
+    Unlocks the topic on a channel.
+
+See also: topiclock
+"""
+
+    elif cmd == "+bot":
+        help_text = """\
+###  +bot <botnick> [hostmask] [address] [port]
+    Adds a bot to the botnet database.
+
+See also: -bot, botattr, link
+"""
+
+    elif cmd == "-bot":
+        help_text = """\
+###  -bot <botnick>
+    Removes a bot from the botnet database.
+
+See also: +bot
+"""
+
+    elif cmd == "bots":
+        help_text = """\
+###  bots
+    Shows currently linked bots.
+
+See also: link, unlink, botattr
+"""
+
+    elif cmd == "botattr":
+        help_text = """\
+###  botattr <botnick> [+/-flags] [key=value ...]
+    Views or changes bot attributes.
+    Flags: +/-a (autolink)  +/-h (hub)  +/-b (backup)  +/-l (leaf)  +/-n (none)
+    Keys:  retry=<seconds>  share=full|subnet|none  pass=<password>  comment=<text>  role=<role>
+    With no flags/keys, shows current attributes.
+
+See also: +bot, chaddr, link
+"""
+
+    elif cmd == "link":
+        help_text = """\
+###  link <botnick>
+    Initiates a botnet connection to a bot. Bot must have address and port set.
+
+See also: unlink, +bot, chaddr
+"""
+
+    elif cmd == "unlink":
+        help_text = """\
+###  unlink <botnick>
+    Disconnects from a linked bot.
+
+See also: link
+"""
+
+    elif cmd == "chaddr":
+        help_text = """\
+###  chaddr <botnick> <address> [port]
+    Updates the address and port for a bot. Default port: 3333.
+
+See also: +bot, botattr, link
+"""
+
+    elif cmd == "relay":
+        help_text = """\
+###  relay <botnick> [command]
+    Relays your party line session to another bot, or runs a single remote command.
+    Type '.relay' with no arguments to disconnect from the current relay.
+
+See also: link, net
 """
 
     elif cmd == "infoleaf":
-        help_text = """
+        help_text = """\
 ###  infoleaf
-    Gives the command to add this bot as a leaf on the hub.
+    Displays the command to add this bot as a leaf on another bot's hub.
 
 See also: addleaf, addhub
 """
 
     elif cmd == "addleaf":
-        help_text = """
+        help_text = """\
 ###  addleaf <botnick> <host> <port>
-    Adds a leaf bot to the botnet's hub, then gives the command to add the hub.
+    Registers a leaf bot and prints the reciprocal addhub command to run on it.
 
-See also: infoleaf, addhub
+See also: infoleaf, addhub, link
 """
 
     elif cmd == "addhub":
-        help_text = """
+        help_text = """\
 ###  addhub <botnick> <host> <port>
-    Adds the botnet's hub on a botnet leaf.
+    Registers a hub bot to connect to. Use .link to connect after adding.
 
-See also: infoleaf, addleaf
+See also: infoleaf, addleaf, link
 """
 
     elif cmd == "subnet":
-        help_text = """
-###  subnet <command> \\[arguments\\]
-    Configures the bot's subnet.
-    Valid commands are: set list help
+        help_text = """\
+###  subnet <list|set> [args]
+    Manages botnet subnets.
+    subnet list               - lists all configured subnets
+    subnet set <name> <key> <value>  - updates a subnet field (hub_host, hub_port, name)
+
+See also: bots, link
+"""
+
+    elif cmd == "net":
+        help_text = """\
+###  net <subcmd> [args]
+    Executes a command at the botnet level (broadcasts to all linked bots and runs locally).
+    Valid subcommands: op deop say msg join part mode restart die
+
+See also: relay, mass
+"""
+
+    elif cmd == "mass":
+        help_text = """\
+###  mass <op|deop> <#channel>
+    Mass ops or deops all users in a channel.
+
+See also: op, deop, net
+"""
+
+    elif cmd == "+ignore":
+        help_text = """\
+###  +ignore <hostmask> [%<duration>] [comment]
+    Adds a hostmask to the ignore list.
+    Example: .+ignore *!spammer@*.isp.net %1h Spammer
+
+See also: -ignore, ignores
+"""
+
+    elif cmd == "-ignore":
+        help_text = """\
+###  -ignore <hostmask>
+    Removes a hostmask from the ignore list.
+
+See also: +ignore, ignores
+"""
+
+    elif cmd == "ignores":
+        help_text = """\
+###  ignores
+    Lists all entries in the ignore list.
+
+See also: +ignore, -ignore
+"""
+
+    elif cmd == "denyhost":
+        help_text = """\
+###  denyhost <ip|hostname> [duration_minutes] [reason]
+    Blocks an IP from connecting to the party line.
+    Duration 0 or omitted = permanent block.
+    Example: .denyhost 1.2.3.4 60 Spammer
+
+See also: permithost, blocklist
+"""
+
+    elif cmd == "permithost":
+        help_text = """\
+###  permithost <ip>
+    Removes an IP from the party line blocklist.
+
+See also: denyhost, blocklist
+"""
+
+    elif cmd == "blocklist":
+        help_text = """\
+###  blocklist
+    Shows all current party line IP block entries.
+
+See also: denyhost, permithost
+"""
+
+    elif cmd == "plugins":
+        help_text = """\
+###  plugins
+    Lists loaded plugins, auto-load plugins, and all available plugins on disk.
+
+See also: load, unload
+"""
+
+    elif cmd == "load":
+        help_text = """\
+###  load <plugin>
+    Loads a plugin from src/plugins/.
+
+See also: unload, plugins
+"""
+
+    elif cmd == "unload":
+        help_text = """\
+###  unload <plugin>
+    Unloads a currently loaded plugin.
+
+See also: load, plugins
+"""
+
+    elif cmd == "games":
+        help_text = """\
+###  games
+    Lists loaded games, auto-load games, and all available games on disk.
+
+See also: gload, gunload, gstart
+"""
+
+    elif cmd == "gload":
+        help_text = """\
+###  gload <game>
+    Loads a game from src/games/.
+
+See also: gunload, games, gstart
+"""
+
+    elif cmd == "gunload":
+        help_text = """\
+###  gunload <game>
+    Unloads a currently loaded game.
+
+See also: gload, games
+"""
+
+    elif cmd == "gstart":
+        help_text = """\
+###  gstart <game> <scope> <target> [key=value ...]
+    Starts a game session in a given scope and target.
+    Example: .gstart duckhunt channel #wbs min_delay=15 max_delay=45
+
+See also: gstop, gsessions, gload
+"""
+
+    elif cmd == "gstop":
+        help_text = """\
+###  gstop <game> <scope> <target>
+    Stops an active game session.
+    Example: .gstop duckhunt channel #wbs
+
+See also: gstart, gsessions
+"""
+
+    elif cmd == "gsessions":
+        help_text = """\
+###  gsessions
+    Lists all active game sessions with state, player count, and owner.
+
+See also: gstart, gstop
+"""
+
+    elif cmd == "sdns":
+        help_text = """\
+###  sdns <host|ip>
+    Resolves a hostname or IP using the bot's local DNS resolver.
+"""
+
+    elif cmd == "swhois":
+        help_text = """\
+###  swhois <nick>
+    Sends a WHOIS request to the IRC server.
+
+See also: swhowas
+"""
+
+    elif cmd == "swhowas":
+        help_text = """\
+###  swhowas <nick>
+    Sends a WHOWAS request to the IRC server.
+
+See also: swhois
+"""
+
+    elif cmd == "links":
+        help_text = """\
+###  links
+    Requests the LINKS list from the IRC server (all linked servers).
+"""
+
+    elif cmd == "taskset":
+        help_text = """\
+###  taskset <task_name> <0|1>
+    Enables (1) or disables (0) a named task in the core task scheduler.
+
+See also: tasks, timers
+"""
+
+    elif cmd == "tasks":
+        help_text = """\
+###  tasks
+    Lists all registered tasks with their enabled state and interval.
+
+See also: taskset, timers
+"""
+
+    elif cmd == "timers":
+        help_text = """\
+###  timers
+    Lists all active IRC timers registered in the IRC process.
+
+See also: tasks, taskset
+"""
+
+    elif cmd == "checkupdate":
+        help_text = """\
+###  checkupdate
+    Checks GitHub for a new WBS version without installing anything.
+
+See also: update
 """
 
     elif cmd == "update":
-        help_text = """
+        help_text = """\
 ###  update
-    Launches the Wicked Bot System update process.
-"""
+    Downloads and installs the latest WBS version. Restart required after.
 
-    elif cmd == "channels":
-        help_text = """
-###  channels
-    Lists all channels.
+See also: checkupdate
 """
 
     else:
-        help_text = f"""
+        help_text = f"""\
 ERROR: Unknown command: {cmd}
 """
 
