@@ -31,6 +31,7 @@ GLOBAL_FLAGS: dict[str, str] = {
     'k': 'is_autokick',
 }
 CHAN_FLAGS = GLOBAL_FLAGS 
+VALID_FLAG_COLUMNS: frozenset[str] = frozenset(GLOBAL_FLAGS.values())
 
 @dataclass
 class User:
@@ -413,26 +414,27 @@ class UserManager:
             )
         return [User(**dict(r)) for r in rows]
     
-    async def list_users_with_flag(self, flag: str) -> List[User]:
+    async def list_users_with_flag(self, flag: str) -> list[User]:
+        """Return all users who have the given flag column set to 1.
+        Args:
+            flag: A valid flag column name from GLOBAL_FLAGS.values().
+        Raises:
+            ValueError: If flag is not a recognized column name.
         """
-        Example: flag='is_admin' returns users who have at least one
-        admin access row.  Extend as needed.
-        """
-        async with get_db(self.db_path) as db:
-            rows = await db.execute_fetchall(
-                f"""
-                SELECT DISTINCT u.handle, u.password, u.hostmasks, u.is_locked,
-                    u.comment, u.created_at, u.updated_at, u.created_by,
-                    u.updated_by, u.deleted_at, u.deleted_by
-                FROM users u
-                JOIN user_access ua ON ua.handle = u.handle
-                WHERE u.deleted_at IS NULL
-                AND ua.deleted_at IS NULL
-                AND ua.{flag} = 1
-                ORDER BY u.handle
-                """
-            )
-        return [User(**dict(r)) for r in rows]    
+        if flag not in VALID_FLAG_COLUMNS:
+            raise ValueError(f"Invalid flag column: {flag!r}")
+
+        # Safe: flag is now guaranteed to be a known column name from our own dict
+        query = """
+            SELECT u.id, u.username, ua.global_flags
+            FROM users u
+            JOIN user_access ua ON u.id = ua.user_id
+            WHERE ua.{} = 1
+        """.format(flag)  # f-string also fine here — flag is allowlisted above
+
+        async with self.db.execute(query) as cursor:
+            rows = await cursor.fetchall()
+        return [User.from_row(row) for row in rows]  
         
     def exist(self, user: str):
         """Check if user exists."""
