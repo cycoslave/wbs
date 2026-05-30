@@ -93,7 +93,6 @@ class BotnetManager:
             else:
                 reader, writer = await asyncio.open_connection(bot.address, bot.port, limit=4096)
             
-            # Create link and assign streams
             link = BotLink(
                 name=handle,
                 host=bot.address,
@@ -105,9 +104,6 @@ class BotnetManager:
             link.subnet_id = self.subnet_id
             link.password = bot.password
             
-            #log.info(f"password: {link.password}")
-
-            # If no password, generate partial key for exchange
             if link.password is None:
                 link.temp_partial = secrets.token_hex(16)
                 handshake = f"BOTLINK {self.my_handle} {handle} 1 WBS {__version__} {link.temp_partial}\n"
@@ -177,11 +173,8 @@ class BotnetManager:
         """Process message from peer."""
         parts = line.split()
         cmd = parts[0].upper()
-
-        #log.info(f"Processing from {from_bot}: {line[:100]}")
         
         if cmd == "BOTLINK":
-            # Incoming connection request
             if from_bot.lower() not in self.peers:
                 bot = await self.bot.get(from_bot.lower())
                 link = BotLink(
@@ -204,14 +197,11 @@ class BotnetManager:
             else:
                 link = self.peers[from_bot.lower()]
 
-            #log.info(f"password: {link.password}")
-
             remote = parts[1]
             local = parts[2]
             
             if local.lower() != self.my_handle.lower() or remote.lower() != from_bot.lower():
                 log.error(f"Botlink mismatch from {from_bot}")
-                #log.info(f"local {self.my_handle.lower()}/{local}  remote {from_bot}/{remote}")
                 writer.close()
                 return
             
@@ -224,26 +214,21 @@ class BotnetManager:
                 if len(parts) > 6:  
                     their_partial = parts[6]
                     our_partial = secrets.token_hex(16)
-                    #log.info(f"remote {their_partial} - local {our_partial}")
 
                     #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
                     shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
                     link.password = shared_password
-                    #log.info(f"shared pass: {shared_password}")
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     ack = f"LINKACK {self.my_handle} {remote} 1 WBS {__version__} {our_partial}\n"
                     log.info(f"Sending {ack}")
                     await self._safe_send(writer, ack)
-                    #asyncio.create_task(self.read_peer(from_bot, reader, writer))
                 else:
                     log.error(f"No password configured for {from_bot} and no key exchange offered")
                     writer.close()
                     return
             else:
-                # Password exists, ACKAUTH
                 await self._safe_send(writer, f"LINKACK {self.my_handle} {remote} 1 WBS {__version__}\n")
-                #asyncio.create_task(self.read_peer(from_bot, reader, writer))
             return
         
         if from_bot.lower() not in self.peers:
@@ -257,20 +242,15 @@ class BotnetManager:
                 if len(parts) > 6:
                     their_partial = parts[6]
                     our_partial = link.temp_partial
-                    #log.info(f"remote {their_partial} - local {our_partial}")
-
                     #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
                     shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
                     link.password = shared_password
-                    #log.info(f"shared pass: {shared_password}")
                     
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
-                    #log.info(f"auth string: {self.my_handle}{link.password}{parts[1]}")
                     #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
                     chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), "sha256").hexdigest()
                     challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
-                    #log.info(f"Sending authentication token {challenge}")
                     await self._safe_send(writer, challenge)
                 else:
                     log.error(f"Credential mismatch with {from_bot}: peer sent LINKACK without exchange token while local password is unset")
@@ -299,7 +279,6 @@ class BotnetManager:
                         writer.close()
                         return
                 except ValueError:
-                    #log.warning(f"LINKAUTH from {from_bot} missing valid timestamp — skew check skipped")
                     log.error(f"LINKAUTH from {from_bot} has invalid or missing timestamp — rejecting link")
                     await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
                     writer.close()
@@ -322,7 +301,6 @@ class BotnetManager:
                         writer.close()
                         return
                 except ValueError:
-                    #log.warning(f"LINKREADY from {from_bot} missing valid timestamp — skew check skipped")
                     log.error(f"LINKREADY from {from_bot} has invalid or missing timestamp — rejecting link")
                     await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
                     writer.close()
