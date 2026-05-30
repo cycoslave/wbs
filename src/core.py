@@ -40,14 +40,13 @@ BASE_DIR = Path(__file__).parent.parent
 class Core:
     """Main process: Core event loop + child process manager."""
     
-    def __init__(self, args):
-        self.config_path = getattr(args, 'config', 'config.json')
+    def __init__(self, config: dict, config_path: str, args):
+        self.config      = config
+        self.config_path = config_path
+        self.db_path = self.config.get('db', {}).get('path', 'db/wbs.db')
         db_path_override = getattr(args, 'db_path', None)
-        with open(self.config_path) as f:
-            self.config = json.load(f)
         if db_path_override:
             self.config['db']['path'] = db_path_override
-        self.db_path = self.config['db']['path'] or BASE_DIR / "db/wbs.db"
         self.core_q = mp.Queue()
         self.irc_q = mp.Queue()
         self._event_buffer = deque()
@@ -93,14 +92,12 @@ class Core:
         await self._autoload_modules()     
 
     def spawn_children(self):
-        """Spawn daemon children - skip partyline in foreground mode."""
-        config_path = self.config_path
-        
-        # IRC always
+        """Spawn daemon children."""
         irc_proc = mp.Process(
             target=irc_process_launcher,
-            args=(config_path, self.core_q, self.irc_q),
-            daemon=True, name="IRC"
+            args=(self.config, self.core_q, self.irc_q),
+            daemon=True,
+            name="IRC"
         )
         irc_proc.start()
         self.children.append(irc_proc)

@@ -1096,7 +1096,6 @@ def start_irc_process(config, core_q, irc_q):
 
     #irc.maintenance_task.cancel()
 
-def irc_process_launcher(config_path, core_q, irc_q):
+def irc_process_launcher(config: dict, core_q, irc_q):
     """Launcher for IRC multiprocessing.Process."""
-    config = json.load(open(config_path))
     asyncio.run(start_irc_process(config, core_q, irc_q))

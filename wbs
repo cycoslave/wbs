@@ -68,32 +68,13 @@ def remove_pidfile(path: str):
 
 def main():
     args = parse_args()
-    if args.mkpasswd:
-        logging.basicConfig(level=logging.WARNING)
-    else:
-        try:
-            with open(args.config) as f:
-                _cfg = json.load(f)
-        except Exception:
-            _cfg = {}
-        _log_cfg = _cfg.get('logging', {})
-        _level   = getattr(logging, _log_cfg.get('level', 'INFO').upper(), logging.INFO)
-        _logfile = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
 
-        if args.foreground:
-            logging.basicConfig(
-                level=_level,
-                format='%(asctime)s %(levelname)s %(message)s',
-                stream=sys.stdout
-            )
-        else:
-            os.makedirs(os.path.dirname(_logfile) or '.', exist_ok=True)
-            logging.basicConfig(
-                level=_level,
-                format='%(asctime)s %(levelname)s %(message)s',
-                filename=_logfile,
-                filemode='a'
-            )
+    if args.mkpasswd:
+        import bcrypt, getpass
+        pw = getpass.getpass("Password: ")
+        print(bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode())
+        return
+
     config_path = Path(args.config)
     if not config_path.exists():
         print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
@@ -101,15 +82,40 @@ def main():
         sys.exit(1)
 
     try:
-        with open(args.config) as f:
+        with open(config_path) as f:
             config = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        sys.exit(f"[fatal] Config error: {e}")
-    db_path = args.db_path or config.get('db', {}).get('path', 'db/wbs.db')
+    except json.JSONDecodeError as e:
+        sys.exit(f"[fatal] Config parse error in {args.config}: {e}")
+    except OSError as e:
+        sys.exit(f"[fatal] Cannot read config {args.config}: {e}")
+
+    _log_cfg = config.get('logging', {})
+    _level   = getattr(logging, _log_cfg.get('level', 'INFO').upper(), logging.INFO)
+    _logfile = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
+
+    if args.foreground:
+        logging.basicConfig(
+            level=_level,
+            format='%(asctime)s %(levelname)s %(message)s',
+            stream=sys.stdout
+        )
+    else:
+        os.makedirs(os.path.dirname(_logfile) or '.', exist_ok=True)
+        logging.basicConfig(
+            level=_level,
+            format='%(asctime)s %(levelname)s %(message)s',
+            filename=_logfile,
+            filemode='a'
+        )
+
+    # Apply CLI overrides into the config dict so Core sees them
+    if args.db_path:
+        config.setdefault('db', {})['path'] = args.db_path
+
+    db_path = config.get('db', {}).get('path', 'db/wbs.db')
     settings = config.get('settings', {})
-    log_cfg  = config.get('logging', {})
     pidfile  = args.pidfile or settings.get('pid_file', 'wbs.pid')
-    logfile  = args.logfile or log_cfg.get('file', 'logs/wbs.log')
+    logfile  = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
 
     if args.seed:
         from src.db import init_db, seed_db
@@ -128,8 +134,10 @@ def main():
     if not args.foreground:
         daemonize(logfile)
         write_pidfile(pidfile)
+
     try:
-        core = Core(args=args)
+        # Pass the already-loaded config dict — Core must NOT re-read the file
+        core = Core(config=config, config_path=str(config_path), args=args)
         asyncio.run(core.run(foreground=args.foreground))
     finally:
         if not args.foreground:
