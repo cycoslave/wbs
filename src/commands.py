@@ -600,21 +600,60 @@ async def cmd_showuser(core, handle: str, session_id: int, arg: str, respond):
     await respond(await core.user.showuser(parts[0]))
 
 async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .chpass [target_handle] <new_password>
+
+    Authorization rules:
+      - No args              → usage hint
+      - 1 arg (own password) → any authenticated +p user, except console
+      - 2 args (other user)  → requires +A (admin flag); +p users are denied
+      - Admins (+A) may NOT change another admin's password unless they are
+        also +n (owner), preventing lateral privilege escalation between admins.
+    """
     if not arg:
         await respond("Usage: .chpass [user] <password>")
         return
     parts = arg.split()
-    if len(parts) == 2:
-        # Admin changing another user's password
-        target, password = parts[0], parts[1]
-    else:
-        # User changing their own password
+
+    if len(parts) == 1:
         if handle == "console":
             await respond("ERROR: Console user does not have a password.")
             return
         target, password = handle, parts[0]
+    elif len(parts) == 2:
+        target, password = parts[0], parts[1]
+
+        # Caller must have +A — no further hierarchy check.
+        caller_is_admin = await core.user.matchattr(handle, "+A")
+        if not caller_is_admin:
+            await respond("Access denied (need +A to change another user's password).")
+            log.warning(
+                "chpass denied: %s attempted to change password for %s without +A",
+                handle, target
+            )
+            return
+
+        # Reject changing the console pseudo-user
+        if target.lower() == "console":
+            await respond("ERROR: Console user does not have a password.")
+            return
+    else:
+        await respond("Usage: .chpass [user] <password>")
+        return
+    if not await core.user.exist(target):
+        await respond(f"User not found: {target}")
+        return
+    if len(password) < 8:
+        await respond("Password must be at least 8 characters.")
+        return
     await core.user.set_password(target, password)
-    await respond(f"Password updated for {target}.")
+
+    if target == handle:
+        await respond("Password updated.")
+    else:
+        await respond(f"Password updated for {target}.")
+
+    log.info("chpass: %s changed password for %s", handle, target)
 
 async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
