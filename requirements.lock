@@ -95,6 +95,8 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
+packaging==26.2
+    # via wbs (pyproject.toml)
 prompt-toolkit==3.0.52
     # via wbs (pyproject.toml)
 propcache==0.5.2
@@ -120,7 +122,6 @@ pytz==2026.2
 requests==2.34.2
     # via
     #   ipinfo
-    #   wbs (pyproject.toml)
     #   whoisit
 rich==15.0.0
     # via typer

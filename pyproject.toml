@@ -18,10 +18,10 @@ dependencies = [
   "feedparser>=6.0.10",
   "psutil>=5.9.0",
   "beautifulsoup4>=4.12.0",
-  "requests>=2.32.0",
   "whoisit>=2.8",
   "ipinfo>=4.0.0",
   "pyasn>=1.6.0",
+  "packaging>=23.0",
 ]
 
 [project.optional-dependencies]
