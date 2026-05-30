@@ -61,13 +61,20 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
         await db.commit()
         
         if force:
-            # Drop user tables
-            async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ) as cur:
                 tables = await cur.fetchall()
-            for (table,) in tables:
-                if table in ALLOWED_TABLES:
-                    await db.execute(f"DROP TABLE IF EXISTS {table}")
-            await db.commit()
+
+            await db.execute("BEGIN")
+            try:
+                for (table,) in tables:
+                    if table in ALLOWED_TABLES:
+                        await db.execute(f"DROP TABLE IF EXISTS {table}")
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
         
         await ensure_schema(db)
         log.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
