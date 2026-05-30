@@ -226,7 +226,8 @@ class BotnetManager:
                     our_partial = secrets.token_hex(16)
                     #log.info(f"remote {their_partial} - local {our_partial}")
 
-                    shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
+                    #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
+                    shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
                     link.password = shared_password
                     #log.info(f"shared pass: {shared_password}")
                     log.info(f"Generated shared password with {from_bot}")
