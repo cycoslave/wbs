@@ -618,7 +618,7 @@ class UserManager:
                             is_autohop, is_hop, is_dehop,
                             is_voice, is_devoice, is_autokick,
                             created_at, updated_at, created_by, deleted_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             handle, channel, subnet_id,
                             acc.get('has_partyline', 0), acc.get('is_admin', 0),
