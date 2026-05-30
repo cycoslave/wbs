@@ -133,11 +133,11 @@ class Core:
 
         self._setup_signals()
         self.spawn_children()
+        await self.botnet.start()
         
         # Start event poller thread
         poller_thread = threading.Thread(target=self.event_poller, daemon=True)
         poller_thread.start()
-        
         log.info("Core event loop running")
         if foreground:
             await self._main_loop_with_console()

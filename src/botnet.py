@@ -153,7 +153,6 @@ class BotnetManager:
         self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
         self.my_handle = self.config.get('bot', {}).get('nick', 'WBS')
         self.autolink = AutoLinkManager(self)
-        self.autolink.start()
         self.running = True
         self.loop = None
         
@@ -163,6 +162,10 @@ class BotnetManager:
         self.autolink.stop()
         for _, writer in self.peers.values():
             writer.close()
+
+    async def start(self):
+        """Start background tasks. Must be called from inside a running event loop."""
+        self.autolink.start()
 
     async def connect_peer(self, handle: str):
         """Establish outgoing connection to peer."""
