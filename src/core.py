@@ -6,13 +6,12 @@ import asyncio
 import multiprocessing as mp
 import threading
 import time
-import datetime
 import logging
-import json
 import os
 import socket
 import sys
 import random
+import signal
 from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import deque
@@ -98,7 +97,7 @@ class Core:
         """Spawn daemon children."""
         irc_proc = mp.Process(
             target=irc_process_launcher,
-            args=(self.config, self.core_q, self.irc_q),
+            args=(self.config, self.core_q, self.irc_q, os.getpid()),
             daemon=True,
             name="IRC"
         )
@@ -132,6 +131,7 @@ class Core:
         else:
             log.info("Background mode")
 
+        self._setup_signals()
         self.spawn_children()
         
         # Start event poller thread
@@ -689,6 +689,7 @@ class Core:
         self.connected = True
         self.connected_on = time.time()
         self.botname = event.get('botname')
+        self._irc_respawn_delay = 5.0
         log.info("IRC READY - joining channels..")
         subnet_id = self.config.get('botnet', {}).get('subnet_id', None)
         channels = await self.chan.getchans(subnet_id=subnet_id)
@@ -792,13 +793,54 @@ class Core:
         if hasattr(self, 'botnet') and self.botnet:
             await self.botnet.poll_queues() if hasattr(self.botnet, 'poll_queues') else None
 
-        # Lag ping every 30s when connected
         if self.connected and self._lag_ping_sent is None:
             now = time.time()
             if not hasattr(self, '_last_lag_ping') or (now - self._last_lag_ping) >= 30.0:
                 self._lag_ping_sent = time.time() * 1000
                 self._last_lag_ping = now
                 self.irc_q.put_nowait({'cmd': 'ping', 'token': f'LAG{int(now)}'})
+
+        await self._check_irc_process()
+
+    async def _check_irc_process(self):
+        """Respawn IRC process if it has died."""
+        for i, child in enumerate(self.children):
+            if child.name != "IRC":
+                continue
+            if child.is_alive():
+                return
+
+            exit_code = child.exitcode
+            now = time.time()
+
+            if not hasattr(self, '_irc_respawn_delay'):
+                self._irc_respawn_delay = 5.0
+                self._irc_last_respawn = 0.0
+
+            if (now - self._irc_last_respawn) < self._irc_respawn_delay:
+                return  # not yet time
+
+            log.warning(f"IRC process died (exitcode={exit_code}), respawning in {self._irc_respawn_delay:.0f}s...")
+            self.connected = False
+            self.channels.clear()
+
+            self.irc_q = mp.Queue()
+
+            new_proc = mp.Process(
+                target=irc_process_launcher,
+                args=(self.config, self.core_q, self.irc_q, os.getpid()),
+                daemon=True,
+                name="IRC"
+            )
+            new_proc.start()
+            self.children[i] = new_proc
+            self._irc_last_respawn = now
+
+            # Backoff: 5s → 10s → 20s → 40s → cap at 300s
+            self._irc_respawn_delay = min(self._irc_respawn_delay * 2, 300.0)
+
+            log.info(f"IRC process respawned (pid={new_proc.pid}), next backoff={self._irc_respawn_delay:.0f}s")
+            self.partyline.broadcast(f"*** IRC process respawned (pid={new_proc.pid})")
 
     async def register_timer(self, name: str, callback, interval: float, randomize: bool = False):
         """Register repeating timer"""
@@ -958,3 +1000,10 @@ class Core:
                     log.info("Restored game session: %s on %s:%s", game_name, s["scope"], s["target"])
             except Exception as e:
                 log.error("Failed to restore game %s: %s", game_name, e)
+
+    def _setup_signals(self):
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(
+                self._shutdown("Signal received")
+            ))

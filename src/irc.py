@@ -1096,6 +1096,24 @@ def start_irc_process(config, core_q, irc_q):
 
     #irc.maintenance_task.cancel()
 
-def irc_process_launcher(config: dict, core_q, irc_q):
+def irc_process_launcher(config: dict, core_q, irc_q, core_pid: int):
     """Launcher for IRC multiprocessing.Process."""
+    watcher = threading.Thread(
+        target=_watch_parent,
+        args=(core_pid,),
+        daemon=True
+    )
+    watcher.start()
     asyncio.run(start_irc_process(config, core_q, irc_q))
+
+def _watch_parent(core_pid: int):
+    """Exit if Core process disappears."""
+    while True:
+        time.sleep(2)
+        try:
+            os.kill(core_pid, 0)
+        except ProcessLookupError:
+            log.warning(f"Core (pid={core_pid}) gone — IRC exiting.")
+            os._exit(1)  # hard exit, bypasses all cleanup
+        except PermissionError:
+            pass  # process exists but we lack permission — still alive
