@@ -96,12 +96,6 @@ class Session:
         except Exception as e:
             log.error(f"Receive error ({self.session_type}): {e}")
             return None
-        
-        except (EOFError, KeyboardInterrupt):
-            return None
-        except Exception as e:
-            log.error(f"Receive error ({self.session_type}): {e}")
-            return None
     
     async def close(self) -> None:
         """Unified close (no partyline logic here)."""
