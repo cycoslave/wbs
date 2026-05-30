@@ -7,6 +7,7 @@ import aiosqlite
 import time
 import logging
 import bcrypt
+import json
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -92,19 +93,24 @@ async def seed_db(db_path: str, config: dict):
 
         # Self-bot record
         await db.execute("""
-            INSERT INTO bots (handle, address, port, subnet_id, is_online)
+            INSERT INTO bots (handle, address, port, subnet_id, created_by)
             VALUES (?, '127.0.0.1', 3333, ?, 1)
             ON CONFLICT(handle) DO UPDATE SET
                 subnet_id = excluded.subnet_id,
-                is_online = 1
         """, (nick, subnet_id))
 
         # Channels
         for ch in bot_config.get('channels', []):
             await db.execute("""
-                INSERT INTO channels (name, subnet_id, settings)
-                VALUES (?, ?, '{}')
+                INSERT INTO channels (name, created_by)
+                VALUES (?, 'seed')
                 ON CONFLICT(name) DO NOTHING
+            """, (ch,))
+
+            await db.execute("""
+                INSERT INTO channel_subnets (channel_name, subnet_id, created_by)
+                VALUES (?, ?, 'seed')
+                ON CONFLICT(channel_name, subnet_id) DO NOTHING
             """, (ch, subnet_id))
 
         # Users — process the top-level users[] array
@@ -130,18 +136,41 @@ async def seed_db(db_path: str, config: dict):
                     flags = '+omn'
 
             await db.execute("""
-                INSERT INTO users (handle, flags, password)
-                VALUES (?, ?, ?)
+                INSERT INTO users (handle, password, created_by)
+                VALUES (?, ?, 'seed')
                 ON CONFLICT(handle) DO NOTHING
-            """, (handle, flags, pw_hash))  # pw_hash is None → NULL if no password
+            """, (handle, pw_hash))
+
+            is_owner = False
+            is_admin = False
+            has_partyline = False
+            is_op = False
+            for acc in user_cfg.get('access', []):
+                if acc.get('is_owner') or '+n' in flags:
+                    is_owner = True
+                if acc.get('is_admin') or '+A' in flags or is_owner:
+                    is_admin = True
+                has_partyline = True
+                if acc.get('is_op'):
+                    is_op = True
+
+            await db.execute("""
+                INSERT INTO user_access (
+                    handle, channel,
+                    has_partyline, is_admin, is_owner, is_op,
+                    created_by
+                )
+                VALUES (?, NULL, ?, ?, ?, ?, 'seed')
+                ON CONFLICT(handle, channel, subnet_id) DO NOTHING
+            """, (handle, int(has_partyline), int(is_admin), int(is_owner), int(is_op)))
 
             # Host masks
-            for hostmask in user_cfg.get('hosts', []):
+            hosts = user_cfg.get('hosts', [])
+            if hosts:
                 await db.execute("""
-                    INSERT INTO user_access (handle, hostmask)
-                    VALUES (?, ?)
-                    ON CONFLICT DO NOTHING
-                """, (handle, hostmask))
+                    UPDATE users SET hostmasks = ?
+                    WHERE handle = ?
+                """, (json.dumps(hosts), handle))
 
         await db.commit()
         log.info(
