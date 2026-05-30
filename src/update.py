@@ -37,15 +37,14 @@ import aiohttp
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 from packaging import version as pkg_version
-from __future__ import annotations
 
 from . import __version__
 
 log = logging.getLogger("wbs.update")
 _RUNTIME_PLATFORM = "python"
 _MIN_PYTHON_MAJOR = 6
-_PKG_DIR    = Path(__file__).resolve().parent       # .../wbs/src/
-_ROOT_DIR   = _PKG_DIR.parent                        # .../wbs/
+_PKG_DIR    = Path(__file__).resolve().parent
+_ROOT_DIR   = _PKG_DIR.parent
 _TMP_DIR    = _ROOT_DIR / ".tmp" / "update"
 _BACKUP_DIR = _ROOT_DIR / ".backup"
 
