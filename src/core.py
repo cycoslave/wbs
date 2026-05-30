@@ -32,6 +32,7 @@ from .irc import irc_process_launcher
 from .plugins import PluginManager
 from .games import GameManager
 from .dcc import DCCManager
+from .update import UpdateManager
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -63,6 +64,7 @@ class Core:
         self.dcc = DCCManager(self)
         self.plugin = PluginManager(self)
         self.game = GameManager(self)
+        self.update = UpdateManager(config)
 
         # Runtime variables
         self.children = []

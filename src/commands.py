@@ -1868,6 +1868,29 @@ async def cmd_whois(core, handle: str, session_id: int, arg: str, respond):
     for line in info.split("\n"):
         await respond(line)
 
+async def cmd_checkupdate(session, args):
+    """`.checkupdate` — check for a new WBS version."""
+    _require_flag(session, "n")   # owner flag
+    manifest = await bot.updater.check_update()
+    if manifest:
+        session.reply(f"Update available: {manifest.version_str} by {manifest.author}")
+    else:
+        session.reply("Already up to date.")
+
+async def cmd_update(session, args):
+    """`.update` — download and install the latest version."""
+    _require_flag(session, "n")
+    manifest = await bot.updater.check_update()
+    if not manifest:
+        session.reply("No update available.")
+        return
+    session.reply(f"Installing {manifest.version_str}…")
+    ok = await bot.updater.perform_update(manifest)
+    if ok:
+        session.reply("Update installed. Restart the bot to load new code.")
+    else:
+        session.reply("Update failed — rolled back to previous version. Check logs.")        
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -1964,5 +1987,8 @@ COMMANDS = {
     'gunload': cmd_gunload,
     'gstart': cmd_gstart,
     'gstop': cmd_gstop,
-    'gsessions': cmd_gsessions
+    'gsessions': cmd_gsessions,
+    # updates
+    'checkupdate': cmd_checkupdate,
+    'update': cmd_update
 }
