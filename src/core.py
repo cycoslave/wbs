@@ -64,7 +64,7 @@ class Core:
         self.dcc = DCCManager(self)
         self.plugin = PluginManager(self)
         self.game = GameManager(self)
-        self.update = UpdateManager(config)
+        self.update = UpdateManager(self.config)
 
         # Runtime variables
         self.children = []

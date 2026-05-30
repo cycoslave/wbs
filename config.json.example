@@ -12,7 +12,7 @@
     {
       "handle": "owner",
       "password": {
-        "pass": "changeme",
+        "pass": "please_use_encryption",
         "encryption": "none"
       },
       "hosts": ["owner!user@host.example.com"],
