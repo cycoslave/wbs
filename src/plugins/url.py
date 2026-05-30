@@ -155,7 +155,7 @@ class urlPlugin(Plugin):
                 return meta.get('content').strip()[:200] or None
         return None
     
-    def _is_safe_url(url: str) -> tuple[bool, str]:
+    def _is_safe_url(self, url: str) -> tuple[bool, str]:
         """
         Validate a URL for SSRF safety.
 
