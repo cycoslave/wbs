@@ -88,8 +88,11 @@ def main():
         print("       Copy config.json.example to config.json and edit it first.", file=sys.stderr)
         sys.exit(1)
 
-    with open(config_path) as f:
-        config = json.load(f)
+    try:
+        with open(args.config) as f:
+            config = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        sys.exit(f"[fatal] Config error: {e}")
     db_path = args.db_path or config.get('db', {}).get('path', 'db/wbs.db')
     settings = config.get('settings', {})
     log_cfg  = config.get('logging', {})
