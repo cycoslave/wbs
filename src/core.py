@@ -259,7 +259,7 @@ class Core:
                 response_q=response_q,
                 subnet_id=subnet_id
             )
-
+            bot_session.peer_ip = event.get('peer_ip', 'unknown')
             self.bot_sessions[bot_name.lower()] = bot_session
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
             log.debug(f"Bot session {bot_id} created for {bot_name}")
@@ -268,7 +268,6 @@ class Core:
             log.error(f"Bot session {bot_name} failed: {e}")
 
     async def on_bot_disconnect(self, event: dict):
-        """Handle bot disconnection."""
         handle = event['handle']
         if handle in self.botnet.peers:
             link = self.botnet.peers.pop(handle)
@@ -281,6 +280,9 @@ class Core:
         log.info(f"Bot {handle} unlinked.")
         if hasattr(self, 'partyline'):
             self.partyline.broadcast(f"*** {handle} unlinked")
+        peer_ip = event.get('peer_ip', 'unknown')
+        if self.guard and peer_ip != 'unknown':
+            self.guard.release(peer_ip)
 
     async def on_bot_cmd(self, event: dict):
         """Handle bot disconnection"""
@@ -315,7 +317,7 @@ class Core:
                               reader=reader, writer=writer,
                               core_q=self.core_q, response_q=response_q)
             #log.info("DEBUG Session created OK")
-            
+            session.peer_ip = event.get('peer_ip', 'unknown')
             self.party_sessions[session_id] = session
             asyncio.create_task(session.run())
             
@@ -331,27 +333,26 @@ class Core:
                 pass
 
     async def on_partyline_disconnect(self, event: dict):
-        """Cleanup partyline session on disconnect."""
         session_id = event['session_id']
-        
+        peer_ip = None
         if session_id in self.party_sessions:
             session = self.party_sessions.pop(session_id)
+            peer_ip = getattr(session, 'peer_ip', None)
             try:
                 if session.writer:
                     session.writer.close()
                     await session.writer.wait_closed()
-                log.info(f"Party socket fd closed + session {session_id} ({getattr(session, 'handle', 'unknown')}) unregistered")
             except Exception as e:
                 log.warning(f"Session {session_id} close failed: {e}")
-        
         if hasattr(self, 'partyline') and self.partyline:
             if session_id in self.partyline.sessions:
                 handle = self.partyline.sessions[session_id]['handle']
                 del self.partyline.sessions[session_id]
                 log.info(f"Partyline unregistered {handle}#{session_id}")
                 self.partyline.broadcast(f"{handle} left the partyline", exclude_session=session_id)
-        
         log.debug(f"Partyline disconnect complete: {session_id}")
+        if self.guard and peer_ip:
+            self.guard.release(peer_ip)
 
     async def on_dcc_chat_request(self, event: Dict[str, Any]):
         """Route DCC CHAT CTCP from irc.py → DCCManager."""

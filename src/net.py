@@ -62,11 +62,11 @@ class AccessGuard:
         self.mode = cfg.get("access_mode", "blacklist").lower()
         self.max_failures = int(cfg.get("max_failures", 5))
         self.lockout_seconds = int(cfg.get("lockout_seconds", 300))
-        self.max_connections = int(cfg.get("max_connections", 10))
+        self.max_connections = int(cfg.get("max_connections", 50))
 
-        self._blocklist: dict[str, _BlockEntry]    = {}  # ip → entry
-        self._failures:  dict[str, _FailureRecord] = {}  # ip → record (ephemeral)
-        self._active:    dict[str, int]            = {}  # ip → open conn count
+        self._blocklist: dict[str, _BlockEntry] = {}    # ip → entry
+        self._failures: dict[str, _FailureRecord] = {}  # ip → record (ephemeral)
+        self._active: dict[str, int] = {}               # ip → open conn count
         self._loaded = False
 
     async def load(self) -> None:
@@ -280,12 +280,7 @@ class NetListener:
     Without a guard, all connections are passed through (dev mode).
     """
 
-    def __init__(
-        self,
-        core_q:       mp.Queue,
-        config:       dict         = None,
-        access_guard: AccessGuard  = None,
-    ) -> None:
+    def __init__(self, core_q: mp.Queue, config: dict = None, access_guard: AccessGuard = None) -> None:
         self.core_q          = core_q
         self.config          = config or {}
         self.guard           = access_guard
@@ -328,11 +323,7 @@ class NetListener:
         async with self.server:
             await self.server.serve_forever()
 
-    async def handle_connection(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
+    async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer    = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
 
@@ -343,9 +334,16 @@ class NetListener:
                 try:
                     writer.write(f"ERROR :{reason}\r\n".encode())
                     await writer.drain()
+                except Exception:
+                    pass
                 finally:
                     writer.close()
-                    await writer.wait_closed()
+                    try:
+                        await writer.wait_closed()
+                    except ssl_lib.SSLError:
+                        pass  # remote sent data after close_notify
+                    except Exception:
+                        pass
                 return
 
         cfg = self.config.get("settings", {})
@@ -363,7 +361,7 @@ class NetListener:
         except asyncio.TimeoutError:
             log.warning(f"Handshake timeout from {peer_ip}")
         except ssl_lib.SSLError as e:
-            log.error(f"TLS handshake failed from {peer_ip}: {e}")
+            log.debug(f"TLS error from {peer_ip}: {e}")
         except Exception as e:
             log.error(f"Connection error from {peer_ip}: {e}")
 
@@ -371,16 +369,14 @@ class NetListener:
         if self.guard:
             self.guard.release(peer_ip)
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except ssl_lib.SSLError:
+            pass
+        except Exception:
+            pass
 
-    async def _handle_botlink(
-        self,
-        line:    str,
-        peer:    tuple,
-        peer_ip: str,
-        reader:  asyncio.StreamReader,
-        writer:  asyncio.StreamWriter,
-    ) -> None:
+    async def _handle_botlink(self, line: str, peer: tuple, peer_ip: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parts = line.split()
         if len(parts) >= 4:
             remote_handle = parts[1]
@@ -403,14 +399,7 @@ class NetListener:
             writer.close()
             await writer.wait_closed()
 
-    async def _handle_partyline(
-        self,
-        line:    str,
-        peer:    tuple,
-        peer_ip: str,
-        reader:  asyncio.StreamReader,
-        writer:  asyncio.StreamWriter,
-    ) -> None:
+    async def _handle_partyline(self, line: str, peer: tuple, peer_ip: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         handle = f"user_{peer_ip}_{peer[1]}"
         log.info(f"Partyline connect: {handle}")
         self._pending_streams[handle.lower()] = (reader, writer)

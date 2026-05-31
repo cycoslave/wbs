@@ -11,15 +11,19 @@ Works best with Python 3.12.7.
 
 ## Usage
 ```
-usage: wbs [-h] [-f] [-c CONFIG] [-d DB_PATH] [-v]
+usage: wbs [-h] [-c CONFIG] [-d DB_PATH] [-f] [-p] [-s] [--pidfile PIDFILE] [--logfile LOGFILE]
+
 options:
   -h, --help            show this help message and exit
-  -f, --foreground      Run foreground
   -c CONFIG, --config CONFIG
-                        Config file path
+                        Path to config file
   -d DB_PATH, --db-path DB_PATH
-                        Override DB path from config
-  -v, --version         show program's version number and exit
+                        Override database path from config
+  -f, --foreground      Run in foreground with console
+  -p, --mkpasswd        Interactively prompt for a password and print its bcrypt hash. Use the output in config.json with encryption=bcrypt.
+  -s, --seed            Initialize the database and seed from config.json, then exit. Must be run once before first launch.
+  --pidfile PIDFILE     Override pid file path (default: from config settings.pid_file)
+  --logfile LOGFILE     Override log file path (default: from config logging.file)
 ```
 
 ## Create your first user
