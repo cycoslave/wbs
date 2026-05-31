@@ -998,20 +998,56 @@ async def cmd_act(core, handle, session_id, arg, respond):
     core.irc_q.put_nowait({'cmd': 'msg', 'target': parts[0], 'text': action_text})
     await respond(f"→ ACTION {parts[0]}: {parts[1]}")
 
-async def cmd_bots(core, handle, session_id, arg, respond):
-    """List botnet status."""
-    if not core.bot_sessions:
-        await respond("No linked bots.")
-        return
-    
-    bots_list = []
-    for bot_id, session in core.bot_sessions.items():
-        # Prioritize session.handle or .nick; fallback to ID
-        bot_handle = getattr(session, 'handle', None) or getattr(session, 'nick', None) or str(bot_id)
-        bots_list.append(f"{bot_handle}")
-    
-    bots_str = " | ".join(bots_list)
-    await respond(f"Linked bots: {bots_str}")
+async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """
+    .bots — List all known bots: self, linked (with roles), and unlinked.
+    Mirrors WBS5 dwckbots layout.
+    """
+    my_name = core.botname
+    async with get_db(core.db_path) as db:
+        rows = await db.execute_fetchall(
+            "SELECT handle, role FROM bots WHERE deleted_at IS NULL ORDER BY handle"
+        )
+    linked_names: set[str] = set(core.botnet.peers.keys()) if hasattr(core, 'botnet') else set()
+    def role_tag(role: str | None) -> str:
+        r = (role or "").lower()
+        if r == "hub":   return " (hub)"
+        if r == "leaf":  return " (leaf)"
+        return ""
+    linked_count   = 1  # self counts as linked
+    unlinked_count = 0
+
+    await respond("  ---- List of Bots ----")
+    await respond(" ---Linked:---")
+    await respond(f"-> {my_name} (me!)")
+    for row in rows:
+        bname = row["handle"]
+        role  = role_tag(row["role"])
+        if bname.lower() == my_name.lower():
+            continue  # already printed as (me!)
+        if bname in linked_names:
+            await respond(f"-> {bname}{role}")
+            linked_count += 1
+
+    await respond(" ---Unlinked:---")
+    unlinked_lines = []
+    for row in rows:
+        bname = row["handle"]
+        role  = role_tag(row["role"])
+        if bname.lower() == my_name.lower():
+            continue
+        if bname not in linked_names:
+            unlinked_lines.append(f"-> {bname}{role}")
+            unlinked_count += 1
+
+    if unlinked_lines:
+        for line in unlinked_lines:
+            await respond(line)
+    else:
+        await respond("-> (none)")
+
+    total = linked_count + unlinked_count
+    await respond(f"Linked: {linked_count}  Unlinked: {unlinked_count}  -- TOTAL BOTS: {total}")
 
 async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
     """
@@ -1215,15 +1251,16 @@ async def cmd_botinfo(core, handle: str, session_id: int, arg: str, respond):
     pid = os.getpid()
     cwd = os.getcwd()
     machine = platform.machine()
-    os_version = platform.platform()
+    os_name = platform.system()
+    os_ver = platform.platform()
+    py_ver = platform.python_version()
     await respond("-> Bot Info <-")
     await respond(f"-> Pid #: {pid}")
     await respond(f"-> Runs in: {cwd}")
-    #await respond(f"-> Admin: {core.admin_name} <email: {core.admin_email}>")
     await respond(f"-> Botnet nick: {core.botname}")
-    #await respond(f"-> Perm Owner(s): {owner_count}")
     await respond(f"-> Machine: {machine}")
-    await respond(f"-> Oper. System: {os_version}")
+    await respond(f"> Oper. System: {os_name} {os_ver}")
+    await respond(f"> Python Ver.: {py_ver}")
 
 async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
