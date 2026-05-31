@@ -2609,7 +2609,7 @@ async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
         return
 
     set_clause = ", ".join(f"{col} = ?" for col in all_updates)
-    values     = list(all_updates.values()) + [target]
+    values = list(all_updates.values())
 
     async with get_db(core.db_path) as db:
         await db.execute(
