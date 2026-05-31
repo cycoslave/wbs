@@ -8,10 +8,12 @@ import json
 import logging
 import secrets
 import hmac
-import ssl as ssl_lib
 import time
+import uuid
+import ssl as ssl_lib
 from datetime import datetime, timezone
-from typing import Dict, Optional, Any, Literal, Callable
+from collections import OrderedDict
+from typing import Dict, Optional, Any, Literal, Callable, Coroutine
 from dataclasses import dataclass
 
 from . import __version__
@@ -22,6 +24,7 @@ from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
 CLOCK_SKEW_WARN_SECONDS = 30
+MSG_TTL = 30
 
 class AutoLinkManager:
     """
@@ -153,6 +156,7 @@ class BotnetManager:
         self.subnet_id = self.config.get('botnet', {}).get('subnet_id', 1)
         self.my_handle = self.config.get('bot', {}).get('nick', 'WBS')
         self.autolink = AutoLinkManager(self)
+        self._msg_cache: OrderedDict[str, float] = OrderedDict()
         self.running = True
         self.loop = None
         
@@ -160,8 +164,9 @@ class BotnetManager:
         """Shutdown."""
         self.running = False
         self.autolink.stop()
-        for _, writer in self.peers.values():
-            writer.close()
+        for link in self.peers.values():
+            if link.writer and not link.writer.is_closing():
+                link.writer.close()
 
     async def start(self):
         """Start background tasks. Must be called from inside a running event loop."""
@@ -483,15 +488,169 @@ class BotnetManager:
             text = parts[2:]
             await self.core.partyline.send_to_session(sid, text)
 
-        #elif line.startswith('RESPONSE:'):
-        #    # Command response from another bot
-        #    msg = line[9:]
-        #    #self.party_q.put_nowait({
-        #    #    'type': 'botnet_response',
-        #    #    'from': from_bot,
-        #    #    'text': msg
-        #    #})
+        elif cmd == "CMD_ROUTE":
+            # Format: CMD_ROUTE <routing> <msg_id> <source> <target_or_dash> [subnet_id] <command> [args...]
+            # routing: broadcast | subnet | unicast
+            if len(parts) < 6:
+                log.warning(f"Malformed CMD_ROUTE from {from_bot}: {line[:80]}")
+                return
+
+            routing = parts[1].lower()
+
+            if routing == "subnet":
+                # CMD_ROUTE subnet <msg_id> <source> - <subnet_id> <command> [args...]
+                if len(parts) < 7:
+                    log.warning(f"Malformed CMD_ROUTE subnet from {from_bot}: {line[:80]}")
+                    return
+                msg_id    = parts[2]
+                source    = parts[3]
+                subnet_id = int(parts[5])
+                command   = parts[6].lower()
+                args      = " ".join(parts[7:])
+                target    = None
+            else:
+                # CMD_ROUTE broadcast|unicast <msg_id> <source> <target_or_dash> <command> [args...]
+                msg_id  = parts[2]
+                source  = parts[3]
+                target  = parts[4]
+                command = parts[5].lower()
+                args    = " ".join(parts[6:])
+
+            if not self._register_message(msg_id):
+                return  # duplicate — drop silently
+
+            addressed_to_me = (
+                routing == "broadcast"
+                or (routing == "unicast" and target.lower() == self.my_handle.lower())
+                or (routing == "subnet"  and self.subnet_id == subnet_id)
+            )
+
+            if addressed_to_me:
+                for pluginkey, handler in self.cmds.items():
+                    if pluginkey.name == command:
+                        await handler(pluginkey, args.split(), from_bot)
+                        break
+                else:
+                    log.warning(f"No handler for routed CMD_ROUTE command: {command}")
+
+            # Relay logic
+            if routing == "broadcast":
+                relay_peers = [
+                    link for name, link in self.peers.items()
+                    if link.authed and link.connected and link.writer
+                    and name != from_bot.lower()
+                ]
+            elif routing == "subnet":
+                relay_peers = [
+                    link for name, link in self.peers.items()
+                    if link.authed and link.connected and link.writer
+                    and name != from_bot.lower()
+                    and link.subnet_id == subnet_id
+                ]
+            elif routing == "unicast":
+                # Relay if we're not the target; flood-fill reaches the target eventually
+                relay_peers = [] if addressed_to_me else [
+                    link for name, link in self.peers.items()
+                    if link.authed and link.connected and link.writer
+                    and name != from_bot.lower()
+                ]
+            else:
+                relay_peers = []
+
+            if relay_peers:
+                tasks = [self._safe_send(link.writer, f"{line}\n") for link in relay_peers]
+                await asyncio.gather(*tasks, return_exceptions=True)
         
+        elif cmd == "CHAT_ROUTE":
+            # Format: CHAT_ROUTE <msg_id> <source_bot> <nick> :<message text>
+            if len(parts) < 4:
+                log.warning(f"Malformed CHAT_ROUTE from {from_bot}: {line[:80]}")
+                return
+
+            msg_id     = parts[1]
+            source_bot = parts[2]
+            nick       = parts[3]
+            # Colon-prefixed message body (IRC convention)
+            msg        = " ".join(parts[4:]).lstrip(":")
+
+            if not self._register_message(msg_id):
+                return  # duplicate — drop silently
+
+            # Display locally on the partyline
+            self.core.partyline.broadcast(f"<{source_bot}@{nick}> {msg}", True)
+
+            # Relay to all other authenticated peers except sender
+            relay_line = f"CHAT_ROUTE {msg_id} {source_bot} {nick} :{msg}\n"
+            tasks = [
+                self._safe_send(link.writer, relay_line)
+                for name, link in self.peers.items()
+                if link.authed and link.connected and link.writer
+                and name != from_bot.lower()
+            ]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        elif cmd == "UPDATE":
+            # Format: UPDATE <msg_id> <entity> <action_or_payload> <json>
+            if len(parts) < 4:
+                log.warning(f"Malformed UPDATE from {from_bot}: {line[:80]}")
+                return
+
+            msg_id  = parts[1]
+            entity  = parts[2].upper()
+
+            if not self._register_message(msg_id):
+                return  # duplicate — drop silently
+
+            # Relay to all other authenticated peers before processing
+            relay_line = " ".join(parts) + "\n"  # forward the original line verbatim
+            relay_tasks = [
+                self._safe_send(link.writer, relay_line)
+                for name, link in self.peers.items()
+                if link.authed and link.connected and link.writer
+                and name != from_bot.lower()
+            ]
+            if relay_tasks:
+                await asyncio.gather(*relay_tasks, return_exceptions=True)
+
+            # Now apply locally
+            try:
+                if entity in ("CHANNEL", "USER", "BOT"):
+                    action  = parts[3].upper()   # ADD or DEL
+                    payload = json.loads(" ".join(parts[4:]))
+
+                    if entity == "CHANNEL":
+                        if action == "ADD":
+                            await self.chan.merge_from_peer([payload], from_bot)
+                        elif action == "DEL":
+                            await self.chan.delete_from_peer(payload, from_bot)
+
+                    elif entity == "USER":
+                        if action == "ADD":
+                            await self.user.merge_from_peer([payload], from_bot)
+                        elif action == "DEL":
+                            await self.user.delete_from_peer(payload, from_bot)
+
+                    elif entity == "BOT":
+                        if action == "ADD":
+                            await self.bot.merge_from_peer([payload], from_bot)
+                        elif action == "DEL":
+                            await self.bot.delete_from_peer(payload, from_bot)
+
+                elif entity == "USERACCESS":
+                    payload = json.loads(" ".join(parts[3:]))
+                    await self.user.merge_access_from_peer([payload], from_bot)
+
+                elif entity == "BOTACCESS":
+                    payload = json.loads(" ".join(parts[3:]))
+                    await self.bot.merge_access_from_peer([payload], from_bot)
+
+                else:
+                    log.warning(f"Unknown UPDATE entity '{entity}' from {from_bot}")
+
+            except (json.JSONDecodeError, KeyError, IndexError) as exc:
+                log.error(f"Failed to apply UPDATE {entity} from {from_bot}: {exc}")
+
         elif cmd == "SHARE":
             share = parts[1]
             if share == "SUBNETS":
@@ -514,33 +673,6 @@ class BotnetManager:
 
         else:
             log.error(f"Invalid command {cmd} from {from_bot}")
-        
-    async def broadcast_chat(self, from_bot: str, msg: str, exclude: Optional[str] = None):
-        """Broadcast chat to all peers."""
-        line = f"CHAT {from_bot} {msg}\n"
-        tasks = []
-        for name,link in self.peers.items():
-            if link.name != exclude and link.authed and link.connected and link.writer:
-                tasks.append(self._safe_send(link.writer, line))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def broadcast_all(self, cmd: str):
-        """Broadcast command to all peers."""
-        msg = f"CMD {cmd}\n"
-        tasks = [self._safe_send(peer.writer, msg) for peer in self.peers.values()]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def broadcast_subnet(self, cmd: str, subnet_id: int):
-        targets = self.subnet.resolve_targets(
-            self.peers, scope="subnet", subnet_id=subnet_id
-        )
-        msg = f"CMD {cmd}\n"
-        await asyncio.gather(
-            *[self._safe_send(t.writer, msg) for t in targets],
-            return_exceptions=True,
-        )
     
     async def _safe_send(self, writer: asyncio.StreamWriter, msg: str):
         """Send with error handling."""
@@ -607,6 +739,102 @@ class BotnetManager:
         if skew > 0:
             log.debug("Clock skew with %s: %ds (acceptable)", peer_name, skew)
         return True
+
+    async def broadcast_chat(self, nick: str, msg: str, exclude: set[str] | None = None) -> None:
+        """
+        Broadcast a partyline chat message to every bot in the network.
+
+        Flood-fills via CHAT_ROUTE. Each hop relays to its own peers.
+        Loop prevention via msg_id stops cycles.
+
+        Args:
+            nick:    The handle/nick of the user who sent the message.
+            msg:     The chat message text.
+            exclude: Peer handles to skip (e.g. the peer this came from).
+        """
+        import uuid
+        msg_id = str(uuid.uuid4())
+        line   = f"CHAT_ROUTE {msg_id} {self.my_handle} {nick} :{msg}\n"
+        tasks  = [
+            self._safe_send(link.writer, line)
+            for name, link in self.peers.items()
+            if link.authed and link.connected and link.writer
+            and name not in (exclude or set())
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def broadcast_all(self, command: str, args: str = "") -> None:
+        """
+        Send a command to every bot in the network, directly linked or not.
+
+        Flood-fills via CMD_ROUTE broadcast. Each hop relays to its own
+        peers. Loop prevention via msg_id stops cycles.
+
+        Args:
+            command: Command name.
+            args:    Command arguments as a string.
+        """
+        import uuid
+        msg_id = str(uuid.uuid4())
+        line   = f"CMD_ROUTE broadcast {msg_id} {self.my_handle} - {command} {args}\n"
+        tasks  = [
+            self._safe_send(link.writer, line)
+            for link in self.peers.values()
+            if link.authed and link.connected and link.writer
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+    async def broadcast_subnet(self, command: str, args: str = "", subnet_id: int | None = None) -> None:
+        """
+        Send a command to all bots on a specific subnet, directly linked or not.
+
+        Uses CMD_ROUTE with routing=subnet so intermediate bots only relay
+        to peers that belong to the same subnet.
+
+        Args:
+            command:   Command name.
+            args:      Command arguments as a string.
+            subnet_id: Target subnet. Defaults to this bot's own subnet.
+        """
+        import uuid
+        sid    = subnet_id if subnet_id is not None else self.subnet_id
+        msg_id = str(uuid.uuid4())
+        line   = f"CMD_ROUTE subnet {msg_id} {self.my_handle} - {sid} {command} {args}\n"
+        tasks  = [
+            self._safe_send(link.writer, line)
+            for link in self.peers.values()
+            if link.authed and link.connected and link.writer
+            and link.subnet_id == sid
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+    async def unicast(self, target: str, command: str, args: str = "") -> None:
+        """
+        Send a command to one specific bot anywhere in the network.
+
+        Flood-fills via CMD_ROUTE unicast. Only the named target executes
+        it; intermediate bots relay silently. No routing table required.
+
+        Args:
+            target:  Destination bot handle.
+            command: Command name.
+            args:    Command arguments as a string.
+        """
+        import uuid
+        msg_id = str(uuid.uuid4())
+        line   = f"CMD_ROUTE unicast {msg_id} {self.my_handle} {target} {command} {args}\n"
+        tasks  = [
+            self._safe_send(link.writer, line)
+            for link in self.peers.values()
+            if link.authed and link.connected and link.writer
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def share_all_data(self, target_bot: str):
         """Comprehensive data sharing based on share_level."""
@@ -675,3 +903,68 @@ class BotnetManager:
     async def handle_share_channels(self, data: str, from_bot: str) -> None:
         channels = json.loads(data)
         await self.chan.merge_from_peer(channels, from_bot)
+
+    async def _sync(self, payload: str, exclude: set[str] | None = None) -> None:
+        """
+        Send a pre-built UPDATE line to all authenticated peers.
+        Internal helper — all public sync_* methods go through here.
+        """
+        import uuid
+        msg_id = str(uuid.uuid4())
+        line   = f"UPDATE {msg_id} {payload}\n"
+        tasks  = [
+            self._safe_send(link.writer, line)
+            for name, link in self.peers.items()
+            if link.authed and link.connected and link.writer
+            and name not in (exclude or set())
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def sync_channel(self, action: str, channel_data: dict) -> None:
+        """
+        Broadcast a channel add or delete to the network.
+
+        Args:
+            action:       'ADD' or 'DEL'
+            channel_data: Dict representation of the channel row.
+        """
+        await self._sync(f"CHANNEL {action} {json.dumps(channel_data)}")
+
+    async def sync_user(self, action: str, user_data: dict) -> None:
+        """
+        Broadcast a user add or delete to the network.
+
+        Args:
+            action:    'ADD' or 'DEL'
+            user_data: Dict representation of the user row.
+        """
+        await self._sync(f"USER {action} {json.dumps(user_data)}")
+
+    async def sync_bot(self, action: str, bot_data: dict) -> None:
+        """
+        Broadcast a bot add or delete to the network.
+
+        Args:
+            action:   'ADD' or 'DEL'
+            bot_data: Dict representation of the bot row.
+        """
+        await self._sync(f"BOT {action} {json.dumps(bot_data)}")
+
+    async def sync_user_access(self, access_data: dict) -> None:
+        """
+        Broadcast a user flag or hostmask change to the network.
+
+        Args:
+            access_data: Dict with at minimum {'handle': ..., 'flags': ..., 'hosts': ...}
+        """
+        await self._sync(f"USERACCESS {json.dumps(access_data)}")
+
+    async def sync_bot_access(self, access_data: dict) -> None:
+        """
+        Broadcast a bot flag or hostmask change to the network.
+
+        Args:
+            access_data: Dict with at minimum {'handle': ..., 'flags': ...}
+        """
+        await self._sync(f"BOTACCESS {json.dumps(access_data)}")
