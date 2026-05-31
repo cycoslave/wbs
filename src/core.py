@@ -261,6 +261,7 @@ class Core:
             )
             bot_session.peer_ip = event.get('peer_ip', 'unknown')
             self.bot_sessions[bot_name.lower()] = bot_session
+            asyncio.create_task(self.botnet.read_peer(bot_name, reader, writer), name=f"read_peer:{bot_name}")
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
             log.debug(f"Bot session {bot_id} created for {bot_name}")
 

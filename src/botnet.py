@@ -8,13 +8,14 @@ import json
 import logging
 import secrets
 import hmac
+import hashlib
 import time
 import uuid
 import ssl as ssl_lib
 from datetime import datetime, timezone
 from collections import OrderedDict
 from typing import Dict, Optional, Any, Literal, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import __version__
 from .bot import BotManager
@@ -24,25 +25,21 @@ from .subnet import SubnetManager
 
 log = logging.getLogger("wbs.botnet")
 CLOCK_SKEW_WARN_SECONDS = 30
+MAX_MSG_CACHE_SIZE = 2048
 MSG_TTL = 30
 
 def _derive_shared_password(partial_a: str, partial_b: str) -> str:
     """
     Derive the shared link password from the two per-link nonces.
-
-    Both sides produce the same result regardless of who is A and who is B
-    because we XOR the two nonces (commutative).
-
-    partial_a, partial_b: hex strings (output of secrets.token_hex(16))
+    Both sides produce the same result because XOR is commutative.
     """
     bytes_a = bytes.fromhex(partial_a)
     bytes_b = bytes.fromhex(partial_b)
-    # XOR the two nonces → unique 16-byte key known only to these two bots
     xor_key = bytes(x ^ y for x, y in zip(bytes_a, bytes_b))
     return hmac.new(
-        xor_key,                        # per-link secret key
-        b"wbs-keyexchange-v1",          # public domain separator
-        "sha256"
+        xor_key,
+        b"wbs-keyexchange-v1",
+        hashlib.sha256
     ).hexdigest()
 
 class AutoLinkManager:
@@ -130,24 +127,32 @@ class AutoLinkManager:
             # On success, _tick will see authed=True next pass and skip.
             self._next_attempt[handle] = now + interval
 
-@dataclass
 class BotLink:
-    """Bot peer configuration."""
+    """Represents a connected or pending botnet peer."""
+    # Required fields — no default, must be supplied at construction
     name: str
     host: str
     port: int
-    reader: Optional[asyncio.StreamReader] = None
-    writer: Optional[asyncio.StreamWriter] = None
-    nick: str = None
-    subnet_id: Optional[int] = None
-    session_id: Optional[int] = None
-    password: Optional[str] = None
-    temp_partial: Optional[str] = None  # For key exchange
+
+    # Optional connection handles — set after the asyncio connection is established
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+
+    # Optional identity/config fields
+    nick:         str | None = None      # ← was: str = None (incorrect)
+    subnet_id:    int | None = None
+    session_id:   int | None = None
+    password:     str | None = None
+    temp_partial: str | None = None      # ephemeral key-exchange nonce
+
+    # Settings with meaningful defaults
     share_level: str = 'subnet'
     role: Literal['hub', 'backup', 'leaf', 'none'] = 'none'
-    authed: bool = False
-    connected: bool = False
-    connected_at: Optional[datetime] = None
+
+    # State flags
+    authed:       bool = False
+    connected:    bool = False
+    connected_at: datetime | None = None
 
 @dataclass(frozen=True)
 class BotCommand:
@@ -167,7 +172,7 @@ class BotnetManager:
         self.chan = ChannelManager(self.db_path)
         self.bot = BotManager(self.db_path)
         self.subnet = SubnetManager(self.db_path)
-        self.peers: Dict[BotLink] = {}
+        self.peers: Dict[str, BotLink] = {}
         self.cmds: Dict[BotCommand, Callable] = {}
         self._peer_skew: dict[str, int] = {}
         
@@ -295,8 +300,6 @@ class BotnetManager:
                 link.subnet_id = self.subnet_id
                 link.password = bot.password
                 self.peers[from_bot.lower()] = link
-                # connected + irc_q notification deferred until LINKREADY is received
-                asyncio.create_task(self.read_peer(from_bot, reader, writer))
             else:
                 link = self.peers[from_bot.lower()]
 
@@ -317,9 +320,6 @@ class BotnetManager:
                 if len(parts) > 6:  
                     their_partial = parts[6]
                     our_partial = secrets.token_hex(16)
-
-                    #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
-                    #shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
                     shared_password = _derive_shared_password(their_partial, our_partial)
                     link.password = shared_password
                     log.info(f"Generated shared password with {from_bot}")
@@ -346,15 +346,13 @@ class BotnetManager:
                 if len(parts) > 6:
                     their_partial = parts[6]
                     our_partial = link.temp_partial
-                    #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
-                    #shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
                     shared_password = _derive_shared_password(our_partial, their_partial)
                     link.password = shared_password
                     link.temp_partial = None 
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
-                    chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), "sha256").hexdigest()
+                    chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), hashlib.sha256).hexdigest()
                     challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                     await self._safe_send(writer, challenge)
                 else:
@@ -362,15 +360,13 @@ class BotnetManager:
                     writer.close()
                     return
             else:
-                #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
-                chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), "sha256").hexdigest()
+                chalhash = hmac.new(link.password.encode(), f"{self.my_handle}{parts[1]}".encode(), hashlib.sha256).hexdigest()
                 challenge = f"LINKAUTH {self.my_handle} {chalhash} {int(time.time())}\n"
                 await self._safe_send(writer, challenge)
             return
         
         elif cmd == "LINKAUTH":
-            #expectedhash = hashlib.sha256(f"{parts[1]}{link.password}{self.my_handle}".encode()).hexdigest()
-            expectedhash = hmac.new(link.password.encode(), f"{parts[1]}{self.my_handle}".encode(), "sha256").hexdigest()
+            expectedhash = hmac.new(link.password.encode(), f"{parts[1]}{self.my_handle}".encode(), hashlib.sha256).hexdigest()
             if len(parts) < 3 or not hmac.compare_digest(parts[2], expectedhash):
                 log.error(f"Auth failed from {from_bot}")
                 writer.close()
@@ -400,14 +396,14 @@ class BotnetManager:
                 'handle': link.name,
                 'nick': link.name
             })
-            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\\n")
+            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\n")
             asyncio.create_task(self.share_all_data(from_bot))
             return
         
         elif cmd == "LINKREADY":
-            if len(parts) >= 4:
+            if len(parts) >= 5:
                 try:
-                    peer_ts = int(parts[4])
+                    peer_ts = int(parts[-1])
                     if not await self.check_clock_skew(peer_ts, from_bot):
                         await self._safe_send(writer, f"ERROR :clock skew too large\n")
                         writer.close()
@@ -438,11 +434,11 @@ class BotnetManager:
             return
         
         elif cmd == "CHAT":
-            # Format: CHAT <from_bot> <message>
-            # parts[0] = "CHAT", parts[1] = from_bot, parts[2:] = message
-            from_bot = parts[1]
-            nick = parts[2]
-            message = ' '.join(parts[3:])
+            if len(parts) < 3:
+                log.warning("Malformed CHAT from %s: %r", from_bot, line[:80])
+                return
+            nick    = parts[1]
+            message = ' '.join(parts[2:])
             self.core.partyline.broadcast(f"<{from_bot}@{nick.rstrip(':')}> {message}", True)
 
         elif cmd == "CMD":
@@ -718,7 +714,7 @@ class BotnetManager:
 
     async def dispatch(self, plugin: str, name: str, **kwargs):
         """Find handler, pass cmd_key + kwargs."""
-        key = BotCommand(plugin.lower(), name.lower())
+        key = BotCommand(name.lower(), plugin.lower())
         handler = self.cmds.get(key)
         if handler:
             await handler(key, **kwargs)
@@ -986,3 +982,36 @@ class BotnetManager:
             access_data: Dict with at minimum {'handle': ..., 'flags': ...}
         """
         await self._sync(f"BOTACCESS {json.dumps(access_data)}")
+
+    def _register_message(self, msg_id: str) -> bool:
+        """
+        Deduplication guard for flood-fill routing.
+
+        Returns True if msg_id is new (caller should process + relay).
+        Returns False if msg_id was already seen (caller should drop silently).
+
+        Uses an OrderedDict as a bounded FIFO cache keyed by msg_id.
+        Entries expire after MSG_TTL seconds; cache is also capped at
+        MAX_MSG_CACHE_SIZE to bound memory under flood conditions.
+        """
+        now = time.monotonic()
+
+        # Already seen — drop
+        if msg_id in self._msg_cache:
+            return False
+
+        # Evict expired entries from the front (oldest inserted first)
+        while self._msg_cache:
+            oldest_id, oldest_ts = next(iter(self._msg_cache.items()))
+            if now - oldest_ts > MSG_TTL:
+                self._msg_cache.popitem(last=False)
+            else:
+                break  # remaining entries are newer
+
+        # Hard cap: if still over limit, evict oldest regardless of age
+        while len(self._msg_cache) >= MAX_MSG_CACHE_SIZE:
+            self._msg_cache.popitem(last=False)
+
+        # Register new message
+        self._msg_cache[msg_id] = now
+        return True        
