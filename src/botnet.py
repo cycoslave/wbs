@@ -26,6 +26,25 @@ log = logging.getLogger("wbs.botnet")
 CLOCK_SKEW_WARN_SECONDS = 30
 MSG_TTL = 30
 
+def _derive_shared_password(partial_a: str, partial_b: str) -> str:
+    """
+    Derive the shared link password from the two per-link nonces.
+
+    Both sides produce the same result regardless of who is A and who is B
+    because we XOR the two nonces (commutative).
+
+    partial_a, partial_b: hex strings (output of secrets.token_hex(16))
+    """
+    bytes_a = bytes.fromhex(partial_a)
+    bytes_b = bytes.fromhex(partial_b)
+    # XOR the two nonces → unique 16-byte key known only to these two bots
+    xor_key = bytes(x ^ y for x, y in zip(bytes_a, bytes_b))
+    return hmac.new(
+        xor_key,                        # per-link secret key
+        b"wbs-keyexchange-v1",          # public domain separator
+        "sha256"
+    ).hexdigest()
+
 class AutoLinkManager:
     """
     Periodically attempts to connect to peers marked autolink=1 in the DB.
@@ -210,13 +229,7 @@ class BotnetManager:
             
             self.peers[handle.lower()] = link
             asyncio.create_task(self.read_peer(handle, reader, writer))
-            log.info(f"Connected to peer {handle} at {bot.address}:{bot.port}")
-            link.connected = True
-            self.core.irc_q.put({
-                'type': 'BOTLINK_LINK', 
-                'handle': link.name,
-                'nick': link.name
-            })
+            log.info(f"Connecting to peer {handle} at {bot.address}:{bot.port} — awaiting auth")
             
         except Exception as e:
             log.error(f"Failed to connect to {handle}: {e}")
@@ -282,12 +295,7 @@ class BotnetManager:
                 link.subnet_id = self.subnet_id
                 link.password = bot.password
                 self.peers[from_bot.lower()] = link
-                link.connected = True
-                self.core.irc_q.put({
-                    'type': 'BOTLINK_LINK', 
-                    'handle': link.name,
-                    'nick': link.name
-                })
+                # connected + irc_q notification deferred until LINKREADY is received
                 asyncio.create_task(self.read_peer(from_bot, reader, writer))
             else:
                 link = self.peers[from_bot.lower()]
@@ -311,7 +319,8 @@ class BotnetManager:
                     our_partial = secrets.token_hex(16)
 
                     #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
-                    shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
+                    #shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
+                    shared_password = _derive_shared_password(their_partial, our_partial)
                     link.password = shared_password
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
@@ -338,9 +347,10 @@ class BotnetManager:
                     their_partial = parts[6]
                     our_partial = link.temp_partial
                     #shared_password = hashlib.sha256((min(their_partial, our_partial) + max(their_partial, our_partial)).encode()).hexdigest()
-                    shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
+                    #shared_password = hmac.new(b"wbs-keyexchange-v1", f"{min(their_partial, our_partial)}:{max(their_partial, our_partial)}".encode(), "sha256").hexdigest()
+                    shared_password = _derive_shared_password(our_partial, their_partial)
                     link.password = shared_password
-                    
+                    link.temp_partial = None 
                     log.info(f"Generated shared password with {from_bot}")
                     await self.bot.chpass(from_bot.lower(), password=shared_password)
                     #chalhash = hashlib.sha256(f"{self.my_handle}{link.password}{parts[1]}".encode()).hexdigest()
@@ -381,9 +391,16 @@ class BotnetManager:
 
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
+            link.connected = True
             link.connected_at = datetime.now(timezone.utc)
             self.subnet.register_peer(from_bot, link.subnet_id)
-            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\n")
+            self.core.bot_sessions[from_bot.lower()] = link
+            self.core.irc_q.put({
+                'type': 'BOTLINK_LINK',
+                'handle': link.name,
+                'nick': link.name
+            })
+            await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\\n")
             asyncio.create_task(self.share_all_data(from_bot))
             return
         
@@ -403,9 +420,15 @@ class BotnetManager:
 
             self.core.partyline.broadcast(f"*** {from_bot} linked to botnet", True)
             link.authed = True
+            link.connected = True
             self.subnet.register_peer(from_bot, link.subnet_id)
             self.core.bot_sessions[from_bot.lower()] = link
             link.connected_at = datetime.now(timezone.utc)
+            self.core.irc_q.put({
+                'type': 'BOTLINK_LINK',
+                'handle': link.name,
+                'nick': link.name
+            })
             asyncio.create_task(self.share_all_data(from_bot))
             return
         
@@ -752,7 +775,6 @@ class BotnetManager:
             msg:     The chat message text.
             exclude: Peer handles to skip (e.g. the peer this came from).
         """
-        import uuid
         msg_id = str(uuid.uuid4())
         line   = f"CHAT_ROUTE {msg_id} {self.my_handle} {nick} :{msg}\n"
         tasks  = [
@@ -775,7 +797,6 @@ class BotnetManager:
             command: Command name.
             args:    Command arguments as a string.
         """
-        import uuid
         msg_id = str(uuid.uuid4())
         line   = f"CMD_ROUTE broadcast {msg_id} {self.my_handle} - {command} {args}\n"
         tasks  = [
@@ -799,7 +820,6 @@ class BotnetManager:
             args:      Command arguments as a string.
             subnet_id: Target subnet. Defaults to this bot's own subnet.
         """
-        import uuid
         sid    = subnet_id if subnet_id is not None else self.subnet_id
         msg_id = str(uuid.uuid4())
         line   = f"CMD_ROUTE subnet {msg_id} {self.my_handle} - {sid} {command} {args}\n"
@@ -825,7 +845,6 @@ class BotnetManager:
             command: Command name.
             args:    Command arguments as a string.
         """
-        import uuid
         msg_id = str(uuid.uuid4())
         line   = f"CMD_ROUTE unicast {msg_id} {self.my_handle} {target} {command} {args}\n"
         tasks  = [
@@ -909,7 +928,6 @@ class BotnetManager:
         Send a pre-built UPDATE line to all authenticated peers.
         Internal helper — all public sync_* methods go through here.
         """
-        import uuid
         msg_id = str(uuid.uuid4())
         line   = f"UPDATE {msg_id} {payload}\n"
         tasks  = [
