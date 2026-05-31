@@ -1081,7 +1081,7 @@ async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
         subnet_id = row["id"]
 
     try:
-        await core.chan.addchan(channel, subnet_id=subnet_id, added_by=handle)
+        await core.chan.addchan(channel, subnet_id=subnet_id, created_by=handle)
         core.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
         subnet_label = subnet_arg or f"subnet {subnet_id}"
         await respond(f"→ Channel {channel} added (scope: {subnet_label})!")
@@ -1142,7 +1142,7 @@ async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
             return
         subnet_id = row["id"]
 
-    if await core.user.adduser(new_handle, hostmask, subnet_id=subnet_id, added_by=handle):
+    if await core.user.adduser(new_handle, hostmask, subnet_id=subnet_id, created_by=handle):
         scope = subnet_arg or f"subnet {subnet_id}"
         await respond(f"→ User {new_handle} added (scope: {scope})!")
     else:
@@ -2484,7 +2484,7 @@ async def cmd_denyhost(core, session_id, args, respond):
     caller = core.partyline.sessions[session_id].handle
 
     await core.guard.block(
-        ip=ip, reason="manual", added_by=caller,
+        ip=ip, reason="manual", created_by=caller,
         expires_at=expires, note=note
     )
     duration_str = f"for {minutes}m" if minutes > 0 else "permanently"
@@ -2525,7 +2525,7 @@ async def cmd_blocklist(core, session_id, args, respond):
     for e in sorted(entries, key=lambda x: x.added_at):
         exp = (datetime.datetime.fromtimestamp(e.expires_at).strftime("%Y-%m-%d %H:%M")
                if e.expires_at else "never")
-        await respond(f"{e.ip:<18} {e.reason:<14} {e.added_by:<12} {exp:<20} {e.note}")
+        await respond(f"{e.ip:<18} {e.reason:<14} {e.created_by:<12} {exp:<20} {e.note}")
 
 async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
     """
