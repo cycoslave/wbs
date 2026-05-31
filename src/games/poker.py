@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from itertools import combinations
 
-from . import Game, GameSession, _db
+from . import Game, GameSession
+from ..db import get_db
 
 DEFAULT_STARTING_CASH = 1500
 DEFAULT_SMALL_BLIND = 10
@@ -151,10 +152,10 @@ class PokerGame(Game):
 
     async def load(self):
         await super().load()
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit()
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[1])
             await db.commit()
         self.log.info(f"Game {self.name} {self.version} loaded")
@@ -641,7 +642,7 @@ class PokerGame(Game):
                 await self._show_help(chan)
 
     async def _load_settings(self, channel: str) -> dict:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT * FROM poker_settings WHERE channel=?", (channel,)
             ) as cursor:
@@ -661,7 +662,7 @@ class PokerGame(Game):
         }
 
     async def _load_cash(self, nick: str, starting_cash: int) -> int:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT cash FROM poker_cash WHERE nick=?", (nick,)
             ) as cursor:
@@ -675,7 +676,7 @@ class PokerGame(Game):
         return row["cash"] if row else starting_cash
 
     async def _save_cash(self, nick: str, amount: int):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO poker_cash(nick, cash) VALUES(?,?) "
                 "ON CONFLICT(nick) DO UPDATE SET cash=excluded.cash, "
@@ -686,7 +687,7 @@ class PokerGame(Game):
 
     async def _show_top(self, chan: str):
         self._set_cooldown(chan, "pktop")
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT nick, cash FROM poker_cash ORDER BY cash DESC LIMIT 5"
             ) as cursor:

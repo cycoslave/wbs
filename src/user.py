@@ -2,8 +2,6 @@
 """
 Handles user management for WBS IRC bot.
 """
-import aiosqlite
-import sqlite3
 import json
 import bcrypt
 import time
@@ -89,8 +87,7 @@ class UserManager:
         now = int(time.time())
         hostmasks = json.dumps([hostmask] if hostmask else [])
 
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             async with db.execute(
                 "SELECT handle, deleted_at FROM users WHERE handle = ?", (handle,)
             ) as cur:
@@ -126,7 +123,7 @@ class UserManager:
         """Soft-delete a user and their access entries."""
         import time
         now = int(time.time())
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             cur = await db.execute(
                 "UPDATE users SET deleted_at = ?, updated_at = ?, updated_by = ? "
                 "WHERE handle = ? AND deleted_at IS NULL",
@@ -436,15 +433,14 @@ class UserManager:
             rows = await cursor.fetchall()
         return [User.from_row(row) for row in rows]  
         
-    def exist(self, user: str):
-        """Check if user exists."""
-        try:
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                cursor = db.execute("SELECT 1 FROM users WHERE handle = ?", (user.lower(),))
-                return cursor.fetchone() is not None
-        except sqlite3.Error:
-            return False        
+    async def exist(self, handle: str) -> bool:
+        """Return True if a user with this handle exists and is not deleted."""
+        async with get_db(self.db_path) as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM users WHERE handle = ? AND deleted_at IS NULL",
+                (handle.lower(),)
+            )
+        return row is not None
 
     def to_dict(self, user: User) -> dict:
         """Convert User to dict for DB INSERT/UPDATE."""
@@ -507,7 +503,7 @@ class UserManager:
 
     async def merge_from_peer(self, users: list[dict], from_bot: str) -> None:
         """Merge user records from a botnet peer. Last-write-wins on updated_at."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             for user in users:
                 handle = user['handle'].lower()
                 remote_updated = user.get('updated_at') or 0
@@ -563,9 +559,7 @@ class UserManager:
 
     async def merge_access_from_peer(self, access_list: list[dict], from_bot: str) -> None:
         """Merge user_access records from a botnet peer. Last-write-wins on updated_at."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-
+        async with get_db(self.db_path) as db:
             for acc in access_list:
                 handle = acc['handle'].lower()
                 channel = acc.get('channel')
@@ -634,8 +628,7 @@ class UserManager:
 
     async def serialize_for_peer(self) -> list[dict]:
         """Return all users (including soft-deleted) for botnet share. Passwords included."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 """SELECT handle, password, hostmasks, is_locked, comment,
                         created_at, updated_at, created_by, updated_by,
@@ -647,8 +640,7 @@ class UserManager:
 
     async def serialize_access_for_peer(self) -> list[dict]:
         """Return all user_access rows for botnet share."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 """SELECT handle, channel, subnet_id,
                         has_partyline, is_admin, is_owner, is_friend,

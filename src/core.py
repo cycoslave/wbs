@@ -650,10 +650,10 @@ class Core:
         channel = event.get('channel', '')
         #await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
         # If bot was kicked, remove channel entirely
-        if kicked_nick == self.botname:
-            if channel in self.channels:
-                del self.channels[channel]
-            return
+        #if kicked_nick == self.botname:
+        #    if channel in self.channels:
+        #        del self.channels[channel]
+        #    return
         # Update channel user list
         chan = self.channels.get(channel)
         if chan and kicked_nick in chan.users:

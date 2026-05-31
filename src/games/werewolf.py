@@ -28,7 +28,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
-from . import Game, GameSession, _db
+from . import Game, GameSession
+from ..db import get_db
 
 REGISTRATION_SECS = 60
 REGISTRATION_WARN = 30
@@ -92,7 +93,7 @@ class WerewolfGame(Game):
 
     async def load(self):
         await super().load()
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit()
         self.log.info(f"Game {self.name} {self.version} loaded")
@@ -554,7 +555,7 @@ class WerewolfGame(Game):
             await self.say(chan, line)
 
     async def _save_stats(self, nick: str, won: bool):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO werewolf_stats(nick, games_played, wins) VALUES(?,1,?) "
                 "ON CONFLICT(nick) DO UPDATE SET "

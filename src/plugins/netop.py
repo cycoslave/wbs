@@ -7,6 +7,7 @@ Description: Get op from linked bots & Give ops to linked bots.
 """
 import time
 from typing import Dict
+
 from . import Plugin
 from ..botnet import BotCommand
 

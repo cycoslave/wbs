@@ -15,19 +15,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 
+from ..db import get_db 
+
 log = logging.getLogger("wbs.games")
 _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
-
-@asynccontextmanager
-async def _db(db_path):
-    db = await aiosqlite.connect(db_path)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield db
-        await db.commit()
-    finally:
-        await db.close()
 
 @dataclass
 class GameContext:
@@ -65,7 +56,7 @@ class Game:
         self.sessions: Dict[str, GameSession] = {}
 
     async def load(self):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO loaded_modules(name, type, scope, owner, autoload) VALUES(?,?,?,?,1) "
                 "ON CONFLICT(name, type) DO UPDATE SET "
@@ -74,7 +65,7 @@ class Game:
             )
 
     async def unload(self):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "DELETE FROM loaded_modules WHERE name=? AND type='game'",
                 (self.name)
@@ -125,7 +116,7 @@ class Game:
         safe = {k: v for k, v in session.data.items()
                 if not callable(v) and not isinstance(v, self._UNSERIALIZABLE)}
         
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             # Auto-create if missing
             try:
                 await db.execute("""
@@ -158,7 +149,7 @@ class Game:
                     raise
 
     async def session_load(self, scope: str, target: str) -> Optional[dict]:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT data FROM game_sessions "
                 "WHERE game_name=? AND scope=? AND target=?",
@@ -168,7 +159,7 @@ class Game:
         return json.loads(row["data"]) if row else None
 
     async def session_clear(self, session: GameSession):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "DELETE FROM game_sessions "
                 "WHERE game_name=? AND scope=? AND target=?",
@@ -225,7 +216,7 @@ class GameManager:
 
             await game.load()
 
-            async with _db(self.core.db_path) as db:
+            async with get_db(self.core.db_path) as db:
                 await db.execute(
                     "INSERT INTO loaded_modules(name, type, scope, owner) VALUES(?,?,?,?) "
                     "ON CONFLICT(name, type) DO UPDATE SET "
@@ -245,7 +236,7 @@ class GameManager:
             return
         await game.unload()
 
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "DELETE FROM loaded_modules WHERE name=? AND type='game'",
                 (game_name, target)

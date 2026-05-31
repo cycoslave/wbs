@@ -2,8 +2,6 @@
 """
 Handles IRC channel management for WBS.
 """
-import aiosqlite
-import sqlite3
 import logging
 import json
 from irc import modes
@@ -182,8 +180,7 @@ class Channel:
 
     async def bind_to_subnet(self, channel: str, subnet_id: int, created_by: Optional[str] = None) -> bool:
         """Bind a channel to a specific subnet."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 """INSERT OR IGNORE INTO channel_subnets
                 (channel_name, subnet_id, created_by)
@@ -195,8 +192,7 @@ class Channel:
 
     async def unbind_from_subnet(self, channel: str, subnet_id: int) -> bool:
         """Remove a specific subnet binding."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 "DELETE FROM channel_subnets WHERE channel_name = ? AND subnet_id = ?",
                 (channel, subnet_id)
@@ -206,8 +202,7 @@ class Channel:
 
     async def make_global(self, channel: str) -> bool:
         """Remove all subnet bindings — channel becomes active on all subnets."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 "DELETE FROM channel_subnets WHERE channel_name = ?",
                 (channel,)
@@ -476,8 +471,7 @@ class ChannelManager:
         Add a channel. If subnet_id is None the channel is global (joins on all subnets).
         Handles resurrection of soft-deleted channels.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             async with db.execute(
                 "SELECT name, deleted_at FROM channels WHERE name = ?", (channel,)
             ) as cur:
@@ -515,7 +509,7 @@ class ChannelManager:
 
     async def delchan(self, channel: str, deleted_by: str = None) -> bool:
         """Soft-delete a channel (sets deleted_at, keeps row for sync)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             now = int(__import__('time').time())
             cur = await db.execute(
                 "UPDATE channels SET deleted_at = ?, updated_at = ?, updated_by = ? "
@@ -598,14 +592,14 @@ class ChannelManager:
             result.append(f"  Comment: {chan['comment'] or 'None'}")
             return "\n".join(result)
 
-    def exist(self, channel: str):
-        try:
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                cursor = db.execute("SELECT 1 FROM channels WHERE name = ?", (channel.lower(),))
-                return cursor.fetchone() is not None
-        except sqlite3.Error:
-            return False
+    async def exist(self, channel: str) -> bool:
+        """Return True if a channel exists and is not deleted."""
+        async with get_db(self.db_path) as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM channels WHERE name = ? AND deleted_at IS NULL",
+                (channel.lower(),)
+            )
+        return row is not None
 
     def channel_to_dict(self, channel: Channel) -> dict:
         """Convert Channel to dict for DB INSERT/UPDATE."""
@@ -672,9 +666,7 @@ class ChannelManager:
         Merge channel records from a botnet peer.
         Last-write-wins on updated_at. channel_subnets merged idempotently.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-
+        async with get_db(self.db_path) as db:
             for ch in channels:
                 name = ch['name']
                 remote_updated = ch.get('updated_at') or 0
@@ -760,8 +752,7 @@ class ChannelManager:
 
     async def serialize_for_peer(self) -> list[dict]:
         """Return all channels with their subnet_ids for botnet share."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db(self.db_path) as db:
             cursor = await db.execute("SELECT * FROM channels")
             rows = await cursor.fetchall()
             channels = []

@@ -23,7 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import Game, GameSession, _db
+from . import Game, GameSession
+from ..db import get_db
 
 DEFAULT_STARTING_CASH = 1500
 DEFAULT_MIN_BET = 10
@@ -97,20 +98,19 @@ class BlackjackGame(Game):
 
     async def load(self):
         await super().load()  
-        db_path = self.core.db_path 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit() 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[1])
             await db.commit() 
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_settings")
             await db.commit() 
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_cash")
             await db.commit() 
         await super().unload() 
@@ -422,7 +422,7 @@ class BlackjackGame(Game):
             return await self.notice(nick, f"{label} must be a number.")
 
         cfg[key] = value
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 f"INSERT INTO blackjack_settings(channel, {key}) VALUES(?,?) "
                 f"ON CONFLICT(channel) DO UPDATE SET {key}=excluded.{key}, "
@@ -433,7 +433,7 @@ class BlackjackGame(Game):
 
     async def _show_top(self, chan: str):
         self._set_cooldown(chan, "bjtop")
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT nick, cash FROM blackjack_cash ORDER BY cash DESC LIMIT 5"
             ) as cursor:
@@ -460,7 +460,7 @@ class BlackjackGame(Game):
         await self.say(chan, f"    !bjtop                - Top 5 chip leaders.")
 
     async def _load_settings(self, channel: str) -> dict:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT * FROM blackjack_settings WHERE channel=?", (channel,)
             ) as cursor:
@@ -480,7 +480,7 @@ class BlackjackGame(Game):
         }
 
     async def _load_cash(self, nick: str, starting_cash: int) -> int:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT cash FROM blackjack_cash WHERE nick=?", (nick,)
             ) as cursor:
@@ -494,7 +494,7 @@ class BlackjackGame(Game):
         return row["cash"] if row else starting_cash
 
     async def _save_cash(self, nick: str, amount: int):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO blackjack_cash(nick, cash) VALUES(?,?) "
                 "ON CONFLICT(nick) DO UPDATE SET cash=excluded.cash, "

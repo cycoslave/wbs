@@ -11,18 +11,9 @@ import aiosqlite
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
-log = logging.getLogger("wbs.plugins")
+from ..db import get_db 
 
-@asynccontextmanager
-async def _db(db_path):
-    db = await aiosqlite.connect(db_path)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield db
-        await db.commit()
-    finally:
-        await db.close()
+log = logging.getLogger("wbs.plugins")
 
 class Plugin:
     """Base plugin interface"""
@@ -38,7 +29,7 @@ class Plugin:
     
     async def load(self):
         """Create plugin-owned tables, then run custom setup."""
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO loaded_modules(name, type, scope, autoload) VALUES(?, 'plugin', NULL, 1) "
                 "ON CONFLICT(name, type) DO UPDATE SET loaded_at=strftime('%s','now')",
@@ -48,7 +39,7 @@ class Plugin:
     async def unload(self):
         if not self.TABLE_SQL:
             return
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             for sql in self.TABLE_SQL:
                 match = re.search(r'CREATE TABLE IF NOT EXISTS\s+(\w+)', sql, re.IGNORECASE)
                 if match:
@@ -117,7 +108,7 @@ class PluginManager:
             self.plugins[plugin_name] = plugin_instance
             await plugin_instance.load()
 
-            async with _db(self.core.db_path) as db:
+            async with get_db(self.core.db_path) as db:
                 await db.execute(
                     "INSERT INTO loaded_modules(name, type, autoload) VALUES(?,?,1) "
                     "ON CONFLICT(name, type) DO UPDATE SET "
@@ -137,7 +128,7 @@ class PluginManager:
             return
         await plugin.unload()
 
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "DELETE FROM loaded_modules WHERE name=? AND type='plugin'",
                 (name,)   # note the comma — single-element tuple

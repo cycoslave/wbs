@@ -1463,8 +1463,8 @@ async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
         if sess['handle'].lower() == old_handle.lower():
             sess['handle'] = new_handle
             break
-    if core.user.exist(old_handle):
-        if core.user.exist(new_handle):
+    if await core.user.exist(old_handle):
+        if await core.user.exist(new_handle):
             await respond(f"User already exist: {new_handle}")
         else:
             core.user.change_handle(old_handle, new_handle)

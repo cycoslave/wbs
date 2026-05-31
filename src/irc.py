@@ -446,8 +446,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         reason = event.arguments[1] if len(event.arguments) > 1 else ''
         channel = event.target
         if kicked_nick == conn.get_nickname():
-            if self.chan.exist(channel):
-                conn.join(channel)
+            asyncio.run_coroutine_threadsafe(
+                self._join_if_tracked(conn, channel),
+                self.loop
+            )
         self._emit_event({
             'type': EventType.KICK,
             'channel': channel,
@@ -526,24 +528,17 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         """Join channel on invite if tracked in DB"""
         inviter_nick = event.source.nick
         channel = event.arguments[0]
-        
-        if self.chan.exist(channel):
-            conn.join(channel)
-            log.info(f"Joined {channel} on invite from {inviter_nick}")
-            self._emit_event({
-                'type': 'ON_INVITE',
-                'channel': channel,
-                'inviter': inviter_nick,
-                'solicitation': 'Solicited'
-            })
-        else:
-            log.debug(f"Ignored invite to {channel} from {inviter_nick}")
-            self._emit_event({
-                'type': 'ON_INVITE',
-                'channel': channel,
-                'inviter': inviter_nick,
-                'solicitation': 'Unsolicited'
-            })
+        log.info(f"Received channel invite on {channel} from {inviter_nick}")
+        asyncio.run_coroutine_threadsafe(
+            self._join_if_tracked(conn, channel),
+            self.loop
+        )
+        self._emit_event({
+            'type': 'ON_INVITE',
+            'channel': channel,
+            'inviter': inviter_nick
+        })
+
 
     def on_userhost(self, conn, event):
         """302 RPL_USERHOST — extract our public IP from server's view."""
@@ -994,6 +989,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 log.warning("Socket probe failed")
                 return False
         return False
+
+    async def _join_if_tracked(self, conn, channel: str) -> None:
+        """Async helper: rejoin channel if it exists in DB."""
+        try:
+            if await self.chan.exist(channel):
+                conn.join(channel)
+        except Exception as e:
+            log.error(f"_rejoin_if_tracked failed for {channel}: {e}")
 
     async def _irc_timer_loop(self, name: str, interval: float):
         while True:

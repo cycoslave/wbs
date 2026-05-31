@@ -8,8 +8,9 @@ Description: Track when users were last seen (like gseen.mod)
 import asyncio
 import time
 from typing import Dict, List, Optional
-from . import Plugin, _db
 
+from . import Plugin
+from ..db import get_db 
 
 class seenPlugin(Plugin):
     name    = "seen"
@@ -37,7 +38,7 @@ class seenPlugin(Plugin):
 
     async def load(self):
         await super().load()
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit()
         self.log.info(f"Plugin {self.name} {self.version} loaded")
@@ -46,7 +47,7 @@ class seenPlugin(Plugin):
         # cancel any pending botnet queries
         for fut in self._botnet_pending.values():
             fut.cancel()
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS seen")
             await db.commit()
         await super().unload()
@@ -202,7 +203,7 @@ class seenPlugin(Plugin):
         if not self._check_rate_limit(nick):
             return
         now = int(time.time())
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO seen (nick, hostmask, channel, action, last_seen)
@@ -218,7 +219,7 @@ class seenPlugin(Plugin):
             await db.commit()
 
     async def _get(self, nick: str) -> Optional[dict]:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT * FROM seen WHERE nick = ?", (nick,)
             ) as cur:
@@ -235,7 +236,7 @@ class seenPlugin(Plugin):
         return record
 
     async def _delete(self, nick: str):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DELETE FROM seen WHERE nick = ?", (nick,))
             await db.commit()
 

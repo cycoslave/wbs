@@ -5,17 +5,17 @@ version: 0.1.0
 by: cyco
 Description: Set and watch channel limit
 """
-import sqlite3
+import aiosqlite
 import time
-from contextlib import asynccontextmanager  
 from typing import Dict
-from . import Plugin, _db
+
+from . import Plugin
+from ..db import get_db 
 
 #    is_locked BOOLEAN DEFAULT 0,      -- CHANLOCK
 #    lock_by TEXT DEFAULT '',
 #    lock_at INTEGER DEFAULT 0,
 #    lock_reason TEXT DEFAULT '',
-
 
 class limitPlugin(Plugin):
     name       = "chanlock"
@@ -43,8 +43,7 @@ class limitPlugin(Plugin):
     async def load(self):
         """Initialize plugin and register timers"""
         await super().load()
-        db_path = self.core.db_path 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit() 
         self.core.irc_q.put({
@@ -60,8 +59,7 @@ class limitPlugin(Plugin):
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'limit'
         })
-        db_path = self.core.db_path 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS limit_settings")
             await db.commit() 
         await super().unload()
@@ -146,16 +144,13 @@ class limitPlugin(Plugin):
         return f"[limit] {chan} {label} set to {cast_value}."
 
     async def _load_settings(self, chan: str) -> dict:
-        db_path = self.core.db_path
         defaults = {
             "enabled": 0,
             "maxusers": 20,
             "kick_threshold": 5,
             "reset_interval": 60,
         }
-
-        async with _db(db_path) as db:
-            db.row_factory = sqlite3.Row  # ensures dict(row) works
+        async with get_db(self.core.db_path) as db:
             try:
                 async with db.execute(
                     """SELECT enabled, maxusers, kick_threshold, reset_interval
@@ -164,7 +159,7 @@ class limitPlugin(Plugin):
                 ) as cursor:
                     row = await cursor.fetchone()
                     return dict(row) if row else defaults
-            except sqlite3.OperationalError as exc:
+            except aiosqlite.OperationalError as exc:
                 if "no such table" in str(exc).lower():
                     self.log.warning(
                         "limit_settings table missing for %s, using defaults", chan
@@ -174,7 +169,7 @@ class limitPlugin(Plugin):
 
     async def _save_setting(self, channel: str, **kwargs):
         cols = ", ".join(f"{k}=?" for k in kwargs)
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 f"INSERT INTO limit_settings(channel) VALUES(?) "
                 f"ON CONFLICT(channel) DO UPDATE SET {cols}, "

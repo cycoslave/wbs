@@ -16,7 +16,8 @@ import random
 import time
 from typing import Optional
 
-from . import Game, GameSession, _db
+from . import Game, GameSession
+from ..db import get_db
 
 class DuckhuntGame(Game):
     name = "duckhunt"
@@ -51,20 +52,19 @@ class DuckhuntGame(Game):
 
     async def load(self):
         await super().load()
-        db_path = self.core.db_path 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit() 
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[1])
             await db.commit() 
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS duckhunt_settings")
             await db.commit() 
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS duckhunt_scores")
             await db.commit() 
         await super().unload()
@@ -252,7 +252,7 @@ class DuckhuntGame(Game):
 
     async def _show_scores(self, session: GameSession):
         chan = session.target
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT nick, score, quickest, longest FROM duckhunt_scores "
                 "WHERE channel=? ORDER BY score DESC LIMIT 5",
@@ -313,7 +313,7 @@ class DuckhuntGame(Game):
             await self.send_privmsg(session.target, "DuckHunt: !bang, !duckstats, !duckstatus, !duckhelp")
 
     async def _load_settings(self, channel: str) -> dict:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             async with db.execute(
                 "SELECT * FROM duckhunt_settings WHERE channel=?", (channel,)
             ) as cursor:
@@ -332,7 +332,7 @@ class DuckhuntGame(Game):
 
     async def _save_setting(self, channel: str, **kwargs):
         cols = ", ".join(f"{k}=?" for k in kwargs)
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 f"INSERT INTO duckhunt_settings(channel) VALUES(?) "
                 f"ON CONFLICT(channel) DO UPDATE SET {cols}, "
@@ -344,7 +344,7 @@ class DuckhuntGame(Game):
         self, channel: str, nick: str,
         hit: bool, reaction: float = 0.0
     ) -> int:
-        async with _db(self.core.db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 "INSERT INTO duckhunt_scores(channel, nick, score, misses) VALUES(?,?,?,?) "
                 "ON CONFLICT(channel, nick) DO UPDATE SET "

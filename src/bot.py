@@ -2,8 +2,6 @@
 """
 Handles bot management for WBS IRC bot.
 """
-import aiosqlite
-import sqlite3
 import json
 import bcrypt
 import time
@@ -14,19 +12,45 @@ from dataclasses import dataclass, asdict, field
 from .db import get_db 
 
 log = logging.getLogger("wbs.bot")
+_FLAG_MAP: dict[str, str] = {
+    'p': 'has_partyline',
+    'o': 'is_op',
+    'd': 'is_deop',
+    'v': 'is_voice',
+    'q': 'is_devoice',
+    'f': 'is_friend',
+    'l': 'is_hop',
+    'r': 'is_dehop',
+}
 
 @dataclass
 class Bot:
-    """Maps to the 'bots' table."""
+    """Maps to the 'bots' table. All fields mirror the schema exactly."""
     handle: str
+
+    # Credentials & identity
     password: Optional[str] = None
     hostmasks: list[str] = field(default_factory=list)
+
+    # Connection
     address: str = 'localhost'
     port: int = 3333
+
+    # Botnet role
     role: Literal['hub', 'backup', 'leaf', 'none'] = 'none'
     share_level: str = 'subnet'
+    autolink: bool = False
+    autolink_retry_interval: int = 60
+    subnet_id: Optional[int] = None
+
+    # Metadata
     comment: str = ''
     created_at: int = field(default_factory=lambda: int(time.time()))
+    created_by: Optional[str] = None
+    updated_at: int = field(default_factory=lambda: int(time.time()))
+    updated_by: Optional[str] = None
+    deleted_at: Optional[int] = None
+    deleted_by: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.hostmasks, str):
@@ -35,14 +59,6 @@ class Bot:
             except json.JSONDecodeError:
                 log.warning(f"Invalid hostmasks JSON for {self.handle}: {self.hostmasks}")
                 self.hostmasks = []
-
-    @property
-    def hostmasks_list(self) -> list[str]:       # was orphaned outside the class
-        return self.hostmasks
-
-    @property
-    def hostmask(self) -> Optional[str]:          # first mask or None
-        return self.hostmasks[0] if self.hostmasks else None  
 
 @dataclass
 class BotAccess:
@@ -66,103 +82,175 @@ class BotManager:
     def __init__(self, db_path):
         self.db_path = db_path
 
-    async def set_password(self, handle: str, password: str):
+    async def set_password(self, handle: str, password: str) -> bool:
+        """Hash and store a bot's password. Returns True if the bot was found and updated."""
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else ''
         async with get_db(self.db_path) as db:
-            await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
-            await db.commit()
-
-    async def matchattr(self, handle: str, flags: str, channel: Optional[str] = None) -> bool:
-        user = await self.get(handle)
-        if not user:
-            return False
-        if channel:
-            flags = user.chan_flags.get(channel, '')
-        return all(f in flags for f in flags[1:]) if flags.startswith('+') else not any(f in flags for f in flags[1:])   
-
-    async def addbot(self, handle: str, hostmask: Optional[str], address: Optional[str], port: Optional[int]):
-        """Add bot. Returns True if created."""
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT handle FROM bots WHERE handle=?", (handle,)) as cursor:
-                if await cursor.fetchone():
-                    raise ValueError(f"Bot {handle} exists")
-            
-            hostmasks_json = json.dumps([hostmask]) if hostmask else None
-            
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO bots (handle, hostmasks, address, port) 
-                VALUES (?, ?, ?, ?)
-                """,
-                (handle, hostmasks_json, address, port)
+            cursor = await db.execute(
+                "UPDATE bots SET password = ? WHERE handle = ?",
+                #               ^^^^  correct table
+                (hashed, handle)
             )
             await db.commit()
-            
-            # Verify creation
-            async with db.execute("SELECT rowid FROM bots WHERE handle=?", (handle,)) as cursor:
-                return (await cursor.fetchone()) is not None
-            
-    async def delbot(self, target_handle: str) -> str:
-        """Delete user by handle. Requires admin rights."""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Check actor has admin rights
-            #actor = await db.fetchone(
-            #    "SELECT handle FROM user_access WHERE handle = ? AND is_admin = 1 AND channel = '*'",
-            #    (actor_handle,)
-            #)
-            #if not actor:
-            #    return f"{actor_handle}: Insufficient rights to delete users."
-            
-            async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
-                if await cursor.fetchone():
-                    async with db.execute("DELETE FROM bots WHERE handle = ?", (target_handle,)) as cursor:
-                        await db.commit()                    
-                    async with db.execute("SELECT handle FROM bots WHERE handle = ?", (target_handle,)) as cursor:
-                        if await cursor.fetchone():
-                            return False
-                        else:
-                            return True
-                else:
-                    return False 
         
-    def exist(self, bot: str):
-        try:
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                cursor = db.execute("SELECT 1 FROM bots WHERE handle = ?", (bot.lower(),))
-                return cursor.fetchone() is not None
-        except sqlite3.Error:
-            return False 
+        if cursor.rowcount == 0:
+            log.warning(f"set_password: bot '{handle}' not found — no rows updated")
+            return False
+
+        log.info(f"set_password: password updated for bot '{handle}'")
+        return True
+
+    async def matchattr(self, handle: str, flags: str, channel: Optional[str] = None) -> bool:
+        """
+        Check whether a bot has all flags in the flag string.
+
+        flags format (eggdrop-style):
+            '+opf'  → must have ALL of: is_op, has_partyline, is_friend
+            '-opf'  → must have NONE of: is_op, has_partyline, is_friend
+            'opf'   → same as '+opf' (positive assumed when no prefix)
+
+        channel=None checks the global record (channel IS NULL).
+        channel='#foo' checks the channel-scoped record for #foo.
+
+        Returns False if the bot or access record doesn't exist,
+        or if any unrecognised flag character is present.
+        """
+        if not flags:
+            return False
+
+        # Parse prefix
+        if flags[0] in ('+', '-'):
+            require_all = flags[0] == '+'
+            flag_chars = flags[1:]
+        else:
+            require_all = True
+            flag_chars = flags
+
+        if not flag_chars:
+            return False
+
+        # Validate all chars are known before hitting the DB
+        unknown = [c for c in flag_chars if c not in _FLAG_MAP]
+        if unknown:
+            log.warning(
+                f"matchattr: unknown flag chars {unknown!r} for bot '{handle}'"
+            )
+            return False
+
+        # Build column list and query bot_access
+        columns = [_FLAG_MAP[c] for c in flag_chars]
+        col_select = ', '.join(columns)
+
+        async with get_db(self.db_path) as db:
+            if channel is None:
+                row = await db.execute_fetchone(
+                    f"SELECT {col_select} FROM bot_access "
+                    f"WHERE handle = ? AND channel IS NULL",
+                    (handle,)
+                )
+            else:
+                row = await db.execute_fetchone(
+                    f"SELECT {col_select} FROM bot_access "
+                    f"WHERE handle = ? AND channel = ?",
+                    (handle, channel)
+                )
+
+        if row is None:
+            return False  # No access record — bot has no flags here
+
+        values = [bool(row[col]) for col in columns]
+
+        if require_all:
+            return all(values)      # '+opf' → must have every flag
+        else:
+            return not any(values)  # '-opf' → must have none
+
+    async def addbot(self, handle: str, hostmask: Optional[str], address: Optional[str],
+                    port: Optional[int], created_by: Optional[str] = None) -> bool:
+        """Add bot. Returns True if created. Raises ValueError if handle already exists."""
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT 1 FROM bots WHERE handle = ?", (handle.lower(),)
+            ) as cursor:
+                if await cursor.fetchone():
+                    raise ValueError(f"Bot '{handle}' already exists")
+
+            hostmasks_json = json.dumps([hostmask]) if hostmask else '[]'
+            await db.execute(
+                """INSERT INTO bots (handle, hostmasks, address, port, created_by)
+                VALUES (?, ?, ?, ?, ?)""",
+                (handle.lower(), hostmasks_json, address, port, created_by)
+            )
+        return True
+            
+    async def delbot(self, target_handle: str) -> bool:
+        """Delete a bot by handle. Returns True if deleted, False if not found."""
+        async with get_db(self.db_path) as db:
+            # Check existence first
+            async with db.execute(
+                "SELECT 1 FROM bots WHERE handle = ? AND deleted_at IS NULL",
+                (target_handle,)
+            ) as cursor:
+                if not await cursor.fetchone():
+                    return False 
+
+            # Delete and capture rowcount before commit
+            async with db.execute(
+                "DELETE FROM bots WHERE handle = ?",
+                (target_handle,)
+            ) as cursor:
+                rowcount = cursor.rowcount
+
+            await db.commit()
+        return rowcount > 0
+        
+    async def exist(self, handle: str) -> bool:
+        """Return True if a bot with this handle exists and is not deleted."""
+        async with get_db(self.db_path) as db:
+            row = await db.execute_fetchone(
+                "SELECT 1 FROM bots WHERE handle = ? AND deleted_at IS NULL",
+                (handle.lower(),)
+            )
+        return row is not None
 
     async def get(self, handle: str) -> Bot:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             async with db.execute(
-                "SELECT handle, hostmasks, address, port, password FROM bots WHERE handle=?", (handle,)
+                """SELECT handle, password, hostmasks, address, port,
+                        role, share_level, autolink, autolink_retry_interval,
+                        subnet_id, comment, created_at, created_by,
+                        updated_at, updated_by, deleted_at, deleted_by
+                FROM bots WHERE handle = ?""",
+                (handle,)
             ) as cursor:
                 row = await cursor.fetchone()
                 if not row:
                     raise ValueError(f"Bot '{handle}' not found")
-                
-                hostmasks_json = row[1]
-                hostmasks_parsed = []
-                if hostmasks_json:
-                    try:
-                        hostmasks_parsed = json.loads(hostmasks_json)
-                    except json.JSONDecodeError as e:
-                        log.warning(f"Invalid hostmasks JSON for {handle}: {hostmasks_json} ({e})")
-                
+
                 return Bot(
-                    handle=row[0],
-                    hostmasks=json.dumps(hostmasks_parsed),  # Always valid JSON array
-                    address=row[2],
-                    port=row[3],
-                    password=row[4]
+                    handle=row['handle'],
+                    password=row['password'],
+                    hostmasks=json.loads(row['hostmasks'] or '[]'),
+                    address=row['address'],
+                    port=row['port'],
+                    role=row['role'],
+                    share_level=row['share_level'],
+                    autolink=bool(row['autolink']),
+                    autolink_retry_interval=row['autolink_retry_interval'],
+                    subnet_id=row['subnet_id'],
+                    comment=row['comment'] or '',
+                    created_at=row['created_at'] or 0,
+                    created_by=row['created_by'],
+                    updated_at=row['updated_at'] or 0,
+                    updated_by=row['updated_by'],
+                    deleted_at=row['deleted_at'],
+                    deleted_by=row['deleted_by'],
                 )
 
     async def chpass(self, name: str, password: str):
         """Update botlink password in database."""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db(self.db_path) as db:
                 await db.execute(
                     "UPDATE bots SET password = ? WHERE handle = ?",
                     (password, name)
@@ -186,28 +274,37 @@ class BotManager:
             await db.execute(
                 """
                 INSERT INTO bots (handle, password, hostmasks, address, port,
-                                role, share_level, comment, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                role, share_level, autolink, autolink_retry_interval,
+                                subnet_id, comment, created_at, created_by,
+                                updated_at, updated_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(handle) DO UPDATE SET
-                    password     = excluded.password,
-                    hostmasks    = excluded.hostmasks,
-                    address      = excluded.address,
-                    port         = excluded.port,
-                    role         = excluded.role,
-                    share_level  = excluded.share_level,
-                    comment      = excluded.comment,
-                    updated_at   = ?
+                    password                = excluded.password,
+                    hostmasks               = excluded.hostmasks,
+                    address                 = excluded.address,
+                    port                    = excluded.port,
+                    role                    = excluded.role,
+                    share_level             = excluded.share_level,
+                    autolink                = excluded.autolink,
+                    autolink_retry_interval = excluded.autolink_retry_interval,
+                    subnet_id               = excluded.subnet_id,
+                    comment                 = excluded.comment,
+                    updated_at              = ?,
+                    updated_by              = ?
                 """,
                 (
                     bot.handle, bot.password,
                     json.dumps(bot.hostmasks),
                     bot.address, bot.port,
                     bot.role, bot.share_level,
-                    bot.comment, bot.created_at, now,
-                    now,  # ON CONFLICT updated_at binding
+                    int(bot.autolink), bot.autolink_retry_interval,
+                    bot.subnet_id, bot.comment,
+                    bot.created_at, bot.created_by,
+                    now, updated_by,
+                    # ON CONFLICT bindings
+                    now, updated_by,
                 )
             )
-            await db.commit()
 
     async def get_subnet_ids(self, handle: str) -> list[int]:
         """Return all subnet_ids bound to this bot. Empty list = global."""
@@ -225,37 +322,34 @@ class BotManager:
     async def bind_to_subnet(self, handle: str, subnet_id: int,
                               created_by: Optional[str] = None) -> bool:
         """Bind a bot to a specific subnet."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
+        async with get_db(self.db_path) as db:
+            async with db.execute(
                 """INSERT OR IGNORE INTO bot_subnets (bot_handle, subnet_id, created_by)
-                   VALUES (?, ?, ?)""",
+                VALUES (?, ?, ?)""",
                 (handle, subnet_id, created_by)
-            )
-            await db.commit()
-        return cursor.rowcount > 0
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
 
     async def unbind_from_subnet(self, handle: str, subnet_id: int) -> bool:
         """Remove a specific subnet binding from a bot."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
+        async with get_db(self.db_path) as db:
+            async with db.execute(
                 "DELETE FROM bot_subnets WHERE bot_handle = ? AND subnet_id = ?",
                 (handle, subnet_id)
-            )
-            await db.commit()
-        return cursor.rowcount > 0
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
 
     async def make_global(self, handle: str) -> bool:
         """Remove all subnet bindings — bot becomes active on all subnets."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            cursor = await db.execute(
+        async with get_db(self.db_path) as db:
+            async with db.execute(
                 "DELETE FROM bot_subnets WHERE bot_handle = ?",
                 (handle,)
-            )
-            await db.commit()
-        return cursor.rowcount > 0
+            ) as cursor:
+                rowcount = cursor.rowcount
+        return rowcount > 0
 
     async def get_bots_for_subnet(self, subnet_id: int) -> list[str]:
         """
@@ -285,8 +379,7 @@ class BotManager:
     
     async def get_autolink_peers(self) -> list[dict]:
         """Return all bots configured for auto-linking."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db(self.db_path) as db:
             async with db.execute(
                 """
                 SELECT handle, address, port, autolink_retry_interval
@@ -305,8 +398,7 @@ class BotManager:
         - Last-write-wins on updated_at
         - Skips self-reference
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        async with get_db(self.db_path) as db:
             for bot in bots:
                 handle = bot['handle'].lower()
 
@@ -367,9 +459,7 @@ class BotManager:
         Skips own bot's access records.
         Only writes columns that exist in bot_access schema.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-
+        async with get_db(self.db_path) as db:
             for acc in access_list:
                 handle = acc['handle'].lower()
                 channel = acc.get('channel')  # May be NULL
@@ -429,22 +519,28 @@ class BotManager:
         log.info(f"BotManager.merge_access_from_peer: merged {len(access_list)} rows from {from_bot}")
 
     async def serialize_for_peer(self, exclude_handle: str) -> list[dict]:
-        """Return bots for botnet share — exclude self, strip passwords."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM bots WHERE handle != ?", (exclude_handle.lower(),)
-            )
-            rows = await cursor.fetchall()
-        bots = [dict(row) for row in rows]
-        for b in bots:
-            b['password'] = None  # Never share passwords
-        return bots
+        """
+        Return bots for botnet share — exclude self and soft-deleted bots.
+        Passwords are shared so all bots in a subnet stay in sync.
+        merge_from_peer() is responsible for never overwriting a bot's
+        own password with a peer-supplied value.
+        """
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                """SELECT handle, password, hostmasks, address, port, role,
+                        share_level, autolink, autolink_retry_interval,
+                        subnet_id, comment, created_at, updated_at
+                FROM bots
+                WHERE handle != ?
+                AND deleted_at IS NULL""",
+                (exclude_handle.lower(),)
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def serialize_access_for_peer(self) -> list[dict]:
         """Return bot_access rows for botnet share."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db(self.db_path) as db:
             cursor = await db.execute("SELECT * FROM bot_access")
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]    

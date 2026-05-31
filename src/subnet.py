@@ -9,8 +9,8 @@ import aiosqlite
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .botnet import BotLink, BotnetManager
+from .db import get_db
+from .botnet import BotLink, BotnetManager
 
 log = logging.getLogger("wbs.subnet")
 
@@ -50,7 +50,7 @@ class SubnetManager:
 
     async def load(self):
         """Load all subnets from DB into memory. Call at startup."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, name, created_at, created_by FROM subnets"
@@ -71,7 +71,7 @@ class SubnetManager:
 
     async def create(self, name: str, created_by: str = "local") -> Subnet:
         """Create a new subnet. Returns the new Subnet."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             cur = await db.execute(
                 "INSERT INTO subnets (name, created_by) VALUES (?, ?)",
                 (name, created_by),
@@ -93,7 +93,7 @@ class SubnetManager:
             log.error("Cannot delete default subnet (id=1)")
             return False
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             cur = await db.execute(
                 "DELETE FROM subnets WHERE id = ?", (subnet_id,)
             )
@@ -110,7 +110,7 @@ class SubnetManager:
 
     async def rename(self, subnet_id: int, new_name: str) -> bool:
         """Rename an existing subnet."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             cur = await db.execute(
                 "UPDATE subnets SET name = ? WHERE id = ?",
                 (new_name, subnet_id),
@@ -129,7 +129,7 @@ class SubnetManager:
         if subnet_id in self._subnets:
             return self._subnets[subnet_id].subnet
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, name, created_at, created_by FROM subnets WHERE id = ?",
@@ -155,7 +155,7 @@ class SubnetManager:
             if state.subnet.name.lower() == name.lower():
                 return state.subnet
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, name, created_at, created_by FROM subnets "
@@ -295,7 +295,7 @@ class SubnetManager:
         Updates in-memory cache for newly inserted entries.
         """
         inserted = 0
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             for subnet in subnets:
                 sid = subnet["id"]
                 name = subnet["name"]
@@ -334,7 +334,7 @@ class SubnetManager:
 
     async def serialize_for_peer(self, scope: str = 'full', subnet_id: int = None) -> list[dict]:
         """Return subnet rows for botnet share. scope='subnet' sends only the given subnet_id."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             if scope == 'subnet' and subnet_id is not None:
                 cur = await db.execute(

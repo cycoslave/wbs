@@ -8,7 +8,8 @@ Description: Track IRC events (join, part, quit, op, deop, voice, devoice, mode,
 """
 import time
 
-from . import Plugin, _db
+from . import Plugin
+from ..db import get_db 
 
 EVENT_TYPES = ['join', 'part', 'quit', 'op', 'deop', 'voice', 'devoice', 'mode', 'nick']
 HISTORY_KEEP = 3
@@ -57,8 +58,7 @@ class statsPlugin(Plugin):
     async def load(self):
         """Initialize tables, seed global event rows, register cleanup timer."""
         await super().load()
-        db_path = self.core.db_path
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             for sql in self.TABLE_SQL:
                 await db.execute(sql)
             for etype in EVENT_TYPES:
@@ -169,8 +169,7 @@ class statsPlugin(Plugin):
 
     async def on_IRC_TIMER_STATS_CLEANUP(self, event):
         """Keep only the last HISTORY_KEEP entries per scope + event_type."""
-        db_path = self.core.db_path
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             await db.execute(
                 f"""
                 DELETE FROM stats_history
@@ -193,9 +192,7 @@ class statsPlugin(Plugin):
     async def _record(self, scope: str, etype: str, actor: str, target: str, data: str):
         """Update aggregate stats and append a history row."""
         now = int(time.time())
-        db_path = self.core.db_path
-
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             # Global aggregate
             await db.execute(
                 """
@@ -240,8 +237,7 @@ class statsPlugin(Plugin):
         .stats [#channel|global] <event_type>
         Returns count, last_occurred, last_actor, last_data + last 3 history rows.
         """
-        db_path = self.core.db_path
-        async with _db(db_path) as db:
+        async with get_db(self.core.db_path) as db:
             if scope == 'global':
                 async with db.execute(
                     "SELECT * FROM stats_global WHERE event_type = ?", (etype,)
