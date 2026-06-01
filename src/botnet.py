@@ -127,6 +127,7 @@ class AutoLinkManager:
             # On success, _tick will see authed=True next pass and skip.
             self._next_attempt[handle] = now + interval
 
+@dataclass
 class BotLink:
     """Represents a connected or pending botnet peer."""
     # Required fields — no default, must be supplied at construction

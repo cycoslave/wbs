@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from .db import get_db
-from .botnet import BotLink, BotnetManager
+if TYPE_CHECKING:
+    from .botnet import BotLink
 
 log = logging.getLogger("wbs.subnet")
 
