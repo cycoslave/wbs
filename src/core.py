@@ -8,6 +8,7 @@ import threading
 import time
 import logging
 import os
+import sys
 import socket
 import random
 import signal
@@ -98,10 +99,9 @@ class Core:
         await self._autoload_modules()     
 
     def spawn_children(self):
-        """Spawn daemon children."""
         irc_proc = mp.Process(
             target=irc_process_launcher,
-            args=(self.config, self.core_q, self.irc_q, os.getpid()),
+            args=(self.config, self.core_q, self.irc_q, os.getpid(), sys.argv),
             daemon=False,
             name="IRC"
         )
@@ -847,7 +847,7 @@ class Core:
 
             new_proc = mp.Process(
                 target=irc_process_launcher,
-                args=(self.config, self.core_q, self.irc_q, os.getpid()),
+                args=(self.config, self.core_q, self.irc_q, os.getpid(), sys.argv),
                 daemon=False,
                 name="IRC"
             )
@@ -1033,3 +1033,56 @@ class Core:
         if hasattr(self, '_console_task') and self._console_task:
             self._console_task.cancel()
         await self._shutdown("Signal received")
+
+    async def do_rehash(self) -> None:
+        """
+        Soft rehash: re-exec Core only. IRC stays connected.
+        Equivalent to Eggdrop's SIGHUP/.rehash — no IRC disconnect.
+        Requires: 'm' flag (master).
+        """
+        log.info("[Core] Rehashing — re-execing Core, IRC preserved")
+        self.partyline.broadcast("*** Rehashing...")
+        # Cancel plugin tasks, flush DB
+        await self._pre_exec_cleanup()
+        # Replace this process image with a fresh Core
+        os.execv(sys.executable, sys.argv)
+        # os.execv does not return
+
+    async def do_restart(self) -> None:
+        """
+        Full restart: Core tells IRC to respawn it, then exits cleanly.
+        IRC stays connected throughout.
+        Requires: 'n' flag (owner).
+        """
+        log.info("[Core] Restarting — notifying IRC, then exiting")
+        self.partyline.broadcast("*** Restarting...")
+        try:
+            self.irc_q.put_nowait({'cmd': 'spawn_core_after_exit', 'delay': 2.0})
+        except Exception as e:
+            log.error(f"Failed to notify IRC of restart: {e}")
+        await self._pre_exec_cleanup()
+        os._exit(0)  # hard exit so IRC's watcher sees the PID disappear
+
+    async def _pre_exec_cleanup(self) -> None:
+        """Flush state before re-exec or exit."""
+        self.running = False
+        # Cancel all plugin tasks
+        for name, task in list(self.timers.items()):
+            task.cancel()
+        self.timers.clear()
+        # Give aiosqlite a moment to flush
+        try:
+            from .db import get_db
+            db = await get_db(self.db_path)
+            await db.close()
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+
+def core_process_launcher(config, config_path, args, core_q, irc_q):
+    """Entry point for Core as a supervised child process."""
+    import asyncio
+    core = Core(config=config, config_path=config_path, args=args)
+    core.core_q = core_q
+    core.irc_q  = irc_q
+    asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))        

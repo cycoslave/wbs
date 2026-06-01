@@ -3,6 +3,7 @@
 IRC client process
 """
 import os
+import sys
 import queue
 import threading
 import time
@@ -1088,20 +1089,61 @@ def start_irc_process(config, core_q, irc_q):
 
     #irc.maintenance_task.cancel()
 
-def irc_process_launcher(config: dict, core_q, irc_q, core_pid: int):
-    """Launcher for IRC multiprocessing.Process."""
-    watcher = threading.Thread(target=_watch_parent, args=(core_pid,), daemon=True)
+def irc_process_launcher(config: dict, core_q, irc_q, core_pid: int, core_argv: list):
+    watcher = mp.Process(
+        target=irc_process_launcher,
+        args=(self.config, self.core_q, self.irc_q, os.getpid(), sys.argv),
+        daemon=False,
+        name="IRC"
+    )
     watcher.start()
     start_irc_process(config, core_q, irc_q)
 
-def _watch_parent(core_pid: int):
-    """Exit if Core process disappears."""
+def _watch_parent(core_pid: int, core_argv: list, irc_q):
+    """
+    Exit if Core disappears unexpectedly.
+    If Core sends 'spawn_core_after_exit' via irc_q first, respawn it instead.
+    """
+    _respawn_requested = threading.Event()
+    _stored_argv = list(core_argv)
+
+    # Intercept the special rehash/restart signal on irc_q
+    def _signal_watcher():
+        import queue as _queue
+        while True:
+            try:
+                # Peek without consuming — we only intercept spawn_core_after_exit
+                msg = irc_q.get(timeout=1.0)
+                if isinstance(msg, dict) and msg.get('cmd') == 'spawn_core_after_exit':
+                    delay = msg.get('delay', 2.0)
+                    log.info(f"[IRC] spawn_core_after_exit received, will respawn Core in {delay}s")
+                    _respawn_requested.set()
+                    # Delay then spawn
+                    time.sleep(delay)
+                    import subprocess, sys
+                    subprocess.Popen(
+                        _stored_argv,
+                        close_fds=True
+                    )
+                    log.info(f"[IRC] Core respawned with: {_stored_argv}")
+                else:
+                    # Put it back for the real command_poller to process
+                    irc_q.put(msg)
+            except Exception:
+                pass
+
+    threading.Thread(target=_signal_watcher, daemon=True).start()
+
     while True:
         time.sleep(2)
         try:
             os.kill(core_pid, 0)
         except ProcessLookupError:
-            log.warning(f"Core (pid={core_pid}) gone — IRC exiting.")
-            os._exit(1)  # hard exit, bypasses all cleanup
+            if _respawn_requested.is_set():
+                log.info(f"[IRC] Core (pid={core_pid}) exited cleanly for restart — staying connected.")
+            else:
+                log.warning(f"[IRC] Core (pid={core_pid}) gone unexpectedly — IRC exiting.")
+                os._exit(1)
+            return  # either way, our watch job is done
         except PermissionError:
-            pass  # process exists but we lack permission — still alive
+            pass

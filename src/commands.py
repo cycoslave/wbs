@@ -42,6 +42,7 @@ async def cmd_help(core, handle, session_id, arg, respond):
       chattr       chhandle     chpass       backup
       status       die          restart      nick
       baway        bback        lag          botinfo
+      rehash
 
    User management:
       +user        -user        users        userinfo
@@ -272,9 +273,21 @@ See also: botinfo, uptime
     elif cmd == "restart":
         help_text = """\
 ###  restart
-    Restarts the bot process.
+    Performs a full bot restart. Core process exits and is relaunched
+    by the supervisor. IRC connection is preserved during the transition.
+    Requires 'n' (owner) flag.
 
-See also: quit, die
+See also: rehash, quit
+"""
+
+    elif cmd == "rehash":
+        help_text = """\
+###  rehash
+    Restarts the Core process without disconnecting from IRC.
+    Channel state and IRC connection are preserved.
+    Requires 'm' (master) flag.
+
+See also: restart, quit
 """
 
     elif cmd == "nick":
@@ -2726,6 +2739,38 @@ async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
             "flags": {**flag_updates, **kv_updates},
         }))
 
+async def cmd_rehash(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """Rehash: restart Core process, IRC stays connected. Requires 'm' flag."""
+    async with get_db(core.db_path) as db:
+        cursor = await db.execute(
+            "SELECT flags FROM users WHERE handle = ?", (handle,)
+        )
+        row = await cursor.fetchone()
+
+    if not row or 'm' not in (row['flags'] or ''):
+        await respond("Access denied. Requires 'm' flag.")
+        return
+
+    await respond("Rehashing...")
+    log.info("Rehash initiated by %s", handle)
+    await core.do_rehash()  # does not return
+
+async def cmd_restart(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """Full restart: Core exits, supervisor relaunches. Requires 'n' flag."""
+    async with get_db(core.db_path) as db:
+        cursor = await db.execute(
+            "SELECT flags FROM users WHERE handle = ?", (handle,)
+        )
+        row = await cursor.fetchone()
+
+    if not row or 'n' not in (row['flags'] or ''):
+        await respond("Access denied. Requires 'n' flag.")
+        return
+
+    await respond("Restarting...")
+    log.info("Restart initiated by %s", handle)
+    await core.do_restart()  # does not return
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -2773,6 +2818,8 @@ COMMANDS = {
     'infoleaf':     cmd_infoleaf,
     'addleaf':      cmd_addleaf,
     'addhub':       cmd_addhub,
+    'rehash': cmd_rehash,
+    'restart': cmd_restart,
     # user
     'whois':       cmd_whois,
     '+user': cmd_adduser,

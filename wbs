@@ -2,7 +2,7 @@
 # wbs (main.py)
 """
 WBS Launcher
-version: 6.0.0
+version: 5.9.2
 by: cycoslave
 link: https://github.com/cycoslave/wbs
 """
@@ -13,11 +13,17 @@ import logging
 import os
 import sys
 from pathlib import Path
-from src.core import Core
+from multiprocessing import Process, Queue
+from multiprocessing.connection import wait as mp_wait
+
 from src import __version__
+from src.core import Core
+from src.irc import irc_process_launcher
+from src.core import core_process_launcher 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("wbs")
+EXIT_OK = 0
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="wbs")
@@ -65,6 +71,26 @@ def remove_pidfile(path: str):
         os.remove(path)
     except OSError:
         pass
+
+def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
+    p = Process(
+        target=core_process_launcher,
+        args=(config, config_path, args, core_q, irc_q),
+        daemon=False,
+        name="Core"
+    )
+    p.start()
+    return p
+
+def _spawn_irc(config, core_q, irc_q) -> Process:
+    p = Process(
+        target=irc_process_launcher,
+        args=(config, core_q, irc_q, None),  # no parent pid needed
+        daemon=False,
+        name="IRC"
+    )
+    p.start()
+    return p
 
 def main():
     args = parse_args()
@@ -135,10 +161,67 @@ def main():
         daemonize(logfile)
         write_pidfile(pidfile)
 
+    EXIT_OK = 0 
+
+    def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
+        p = Process(
+            target=core_process_launcher,
+            args=(config, config_path, args, core_q, irc_q),
+            daemon=False,
+            name="Core"
+        )
+        p.start()
+        return p
+
+    def _spawn_irc(config, core_q, irc_q) -> Process:
+        p = Process(
+            target=irc_process_launcher,
+            args=(config, core_q, irc_q, None),
+            daemon=False,
+            name="IRC"
+        )
+        p.start()
+        return p
+
+    core_q = Queue()
+    irc_q  = Queue()
+
+    core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
+    irc_proc  = _spawn_irc(config, core_q, irc_q)
+
+    sentinels = {
+        core_proc.sentinel: ("core", core_proc),
+        irc_proc.sentinel:  ("irc",  irc_proc),
+    }
+
     try:
-        # Pass the already-loaded config dict — Core must NOT re-read the file
-        core = Core(config=config, config_path=str(config_path), args=args)
-        asyncio.run(core.run(foreground=args.foreground))
+        while True:
+            ready = mp_wait(list(sentinels.keys()), timeout=30.0)
+
+            for s in ready:
+                name, proc = sentinels.pop(s)
+                code = proc.exitcode
+                log.info(f"{name} exited with code {code}")
+
+                if name == "core":
+                    if code == EXIT_OK:
+                        # Clean shutdown — stop IRC and exit supervisor
+                        log.info("Core clean exit — shutting down supervisor")
+                        irc_proc.terminate()
+                        irc_proc.join(timeout=3.0)
+                        sys.exit(0)
+                    else:
+                        # Restart (2), rehash (3), or crash — relaunch Core only
+                        log.info(f"Relaunching Core (exit code={code})...")
+                        core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
+                        sentinels[core_proc.sentinel] = ("core", core_proc)
+
+                elif name == "irc":
+                    # IRC should never self-exit — always relaunch
+                    log.warning(f"IRC process died (code={code}), relaunching...")
+                    irc_proc = _spawn_irc(config, core_q, irc_q)
+                    sentinels[irc_proc.sentinel] = ("irc", irc_proc)
+
     finally:
         if not args.foreground:
             remove_pidfile(pidfile)
