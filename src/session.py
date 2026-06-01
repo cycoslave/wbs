@@ -3,6 +3,7 @@
 Handles partyline sessions for WBS.
 """
 import asyncio
+import queue
 import multiprocessing as mp
 import logging
 import json
@@ -30,7 +31,11 @@ class Session:
         self.running = True
         self.response_q = response_q or mp.Queue()
 
-        self.subnet_id = transports.get('subnet_id', 1) if session_type == 'bot' else None
+        try:
+            self.subnet_id = int(transports.get('subnet_id', 1)) if session_type == 'bot' else None
+        except (TypeError, ValueError):
+            log.warning(f"Invalid subnet_id for session {session_id}, defaulting to 1")
+            self.subnet_id = 1
         
         # Transport-specific storage
         self.reader = transports.get('reader')
@@ -70,13 +75,16 @@ class Session:
                     try:
                         data = await self.reader.readuntil(b'\n')
                     except asyncio.LimitOverrunError:
-                        # Line exceeded buffer limit — drain and discard
-                        await self.reader.read(MAX_LINE_BYTES)
+                        # Drain the oversized line by consuming until we find the newline
+                        while True:
+                            chunk = await self.reader.read(MAX_LINE_BYTES)
+                            if not chunk or b'\n' in chunk:
+                                break
                         log.warning(
                             f"Session {self.session_id} ({self.handle}): "
                             f"oversized line discarded (>{MAX_LINE_BYTES}B)"
                         )
-                        return ''   # triggers 'not line.strip()' → continue in run()
+                        return ''
                     if not data:
                         return None
                     if len(data) > MAX_LINE_BYTES:
@@ -153,6 +161,10 @@ class Session:
         
         finally:
             response_task.cancel()
+            try:
+                await response_task
+            except asyncio.CancelledError:
+                pass
             await self.close()
             
             disconnect_type = 'BOT_DISCONNECT' if self.session_type == 'bot' else 'PARTYLINE_DISCONNECT'
@@ -189,17 +201,21 @@ class Session:
                 log.error(f"Invalid JSON from {self.handle}: {e}")
         
         elif line.startswith('CHAT:'):
-            # Botnet chat - broadcast to partyline
             parts = line.split(':', 2)
             if len(parts) == 3:
-                channel = int(parts[1])
+                try:
+                    channel = int(parts[1])
+                except ValueError:
+                    log.warning(f"CHAT: invalid channel from {self.handle}: {parts[1]!r}")
+                    return
                 text = parts[2]
                 self.core_q.put_nowait({
                     'type': 'PARTYLINE_INPUT',
                     'session_id': self.session_id,
                     'handle': self.handle,
                     'text': text,
-                    'source': 'bot'
+                    'source': 'bot',
+                    'channel': channel,  # ← was being dropped
                 })
         
         elif line.startswith('SHAREUSERS:'):
@@ -232,8 +248,12 @@ class Session:
             try:
                 try:
                     msg = self.response_q.get_nowait()
-                    await self.send(msg['text'])
-                except:
+                    text = msg.get('text')
+                    if text is not None:
+                        await self.send(text)
+                    else:
+                        log.warning(f"Session {self.session_id}: response message missing 'text' key: {msg!r}")
+                except queue.Empty:
                     await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 break
