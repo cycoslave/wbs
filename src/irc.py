@@ -7,13 +7,13 @@ import queue
 import threading
 import time
 import logging
-import json
 import asyncio
 import random
 import string
 import irc.bot
 import irc.client
 import ssl as ssl_lib
+import socket as socket_module
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from jaraco.stream import buffer
@@ -216,9 +216,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def __init__(self, config, core_q, irc_q):
         self.config = config
-        self.maintenance_state = {}
-        self.maintenance_state.setdefault('join_attempts', defaultdict(deque))
-        self.maintenance_state.setdefault('join_cooldown_until', {})
         self.chan = ChannelManager(self.config['db']['path'])
         self.user = UserManager(self.config['db']['path'])
         self.server_caps = ServerCaps()
@@ -229,9 +226,12 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         self.config_id = config.get('id', 1)
         self.whois_trackers = {}  # Track pending WHOIS requests
         self.maintenance_state = {
-            'last_rejoin': {},         # channel -> timestamp
-            'last_nick': 0,            # timestamp
-            'linked_bots': {}          # handle -> current_nick
+            'last_rejoin': {},
+            'last_nick': 0,
+            'linked_bots': {},
+            'join_attempts': defaultdict(deque),
+            'join_cooldown_until': {},
+            'last_nick_attempt': datetime.min,
         }
         self.irc_timers = {}  # name → task
         self.last_connect_attempt = 0
@@ -314,7 +314,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
     def is_online(self, nick: str) -> bool:
         """Check if nick is online anywhere (global users)"""
-        return any(nick in chan.users for chan in self.connection.channels.values())
+        return any(chan.has_user(nick) for chan in self.channels.values())
 
     @property 
     def is_connected(self) -> bool:
@@ -396,27 +396,33 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_join(self, conn, event):
         nick = event.source.nick
         chan = event.target
-        if nick in self.maintenance_state['linked_bots'].values():
-            pass
-        if nick.lower() ==  conn.get_nickname().lower():
+
+        # Note linked bot joins for future reference — no action taken here
+        #if nick in self.maintenance_state['linked_bots'].values():
+        #    log.debug(f"[IRC] Linked bot '{nick}' joined {chan}")
+
+        if nick.lower() == conn.get_nickname().lower():
+            snapshot: dict = {}  # safe default — prevents UnboundLocalError if chan_obj is None
             chan_obj = self.channels.get(chan)
+
             if chan_obj:
                 log.info(f"Building snapshot for {chan}")
-                    
                 try:
                     snapshot = {
                         'users': len(chan_obj.users()),
                         'user_list': list(chan_obj.users()),
-                        'bot_op': self.is_bot_op(chan),  # Use your existing helper method
+                        'bot_op': self.is_bot_op(chan),
                         'ops': list(chan_obj.opers()),
                         'voiced': list(chan_obj.voiced()),
                         'mode': getattr(chan_obj, 'mode', ''),
                         'mode_params': getattr(chan_obj, 'mode_params', {})
                     }
-                    log.debug(f"Successfully added {chan} to snapshot")
-                    
+                    log.debug(f"Successfully built snapshot for {chan}")
                 except Exception as inner_e:
                     log.error(f"Error building snapshot for {chan}: {inner_e}", exc_info=True)
+            else:
+                log.warning(f"[IRC] on_join: channel object for '{chan}' not yet populated, emitting empty snapshot")
+
             self._emit_event({
                 'type': EventType.NEWCHAN,
                 'channel': chan,
@@ -474,8 +480,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         })
     
     def on_mode(self, conn, event):
-        channel = event.target.lower()
-        modes = event.arguments[0].lower() if event.arguments else ''
+        channel = event.target
+        modes = event.arguments[0] if event.arguments else ''
         mode_args = event.arguments[1:] if len(event.arguments) > 1 else []
         self._emit_event({
             'type': EventType.MODE,
@@ -924,44 +930,28 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 #    irc_q.put({'cmd': 'mode', 'channel': chan_obj.name, 'modes': modes})
                 #    self.maintenance_state['last_limit'][chan_obj.name] = now 
 
-    def _register_irc_timer(self, name: str, interval: float):
-        """Register repeating timer"""
+    def _schedule_register_timer(self, name: str, interval: float):
+        """Schedule timer registration on the event loop."""
+        asyncio.create_task(self._register_irc_timer(name, interval))
+
+    def _schedule_unregister_timer(self, name: str):
+        """Schedule timer cancellation on the event loop."""
+        asyncio.create_task(self._unregister_irc_timer(name))
+
+    async def _register_irc_timer(self, name: str, interval: float):
+        """Register a repeating IRC timer."""
         if name in self.irc_timers:
             self.irc_timers[name].cancel()
         task = asyncio.create_task(self._irc_timer_loop(name, interval))
         self.irc_timers[name] = task
         log.info(f"Registered IRC timer: {name} ({interval}s)")
 
-    def _unregister_irc_timer(self, name: str):
-        """Cancel timer"""
+    async def _unregister_irc_timer(self, name: str):
+        """Cancel and remove a named IRC timer."""
         if name in self.irc_timers:
             self.irc_timers[name].cancel()
             del self.irc_timers[name]
             log.info(f"Unregistered IRC timer: {name}") 
-
-    def _schedule_register_timer(self, name: str, interval: float):
-        """Run on main event loop"""
-        asyncio.create_task(self._register_irc_timer_task(name, interval))
-
-    def _schedule_unregister_timer(self, name: str):
-        """Run on main event loop"""
-        asyncio.create_task(self._unregister_irc_timer_task(name))
-
-    async def _register_irc_timer_task(self, name: str, interval: float):
-        """Async timer registration"""
-        if name in self.irc_timers:
-            self.irc_timers[name].cancel()
-        
-        task = asyncio.create_task(self._irc_timer_loop(name, interval))
-        self.irc_timers[name] = task
-        log.info(f"Registered IRC timer: {name} ({interval}s)")
-
-    async def _unregister_irc_timer_task(self, name: str):
-        """Async timer unregistration"""
-        if name in self.irc_timers:
-            self.irc_timers[name].cancel()
-            del self.irc_timers[name]
-            log.info(f"Unregistered IRC timer: {name}")    
 
     def connect_now(self):
         """Force reconnect if throttled cooldown passed."""
@@ -985,7 +975,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 sock.settimeout(3)
                 sock.send(b'\n')  # minimal probe (no-op)
                 return True
-            except (sock.error, OSError, BrokenPipeError):
+            except (socket_module.error, OSError, BrokenPipeError):
                 log.warning("Socket probe failed")
                 return False
         return False
@@ -1055,26 +1045,25 @@ def start_irc_process(config, core_q, irc_q):
     asyncio.set_event_loop(loop)
     
     def command_poller():
-        """Daemon thread: poll cmd_queue and execute commands"""
+        """Daemon thread: poll irc_q and execute commands with anti-flood throttle."""
         irc.loop = loop
         throttle_interval = 0.5  # 500ms between commands (anti-flood)
         last_cmd_time = 0
-        
+
         while True:
             try:
                 elapsed = time.time() - last_cmd_time
                 if elapsed < throttle_interval:
                     time.sleep(throttle_interval - elapsed)
-                
-                cmd_data = irc_q.get_nowait()
-                if cmd_data is not None:
-                    log.debug(f"Executing: {cmd_data}")
-                    irc.execute_command(cmd_data)
-                    last_cmd_time = time.time()
-            
+
+                cmd_data = irc_q.get(timeout=0.01)  # blocks up to 10ms, no exception spam
+                log.debug(f"Executing: {cmd_data}")
+                irc.execute_command(cmd_data)
+                last_cmd_time = time.time()
+
             except queue.Empty:
-                time.sleep(0.01) 
-            
+                pass  # nothing pending, loop back
+
             except Exception as e:
                 log.error(f"Command poller error: {e}")
                 time.sleep(0.1)
@@ -1101,13 +1090,9 @@ def start_irc_process(config, core_q, irc_q):
 
 def irc_process_launcher(config: dict, core_q, irc_q, core_pid: int):
     """Launcher for IRC multiprocessing.Process."""
-    watcher = threading.Thread(
-        target=_watch_parent,
-        args=(core_pid,),
-        daemon=True
-    )
+    watcher = threading.Thread(target=_watch_parent, args=(core_pid,), daemon=True)
     watcher.start()
-    asyncio.run(start_irc_process(config, core_q, irc_q))
+    start_irc_process(config, core_q, irc_q)
 
 def _watch_parent(core_pid: int):
     """Exit if Core process disappears."""
