@@ -98,17 +98,6 @@ class Core:
         await self._seed_modules()
         await self._autoload_modules()     
 
-    def spawn_children(self):
-        irc_proc = mp.Process(
-            target=irc_process_launcher,
-            args=(self.config, self.core_q, self.irc_q, os.getpid(), sys.argv),
-            daemon=False,
-            name="IRC"
-        )
-        irc_proc.start()
-        self.children.append(irc_proc)
-        log.info(f"Spawned: {[p.name for p in self.children]}")
-
     async def run(self, foreground=False):
         """Main async event loop"""
         self.foreground = foreground
@@ -136,7 +125,6 @@ class Core:
             log.info("Background mode")
 
         self._setup_signals()
-        self.spawn_children()
         await self.botnet.start()
         
         # Start event poller thread
