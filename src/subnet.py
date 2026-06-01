@@ -68,7 +68,7 @@ class SubnetManager:
             )
             self._subnets[s.id] = SubnetState(subnet=s)
 
-        log.info(f"Loaded {len(self._subnets)} subnets")
+        log.info("Loaded %d subnets", len(self._subnets))
 
     async def create(self, name: str, created_by: str = "local") -> Subnet:
         """Create a new subnet. Returns the new Subnet."""
@@ -273,8 +273,8 @@ class SubnetManager:
         """
         exclude_lc = exclude.lower() if exclude else None
         targets: List["BotLink"] = []
-
-        for handle, link in peers.items():
+        snapshot = list(peers.items())
+        for handle, link in snapshot:
             if not (link.authed and link.connected):
                 continue
             if exclude_lc and handle == exclude_lc:
@@ -293,47 +293,65 @@ class SubnetManager:
         """
         Merge subnet list received via SHARE SUBNETS.
         Only inserts subnets that don't exist locally (by id OR name).
-        Updates in-memory cache for newly inserted entries.
+        Updates in-memory cache only after a successful commit.
         """
         inserted = 0
+        new_entries: list[Subnet] = []
+
         async with get_db(self.db_path) as db:
             for subnet in subnets:
-                sid = subnet["id"]
-                name = subnet["name"]
+                sid = subnet.get("id")
+                name = subnet.get("name", "").strip()
 
-                cur = await db.execute(
-                    "SELECT id FROM subnets "
-                    "WHERE id = ? OR LOWER(name) = LOWER(?)",
-                    (sid, name),
-                )
-                if await cur.fetchone():
-                    log.debug(
-                        f"Subnet '{name}' (id={sid}) already exists — kept local"
+                if not isinstance(sid, int) or sid <= 0:
+                    log.warning(
+                        "merge_from_peer: invalid subnet id=%r from %s — skipped",
+                        sid, from_bot,
+                    )
+                    continue
+                if not name or len(name) > 64:
+                    log.warning(
+                        "merge_from_peer: invalid subnet name=%r from %s — skipped",
+                        name, from_bot,
+                    )
+                    continue
+                if sid == 1:
+                    log.warning(
+                        "merge_from_peer: peer %s tried to overwrite default subnet id=1 — skipped",
+                        from_bot,
                     )
                     continue
 
-                await db.execute(
-                    "INSERT INTO subnets (id, name, created_at, created_by) "
+                cur = await db.execute(
+                    "INSERT OR IGNORE INTO subnets (id, name, created_at, created_by) "
                     "VALUES (?, ?, ?, ?)",
                     (sid, name, subnet.get("created_at"), from_bot),
                 )
-                s = Subnet(
-                    id=sid,
-                    name=name,
-                    created_at=subnet.get("created_at"),
-                    created_by=from_bot,
-                )
-                self._subnets[sid] = SubnetState(subnet=s)
-                inserted += 1
+                if cur.rowcount > 0:
+                    new_entries.append(Subnet(
+                        id=sid,
+                        name=name,
+                        created_at=subnet.get("created_at"),
+                        created_by=from_bot,
+                    ))
+                    inserted += 1
+                else:
+                    log.debug(
+                        "merge_from_peer: subnet '%s' (id=%s) already exists — kept local",
+                        name, sid,
+                    )
 
             await db.commit()
 
+        for s in new_entries:
+            self._subnets[s.id] = SubnetState(subnet=s)
+
         log.info(
-            f"Merged subnets from {from_bot}: "
-            f"{inserted} inserted, {len(subnets) - inserted} skipped"
+            "merge_from_peer: %s sent %d subnets — %d inserted, %d skipped",
+            from_bot, len(subnets), inserted, len(subnets) - inserted,
         )
 
-    async def serialize_for_peer(self, scope: str = 'full', subnet_id: int = None) -> list[dict]:
+    async def serialize_for_peer(self, scope: str = 'full', subnet_id: Optional[int] = None) -> list[dict]:
         """Return subnet rows for botnet share. scope='subnet' sends only the given subnet_id."""
         async with get_db(self.db_path) as db:
             db.row_factory = aiosqlite.Row
