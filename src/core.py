@@ -1069,7 +1069,13 @@ class Core:
 
 def core_process_launcher(config, config_path, args, core_q, irc_q):
     """Entry point for Core as a supervised child process."""
-    import asyncio
+    tty_fd = config.pop('_tty_fd', None)
+    if tty_fd is not None:
+        try:
+            sys.stdin = os.fdopen(tty_fd, 'r')
+        except Exception as e:
+            log.warning(f"Could not restore TTY fd {tty_fd}: {e}")
+
     core = Core(config=config, config_path=config_path, args=args)
     core.core_q = core_q
     core.irc_q  = irc_q

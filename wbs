@@ -72,26 +72,6 @@ def remove_pidfile(path: str):
     except OSError:
         pass
 
-def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
-    p = Process(
-        target=core_process_launcher,
-        args=(config, config_path, args, core_q, irc_q),
-        daemon=False,
-        name="Core"
-    )
-    p.start()
-    return p
-
-def _spawn_irc(config, core_q, irc_q) -> Process:
-    p = Process(
-        target=irc_process_launcher,
-        args=(config, core_q, irc_q, None),  # no parent pid needed
-        daemon=False,
-        name="IRC"
-    )
-    p.start()
-    return p
-
 def main():
     args = parse_args()
 
@@ -134,11 +114,10 @@ def main():
             filemode='a'
         )
 
-    # Apply CLI overrides into the config dict so Core sees them
     if args.db_path:
         config.setdefault('db', {})['path'] = args.db_path
 
-    db_path = config.get('db', {}).get('path', 'db/wbs.db')
+    db_path  = config.get('db', {}).get('path', 'db/wbs.db')
     settings = config.get('settings', {})
     pidfile  = args.pidfile or settings.get('pid_file', 'wbs.pid')
     logfile  = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
@@ -161,7 +140,7 @@ def main():
         daemonize(logfile)
         write_pidfile(pidfile)
 
-    EXIT_OK = 0 
+    EXIT_OK = 0
 
     def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
         p = Process(
@@ -185,6 +164,11 @@ def main():
 
     core_q = Queue()
     irc_q  = Queue()
+    if args.foreground:
+        try:
+            config['_tty_fd'] = os.dup(sys.stdin.fileno())
+        except Exception:
+            config['_tty_fd'] = None
 
     core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
     irc_proc  = _spawn_irc(config, core_q, irc_q)
@@ -205,19 +189,16 @@ def main():
 
                 if name == "core":
                     if code == EXIT_OK:
-                        # Clean shutdown — stop IRC and exit supervisor
                         log.info("Core clean exit — shutting down supervisor")
                         irc_proc.terminate()
                         irc_proc.join(timeout=3.0)
                         sys.exit(0)
                     else:
-                        # Restart (2), rehash (3), or crash — relaunch Core only
                         log.info(f"Relaunching Core (exit code={code})...")
                         core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
                         sentinels[core_proc.sentinel] = ("core", core_proc)
 
                 elif name == "irc":
-                    # IRC should never self-exit — always relaunch
                     log.warning(f"IRC process died (code={code}), relaunching...")
                     irc_proc = _spawn_irc(config, core_q, irc_q)
                     sentinels[irc_proc.sentinel] = ("irc", irc_proc)
