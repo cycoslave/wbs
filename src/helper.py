@@ -2,6 +2,11 @@
 """
 Helper functions
 """
+import sys
+import termios
+import logging
+
+log = logging.getLogger("wbs.helper")
 
 def clean_message(text: str, max_bytes: int = 255) -> str:
     """
@@ -46,3 +51,19 @@ def clean_message(text: str, max_bytes: int = 255) -> str:
             truncated = truncated[:-1]
             if not truncated:
                 return ""
+            
+def restore_terminal() -> None:
+    """Restore terminal echo after prompt_toolkit raw mode.
+    
+    prompt_toolkit sets the terminal to raw/no-echo mode. If the process
+    exits uncleanly (e.g. via os._exit()), this must be called manually
+    before exit since finally blocks will not run.
+    """
+    try:
+        if sys.stdin.isatty():
+            fd = sys.stdin.fileno()
+            attrs = termios.tcgetattr(fd)
+            attrs[3] |= termios.ECHO
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception as e:
+        log.warning("Could not restore terminal state: %s", e)            

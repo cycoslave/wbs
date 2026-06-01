@@ -16,22 +16,23 @@ from typing import Dict, Any, Optional
 from collections import deque
 
 from . import __version__
-from .db import init_db, get_db
 from .net import AccessGuard
 from .net import NetListener
 from .channel import ChannelManager, Channel
 from .user import UserManager
 from .bot import BotManager
 from .botnet import BotnetManager
-from .commands import COMMANDS
 from .console import Console
 from .partyline import Partyline
 from .session import Session
-from .irc import irc_process_launcher
 from .plugins import PluginManager
 from .games import GameManager
 from .dcc import DCCManager
 from .update import UpdateManager
+from .db import init_db, get_db
+from .commands import COMMANDS
+from .irc import irc_process_launcher
+from .helper import restore_terminal
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
@@ -477,6 +478,7 @@ class Core:
                     child.join(timeout=1.0)
 
         log.info("All children terminated. Exiting.")
+        restore_terminal()
         os._exit(0)
 
     async def on_command(self, event):

@@ -9,6 +9,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.history import InMemoryHistory
 
 from .partyline import Partyline
+from .helper import restore_terminal
 
 log = logging.getLogger("wbs.console")
 
@@ -29,42 +30,36 @@ class Console:
             log.warning("No TTY available for console")
             return
 
-        print(f"{self.handle}> Type .help for commands, .exit to quit.")
+        print(f"{self.handle}> Type .help for commands, .quit to exit.")
 
-        with patch_stdout():
-            while self.running and not self._stop_event.is_set():
-                try:
-                    line = await self.session.prompt_async(f"{self.handle}> ")
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
+        try:
+            with patch_stdout():
+                while self.running and not self._stop_event.is_set():
+                    try:
+                        line = await self.session.prompt_async(f"{self.handle}> ")
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
 
-                    # Local .exit — no flag check required for console operator
-                    if stripped.lower() == ".exit":
-                        print("Closing console session. Bot continues running.")
-                        log.info("Console .exit received")
-                        self.partyline.unregister_session(self.session_id)
+                        self._error_count = 0
+                        await self.partyline.handle_input(self.session_id, stripped)
+
+                    except (EOFError, KeyboardInterrupt):
+                        log.info("Console exit signal received (EOF/Ctrl+C)")
                         self.running = False
+                        await self.partyline.handle_input(self.session_id, ".quit")
                         break
 
-                    self._error_count = 0  # reset on successful input
-                    await self.partyline.handle_input(self.session_id, stripped)
-
-                except (EOFError, KeyboardInterrupt):
-                    log.info("Console exit signal received (EOF/Ctrl+C)")
-                    self.running = False
-                    # Signal the bot to shut down — same as .quit via partyline
-                    await self.partyline.handle_input(self.session_id, ".quit")
-                    break
-
-                except Exception as e:
-                    self._error_count += 1
-                    log.error("Console error (%d/%d): %s", self._error_count, self._max_errors, e)
-                    if self._error_count >= self._max_errors:
-                        log.critical("Console exceeded max consecutive errors — stopping console")
-                        self.running = False
-                        break
-                    await asyncio.sleep(0.1)
+                    except Exception as e:
+                        self._error_count += 1
+                        log.error("Console error (%d/%d): %s", self._error_count, self._max_errors, e)
+                        if self._error_count >= self._max_errors:
+                            log.critical("Console exceeded max consecutive errors — stopping console")
+                            self.running = False
+                            break
+                        await asyncio.sleep(0.1)
+        finally:
+            restore_terminal()
 
         log.info("Console session ended")
 
