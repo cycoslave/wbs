@@ -9,7 +9,6 @@ import time
 import logging
 import os
 import socket
-import sys
 import random
 import signal
 from pathlib import Path
@@ -84,6 +83,8 @@ class Core:
         self._lag_ping_sent: float | None = None
         self._last_lag_ms: float = 0.0
         self.public_ip: Optional[str] = None
+        self._irc_respawn_delay: float = 5.0
+        self._irc_last_respawn: float = 0.0
         log.info(f"Core process started. (pid={os.getpid()})")
 
     async def _async_init(self):
@@ -286,7 +287,7 @@ class Core:
             self.guard.release(peer_ip)
 
     async def on_bot_cmd(self, event: dict):
-        """Handle bot disconnection"""
+        """Handle incoming bot command"""
         handle = event['handle']
         if handle in self.botnet.peers:
             link = self.botnet.peers.pop(handle)
@@ -509,16 +510,19 @@ class Core:
         
         # Dispatch to commands.py registry
         if cmd in COMMANDS:
-            # Create mock DCC session for IRC-based commands
-            idx = hash(nick) % 10000  # Pseudo-idx for IRC commands
-            if idx not in self.dcc_sessions:
-                self.dcc_sessions[idx] = {'hand': handle, 'send': lambda msg: self.send_cmd('msg', nick, msg)}
-            
+            # Ephemeral IRC session: stable key, lambda binds nick at creation, cleaned up after
+            session_key = f"irc:{nick}"
+            self.dcc_sessions[session_key] = {
+                'hand': handle,
+                'send': lambda msg, n=nick: self.send_cmd('msg', n, msg)
+            }
             try:
-                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, handle, idx, arg)
+                await COMMANDS[cmd](self.config, self.core_q, self.irc_q, handle, session_key, arg)
             except Exception as e:
                 log.error(f"Command '{cmd}' error: {e}", exc_info=True)
                 self.send_cmd('msg', nick, f"Error executing .{cmd}")
+            finally:
+                self.dcc_sessions.pop(session_key, None)
         else:
             self.send_cmd('msg', nick, f"Unknown command: .{cmd}")
 
@@ -593,9 +597,10 @@ class Core:
                 elif not adding:
                     # -l removes limit
                     chan.limit = 0
-            elif char in 'kbeI':  # Other modes with parameters
-                if adding or char in 'kbeI':
-                    arg_index += 1
+            elif char in 'kbeI':
+                # +k/-k both take an arg (+k=key, -k=* placeholder)
+                # +b/-b, +e/-e, +I/-I all take mask arg
+                arg_index += 1
         
     async def on_newchan(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
@@ -705,12 +710,16 @@ class Core:
         log.info("IRC READY - joining channels..")
         subnet_id = self.config.get('botnet', {}).get('subnet_id', None)
         channels = await self.chan.getchans(subnet_id=subnet_id)
+        asyncio.create_task(self._join_channels(channels))
+        await self._autoload_games()
+
+    async def _join_channels(self, channels: list):
+        """Throttled channel join sequence."""
         for channel in channels:
             if channel is not None:
                 log.info(f"Joining {channel}..")
                 self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
-                time.sleep(0.2)
-        await self._autoload_games()
+                await asyncio.sleep(0.2)
 
     async def on_disconnect(self, event: Dict[str, Any]):
         """IRC connection dropped."""
@@ -824,11 +833,6 @@ class Core:
 
             exit_code = child.exitcode
             now = time.time()
-
-            if not hasattr(self, '_irc_respawn_delay'):
-                self._irc_respawn_delay = 5.0
-                self._irc_last_respawn = 0.0
-
             if (now - self._irc_last_respawn) < self._irc_respawn_delay:
                 return  # not yet time
 
@@ -841,7 +845,7 @@ class Core:
             new_proc = mp.Process(
                 target=irc_process_launcher,
                 args=(self.config, self.core_q, self.irc_q, os.getpid()),
-                daemon=True,
+                daemon=False,
                 name="IRC"
             )
             new_proc.start()
@@ -855,7 +859,7 @@ class Core:
             self.partyline.broadcast(f"*** IRC process respawned (pid={new_proc.pid})")
 
     async def register_timer(self, name: str, callback, interval: float, randomize: bool = False):
-        """Register repeating timer"""
+        log.debug(f"Registered timer '{name}': {interval}s")   # ← once, at registration
         async def timer_loop():
             current_interval = interval
             while True:
@@ -866,7 +870,6 @@ class Core:
                 if randomize:
                     current_interval = max(1.0, interval + random.randint(-30, 30))
                 await asyncio.sleep(current_interval)
-                log.debug(f"Registered timer {name}: {current_interval}s")
         self.timers[name] = asyncio.create_task(timer_loop())
     
     def unregister_timer(self, name: str):
@@ -1014,7 +1017,7 @@ class Core:
                 log.error("Failed to restore game %s: %s", game_name, e)
 
     def _setup_signals(self):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(
                 sig,
