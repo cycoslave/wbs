@@ -326,7 +326,8 @@ class NetListener:
     async def handle_connection(self, reader, writer):
         peer    = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
-        release_on_exit = False  # ← track whether we own the slot
+        release_on_exit = False
+        handed_off      = False   # ← NEW: set True when streams are handed to core
 
         if self.guard:
             allowed, reason = await self.guard.admit(peer_ip)
@@ -344,9 +345,9 @@ class NetListener:
                     except Exception:
                         pass
                 return
-            release_on_exit = True  # ← we admitted, we own this slot
+            release_on_exit = True
 
-        cfg = self.config.get("settings", {})
+        cfg     = self.config.get("settings", {})
         timeout = float(cfg.get("handshake_timeout", 30))
         try:
             data = await asyncio.wait_for(reader.readline(), timeout)
@@ -359,8 +360,8 @@ class NetListener:
             else:
                 await self._handle_partyline(line, peer, peer_ip, reader, writer)
 
-            release_on_exit = False  # ← handed off successfully, read_peer owns release
-            return
+            release_on_exit = False
+            handed_off      = True   # ← streams are now owned by core/read_peer
 
         except asyncio.TimeoutError:
             log.warning(f"Handshake timeout from {peer_ip}")
@@ -370,11 +371,12 @@ class NetListener:
         finally:
             if release_on_exit and self.guard:
                 self.guard.release(peer_ip)
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+            if not handed_off:          # ← only close if we still own the socket
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
 
     async def _handle_botlink(self, line: str, peer: tuple, peer_ip: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parts = line.split()

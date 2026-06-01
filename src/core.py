@@ -41,15 +41,15 @@ BASE_DIR = Path(__file__).parent.parent
 class Core:
     """Main process: Core event loop + child process manager."""
     
-    def __init__(self, config: dict, config_path: str, args):
+    def __init__(self, config: dict, config_path: str, args, core_q=None, irc_q=None):
         self.config      = config
         self.config_path = config_path
         self.db_path = self.config.get('db', {}).get('path', 'db/wbs.db')
         db_path_override = getattr(args, 'db_path', None)
         if db_path_override:
             self.config['db']['path'] = db_path_override
-        self.core_q = mp.Queue()
-        self.irc_q = mp.Queue()
+        self.core_q = core_q if core_q is not None else mp.Queue()
+        self.irc_q  = irc_q  if irc_q  is not None else mp.Queue()
         self._event_buffer = deque()
         self._buffer_lock = threading.Lock()
         self.quit_event = mp.Event()
@@ -221,9 +221,6 @@ class Core:
 
     async def on_bot_connect(self, event: dict):
         bot_name = event['handle']
-        peer = event.get('peer', 'unknown')
-
-        # Get pre-negotiated streams (TLS already done)
         streams = self.net_listener._pending_streams.pop(bot_name.lower(), None)
         if streams is None:
             log.warning(f"No pending streams for {bot_name}")
@@ -231,34 +228,18 @@ class Core:
 
         reader, writer = streams
 
-        subnet_id = (
-            event.get('subnet_id')
-            or self.config.get('botnet', {}).get('subnet_id', None)
-        )
-
         try:
-            bot_id = len(self.bot_sessions)
-            response_q = mp.Queue()
-
-            bot_session = Session(
-                session_id=bot_id,
-                session_type='bot',
-                handle=bot_name,
-                reader=reader,
-                writer=writer,
-                core_q=self.core_q,
-                response_q=response_q,
-                subnet_id=subnet_id
-            )
-            bot_session.peer_ip = event.get('peer_ip', 'unknown')
-            self.bot_sessions[bot_name.lower()] = bot_session
-            
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
-            asyncio.create_task(self.botnet.read_peer(bot_name, reader, writer), name=f"read_peer:{bot_name}")
-            log.debug(f"Bot session {bot_id} created for {bot_name}")
+            asyncio.create_task(
+                self.botnet.read_peer(bot_name, reader, writer),
+                name=f"read_peer:{bot_name}"
+            )
+            log.debug(f"Bot connect handler complete for {bot_name}")
 
         except Exception as e:
-            log.error(f"Bot session {bot_name} failed: {e}")
+            log.error(f"Bot connect failed for {bot_name}: {e}", exc_info=True)
+            if not writer.is_closing():
+                writer.close()
 
     async def on_bot_disconnect(self, event: dict):
         handle = event['handle']
@@ -1076,7 +1057,5 @@ def core_process_launcher(config, config_path, args, core_q, irc_q):
         except Exception as e:
             log.warning(f"Could not restore TTY fd {tty_fd}: {e}")
 
-    core = Core(config=config, config_path=config_path, args=args)
-    core.core_q = core_q
-    core.irc_q  = irc_q
-    asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))        
+    core = Core(config=config, config_path=config_path, args=args, core_q=core_q, irc_q=irc_q)
+    asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))     
