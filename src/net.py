@@ -57,13 +57,11 @@ class AccessGuard:
 
     def __init__(self, db_path: str, config: dict) -> None:
         self.db_path = db_path
-        cfg = config.get("settings", {}) 
-
+        cfg = config.get("settings", config) 
         self.mode = cfg.get("access_mode", "blacklist").lower()
         self.max_failures = int(cfg.get("max_failures", 5))
         self.lockout_seconds = int(cfg.get("lockout_seconds", 300))
         self.max_connections = int(cfg.get("max_connections", 50))
-
         self._blocklist: dict[str, _BlockEntry] = {}    # ip → entry
         self._failures: dict[str, _FailureRecord] = {}  # ip → record (ephemeral)
         self._active: dict[str, int] = {}               # ip → open conn count
@@ -159,7 +157,7 @@ class AccessGuard:
         note:       str = "",
     ) -> None:
         """Block an IP and persist to DB.  Accepts hostname — resolves to IP."""
-        ip = _resolve_to_ip(ip)
+        ip = await _resolve_to_ip(ip)
         if ip is None:
             log.error("AccessGuard.block: could not resolve address")
             return
@@ -176,7 +174,7 @@ class AccessGuard:
 
     async def unblock(self, ip: str, removed_by: str = "operator") -> bool:
         """Remove an IP from the blocklist.  Returns True if it was present."""
-        ip = _resolve_to_ip(ip) or ip
+        ip = await _resolve_to_ip(ip) or ip
         if ip not in self._blocklist:
             return False
         await self._remove_from_blocklist(ip, reason=f"removed by {removed_by}")
@@ -260,15 +258,16 @@ class AccessGuard:
         log.info(f"AccessGuard: UNBLOCKED {ip} ({reason})")
 
 
-def _resolve_to_ip(host: str) -> Optional[str]:
+async def _resolve_to_ip(host: str) -> Optional[str]:
     """Return the IP string for a given hostname or IP.  None on failure."""
     try:
         ipaddress.ip_address(host)
-        return host                          # already an IP
+        return host
     except ValueError:
         pass
     try:
-        return socket.gethostbyname(host)    # resolve hostname → IP
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, socket.gethostbyname, host)
     except socket.gaierror:
         return None
 
@@ -280,12 +279,13 @@ class NetListener:
     Without a guard, all connections are passed through (dev mode).
     """
 
-    def __init__(self, core_q: mp.Queue, config: dict = None, access_guard: AccessGuard = None) -> None:
+    def __init__(self, core_q: mp.Queue, config: Optional[dict] = None, access_guard: Optional[AccessGuard] = None) -> None:
+        self._pending_streams: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self.core_q          = core_q
         self.config          = config or {}
         self.guard           = access_guard
         self.server          = None
-        self._pending_streams: dict = {}   # handle.lower() → (reader, writer)
+        self._pending_streams: dict = {}
 
     def _build_ssl_context(self) -> ssl_lib.SSLContext | None:
         """Build server-side TLS context, or None if disabled."""
@@ -349,8 +349,10 @@ class NetListener:
         cfg = self.config.get("settings", {})
         timeout = float(cfg.get("handshake_timeout", 30))
         try:
-            data = await asyncio.wait_for(reader.read(4096), float(timeout))
+            data = await asyncio.wait_for(reader.readline(), float(timeout))
             line = data.decode("utf-8", errors="ignore").strip()
+            if not line:
+                raise ValueError("Empty handshake line")
 
             if line.startswith("BOTLINK"):
                 await self._handle_botlink(line, peer, peer_ip, reader, writer)
@@ -380,7 +382,11 @@ class NetListener:
         parts = line.split()
         if len(parts) >= 4:
             remote_handle = parts[1]
-            subnet_id     = int(parts[3])
+            try:
+                subnet_id = int(parts[3])
+            except ValueError:
+                log.warning(f"Invalid BOTLINK subnet_id from {peer_ip}: {line!r} — defaulting to subnet 1")
+                subnet_id = 1
             log.info(f"Botlink from {remote_handle} ({peer_ip})")
             # Store FIRST, then notify — prevents race in on_bot_connect
             self._pending_streams[remote_handle.lower()] = (reader, writer)
