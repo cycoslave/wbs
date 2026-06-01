@@ -22,6 +22,7 @@ from .bot import BotManager
 from .user import UserManager
 from .channel import ChannelManager
 from .subnet import SubnetManager
+from .net import AccessGuard
 
 log = logging.getLogger("wbs.botnet")
 CLOCK_SKEW_WARN_SECONDS = 30
