@@ -85,6 +85,7 @@ class Core:
         self.public_ip: Optional[str] = None
         self._irc_respawn_delay: float = 5.0
         self._irc_last_respawn: float = 0.0
+        self.botnet.guard = self.net_listener.guard
         log.info(f"Core process started. (pid={os.getpid()})")
 
     async def _async_init(self):

@@ -283,7 +283,7 @@ class NetListener:
         self._pending_streams: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self.core_q          = core_q
         self.config          = config or {}
-        self.guard           = access_guard
+        self.guard: Optional[AccessGuard] = access_guard
         self.server          = None
         self._pending_streams: dict = {}
 

@@ -182,6 +182,7 @@ class BotnetManager:
         self.my_handle = self.config.get('bot', {}).get('nick', 'WBS')
         self.autolink = AutoLinkManager(self)
         self._msg_cache: OrderedDict[str, float] = OrderedDict()
+        self.guard: Optional["AccessGuard"] = None
         self.running = True
         self.loop = None
         
@@ -253,34 +254,42 @@ class BotnetManager:
 
     async def read_peer(self, handle: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Continuously read messages from a peer connection."""
+        peer_ip: str | None = None
+        try:
+            peer_info = writer.get_extra_info("peername")
+            peer_ip = peer_info[0] if peer_info else None
+        except Exception:
+            pass
+
         try:
             while self.running:
                 try:
                     line = await reader.readline()
                 except asyncio.LimitOverrunError:
-                    await reader.read(4096)  # drain
+                    await reader.read(4096)
                     log.warning(f"Oversized line from {handle}, discarding")
                     continue
                 if not line:
                     log.info(f"Connection closed by {handle}")
                     break
-                
                 decoded = line.decode().strip()
                 if decoded:
                     await self.process_incoming(handle, decoded, reader, writer)
-                    
+
         except asyncio.CancelledError:
             log.info(f"Read task cancelled for {handle}")
         except Exception as e:
             log.error(f"Read error from {handle}: {e}")
         finally:
             self.subnet.unregister_peer(handle)
-            # Clean up on disconnect
             if handle.lower() in self.peers:
                 del self.peers[handle.lower()]
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
+            # ← FIX: release the admission slot
+            if self.guard and peer_ip:
+                self.guard.release(peer_ip)
             log.info(f"Peer {handle} disconnected")
 
     async def process_incoming(self, from_bot: str, line: str, reader, writer):
