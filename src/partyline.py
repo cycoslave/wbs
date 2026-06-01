@@ -5,7 +5,9 @@ Partyline hub - coordinates chat between console, telnet, DCC, and botnet
 import asyncio
 import logging
 from typing import Optional
-from .user import UserManager
+from dataclasses import dataclass, field
+
+from .commands import COMMANDS
 
 log = logging.getLogger("wbs.partyline")
 
@@ -108,6 +110,14 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "gsessions": "A",
 }
 
+@dataclass
+class RelaySession:
+    """Tracks an active relay connection from a local session to a remote bot."""
+    handle: str           # local user's handle
+    origin: str           # local bot name (self)
+    target: str           # remote bot name being relayed to
+    orig_sid: int         # local session_id this relay belongs to
+
 class Partyline:
     """Central partyline hub - runs in core process, manages all sessions"""
     
@@ -117,13 +127,12 @@ class Partyline:
         
         # Session registry: session_id -> session info
         self.sessions = {}  # {session_id: {'type': 'console/telnet/dcc', 'handle': str, 'queue': Queue}}
-        self.relay_sessions: dict = {}  # relay_key → {handle, origin, orig_sid, respond}
+        self.relay_sessions: dict[int, RelaySession] = {}  # session_id → RelaySession
         self.next_id = 0
         
         # Console session (special case - no queue, direct output)
         self.console_session_id = None
         self.console_output_callback = None
-        self.user = UserManager(self.core.config['db']['path']) 
         
     def register_console(self, handle: str, output_callback):
         """Register console as partyline session (main process, no multiprocessing)"""
@@ -166,33 +175,30 @@ class Partyline:
         if not session:
             return
 
-        relay_target = session.get('relay_to')
-        if relay_target:
-            # '.relay' alone always disconnects regardless of what remote thinks
+        # Check relay_sessions instead of inline session keys
+        relay = self.relay_sessions.get(session_id)
+        if relay:
             if text.strip() in ('.relay', '.disconnect'):
-                session.pop('relay_to', None)
-                session.pop('relay_origin', None)
-                if relay_target in self.core.botnet.peers:
-                    await self.core.botnet.send_to_peer(relay_target, {
+                del self.relay_sessions[session_id]  # clean removal
+                if relay.target in self.core.botnet.peers:
+                    await self.core.botnet.send_to_peer(relay.target, {
                         'type': 'RELAY_CLOSE',
-                        'from': session['handle'],
+                        'from': relay.handle,
                         'session_id': session_id,
-                        'origin': self.core.botname
+                        'origin': relay.origin
                     })
                 await self._send(session_id, f"Relay closed. Back on {self.core.botname}.")
                 return
 
-            # Forward everything else verbatim to remote bot's partyline
-            await self.core.botnet.send_to_peer(relay_target, {
+            await self.core.botnet.send_to_peer(relay.target, {
                 'type': 'RELAY_INPUT',
-                'from': session['handle'],
+                'from': relay.handle,
                 'session_id': session_id,
-                'origin': self.core.botname,
+                'origin': relay.origin,
                 'text': text
             })
             return
 
-        # Normal local dispatch
         await self._handle_command(session_id, session['handle'], text)
     
     async def _handle_command(self, session_id: int, handle: str, text: str):
@@ -229,13 +235,12 @@ class Partyline:
             if required_flag:
                 # matchattr defaults to positive semantics when no +/- prefix
                 flagspec = required_flag
-                allowed = await self.user.matchattr(handle, flagspec)
+                allowed = await self.core.user.matchattr(handle, flagspec)
                 if not allowed:
                     self.send_to_session(session_id, f"Access denied for .{cmd} (need +{required_flag}).")
                     return
         
         # Dispatch to commands.py
-        from .commands import COMMANDS
         if cmd in COMMANDS:
             try:
                 async def respond(msg: str):
@@ -253,11 +258,14 @@ class Partyline:
         self.send_to_session(session_id, message)
     
     def broadcast(self, message: str, local_only=False, exclude_session: Optional[int] = None):
-        """Broadcast to all sessions (console callback, remote queues)."""
-        if not local_only:
-            asyncio.create_task(
-                self.core.botnet.broadcast_chat(self.core.botname, message, exclude=self.core.botname)
-            )
+        if not local_only and self.core.botnet and self.core.botnet.is_connected():
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self.core.botnet.broadcast_chat(self.core.botname, message, exclude=self.core.botname)
+                )
+            except RuntimeError:
+                pass  # No running loop; skip botnet broadcast
         for session_id, session in self.sessions.items():
             if session_id == exclude_session:
                 continue
@@ -267,31 +275,53 @@ class Partyline:
             elif session['queue']: 
                 try:
                     session['queue'].put_nowait({'type': 'MESSAGE', 'text': message})
-                except:
-                    log.warning(f"Failed to send to session {session_id}")
+                except asyncio.QueueFull as e:
+                    log.warning("Queue full for session %s: %s", session_id, e)
 
     def send_to_session(self, session_id: int, message: str):
         """Send message to specific session (command response)"""
         if session_id not in self.sessions:
             return
-        
+
         session = self.sessions[session_id]
-        
+
         if session['type'] == 'console':
-            if session['output']:
+            if session.get('output'):
                 session['output'](message)
         elif session['type'] == 'telnet':
-            if hasattr(self, 'core') and session_id in self.core.party_sessions:
-                telnet_session = self.core.party_sessions[session_id]
-                asyncio.create_task(telnet_session.send(message))
-                log.debug(f"TELNET direct send to session {session_id}")
-                return     
+            party_sessions = getattr(self.core, 'party_sessions', None)
+            if party_sessions and session_id in party_sessions:
+                try:
+                    asyncio.get_running_loop().create_task(party_sessions[session_id].send(message))
+                    log.debug("TELNET direct send to session %s", session_id)
+                except RuntimeError:
+                    log.warning("No running event loop; cannot send to telnet session %s", session_id)
+            else:
+                log.warning("Telnet session %s not found in core.party_sessions", session_id)
         else:
-            if session['queue']:
+            if session.get('queue'):
                 try:
                     session['queue'].put_nowait({
                         'type': 'RESPONSE',
                         'text': message
                     })
-                except:
-                    log.warning(f"Failed to send response to session {session_id}")
+                except asyncio.QueueFull as e:
+                    log.warning("Queue full for session %s: %s", session_id, e)
+                except Exception as e:
+                    log.warning("Failed to send response to session %s: %s", session_id, e)
+
+    def open_relay(self, session_id: int, target_bot: str) -> bool:
+        """Open a relay session from session_id to a remote bot. Returns False if already in relay."""
+        if session_id in self.relay_sessions:
+            return False
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+        self.relay_sessions[session_id] = RelaySession(
+            handle=session['handle'],
+            origin=self.core.botname,
+            target=target_bot,
+            orig_sid=session_id
+        )
+        log.info("Relay opened: session %s -> %s", session_id, target_bot)
+        return True

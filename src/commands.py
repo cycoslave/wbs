@@ -2038,18 +2038,26 @@ async def cmd_chattr(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_relay(core, handle: str, session_id: int, arg: str, respond):
     """
-    .relay <botnick> — connect your partyline session to another bot's partyline via botnet.
-    .relay <botnick> <command> — run a single command on a remote bot and return output.
-    Type '.relay' with no args to disconnect from current relay.
+    .relay <botnick>          — open a persistent relay session to another bot.
+    .relay <botnick> <cmd>    — run a single command on a remote bot.
+    .relay                    — disconnect from current relay.
     """
     parts = arg.strip().split(maxsplit=1)
 
     # .relay with no args — disconnect from current relay
     if not parts:
-        session = core.partyline.sessions.get(session_id, {})
-        if session.get('relay_to'):
-            prev = session.pop('relay_to')
-            await respond(f"Disconnected from relay: {prev}")
+        relay = core.partyline.relay_sessions.get(session_id)
+        if relay:
+            del core.partyline.relay_sessions[session_id]
+            # Notify the remote bot to close its side
+            if relay.target in core.botnet.peers:
+                await core.botnet.send_to_peer(relay.target, {
+                    'type': 'RELAY_CLOSE',
+                    'from': relay.handle,
+                    'session_id': session_id,
+                    'origin': relay.origin
+                })
+            await respond(f"Disconnected from relay: {relay.target}")
         else:
             await respond("Not currently relayed to any bot.")
         return
@@ -2057,13 +2065,12 @@ async def cmd_relay(core, handle: str, session_id: int, arg: str, respond):
     botnick = parts[0]
     remote_cmd = parts[1] if len(parts) > 1 else None
 
-    # Verify bot is linked
     if botnick not in core.botnet.peers:
         await respond(f"Bot {botnick} is not linked. Use .link first.")
         return
 
     if remote_cmd:
-        # One-shot: send a single command to the remote bot and relay response back
+        # One-shot: send a single command to the remote bot
         await core.botnet.send_to_peer(botnick, {
             'type': 'PARTYLINE_CMD',
             'from': handle,
@@ -2073,13 +2080,27 @@ async def cmd_relay(core, handle: str, session_id: int, arg: str, respond):
         })
         await respond(f"→ [{botnick}] {remote_cmd}")
     else:
-        # Persistent relay: park this session's input on the remote bot
-        session = core.partyline.sessions.get(session_id, {})
-        if session.get('relay_to') == botnick:
-            await respond(f"Already relayed to {botnick}.")
-            return
-        session['relay_to'] = botnick
-        await respond(f"Relayed to {botnick}. All input forwarded. Type '.relay' alone to disconnect.")
+        # Persistent relay — use open_relay() from partyline
+        existing = core.partyline.relay_sessions.get(session_id)
+        if existing:
+            if existing.target == botnick:
+                await respond(f"Already relayed to {botnick}.")
+                return
+            # Close the existing relay cleanly before opening a new one
+            if existing.target in core.botnet.peers:
+                await core.botnet.send_to_peer(existing.target, {
+                    'type': 'RELAY_CLOSE',
+                    'from': existing.handle,
+                    'session_id': session_id,
+                    'origin': existing.origin
+                })
+            del core.partyline.relay_sessions[session_id]
+
+        opened = core.partyline.open_relay(session_id, botnick)
+        if opened:
+            await respond(f"Relayed to {botnick}. All input forwarded. Type '.relay' alone to disconnect.")
+        else:
+            await respond(f"Failed to open relay to {botnick}.")
 
 async def cmd_mass(core, handle: str, session_id: int, arg: str, respond):
     """
