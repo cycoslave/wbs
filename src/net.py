@@ -323,9 +323,10 @@ class NetListener:
         async with self.server:
             await self.server.serve_forever()
 
-    async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle_connection(self, reader, writer):
         peer    = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
+        release_on_exit = False  # ← track whether we own the slot
 
         if self.guard:
             allowed, reason = await self.guard.admit(peer_ip)
@@ -340,16 +341,15 @@ class NetListener:
                     writer.close()
                     try:
                         await writer.wait_closed()
-                    except ssl_lib.SSLError:
-                        pass  # remote sent data after close_notify
                     except Exception:
                         pass
                 return
+            release_on_exit = True  # ← we admitted, we own this slot
 
         cfg = self.config.get("settings", {})
         timeout = float(cfg.get("handshake_timeout", 30))
         try:
-            data = await asyncio.wait_for(reader.readline(), float(timeout))
+            data = await asyncio.wait_for(reader.readline(), timeout)
             line = data.decode("utf-8", errors="ignore").strip()
             if not line:
                 raise ValueError("Empty handshake line")
@@ -358,25 +358,23 @@ class NetListener:
                 await self._handle_botlink(line, peer, peer_ip, reader, writer)
             else:
                 await self._handle_partyline(line, peer, peer_ip, reader, writer)
-            return  # streams handed off — do NOT release guard or close
+
+            release_on_exit = False  # ← handed off successfully, read_peer owns release
+            return
 
         except asyncio.TimeoutError:
             log.warning(f"Handshake timeout from {peer_ip}")
-        except ssl_lib.SSLError as e:
-            log.debug(f"TLS error from {peer_ip}: {e}")
         except Exception as e:
             log.error(f"Connection error from {peer_ip}: {e}")
 
-        # Only reached on error — release slot and close
-        if self.guard:
-            self.guard.release(peer_ip)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except ssl_lib.SSLError:
-            pass
-        except Exception:
-            pass
+        finally:
+            if release_on_exit and self.guard:
+                self.guard.release(peer_ip)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def _handle_botlink(self, line: str, peer: tuple, peer_ip: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parts = line.split()

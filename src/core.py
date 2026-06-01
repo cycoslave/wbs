@@ -1060,7 +1060,6 @@ class Core:
         self.timers.clear()
         # Give aiosqlite a moment to flush
         try:
-            from .db import get_db
             db = await get_db(self.db_path)
             await db.close()
         except Exception:
