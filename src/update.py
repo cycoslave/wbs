@@ -42,7 +42,9 @@ from . import __version__
 
 log = logging.getLogger("wbs.update")
 _RUNTIME_PLATFORM = "python"
-_MIN_PYTHON_MAJOR = 6
+_MIN_PYTHON_MAJOR_STABLE = 6
+_MIN_PYTHON_MAJOR_TESTING = 5
+_MIN_PYTHON_SUB_TESTING = 9
 _PKG_DIR    = Path(__file__).resolve().parent
 _ROOT_DIR   = _PKG_DIR.parent
 _TMP_DIR    = _ROOT_DIR / ".tmp" / "update"
@@ -168,6 +170,16 @@ class UpdateManager:
     def _check_platform_compatibility(self, manifest: UpdateManifest) -> None:
         """
         Reject manifests that are incompatible with this Python runtime.
+
+        Accepts:
+        - Any manifest with major >= _MIN_PYTHON_MAJOR_STABLE (6+)
+        - The 5.9.x test track (major == _MIN_PYTHON_MAJOR_TESTING
+            and versionsub >= _MIN_PYTHON_SUB_TESTING)
+
+        Rejects:
+        - Non-integer major version
+        - Eggdrop/Tcl era releases (major < 5, or major == 5 and sub < 9)
+        - Manifests declaring an incompatible platform field
         """
         try:
             remote_major = int(manifest.version)
@@ -178,14 +190,29 @@ class UpdateManager:
                 "Verify your auhost/auremotefile configuration."
             )
 
-        if remote_major < _MIN_PYTHON_MAJOR:
+        if remote_major < _MIN_PYTHON_MAJOR_TESTING:
             raise IncompatiblePlatformError(
                 f"Remote manifest is for WBS {manifest.version_str}, which is an "
-                f"Eggdrop/Tcl release (major version < {_MIN_PYTHON_MAJOR}). "
+                f"Eggdrop/Tcl release (major version < {_MIN_PYTHON_MAJOR_TESTING}). "
                 "This Python bot cannot install Eggdrop-era updates. "
                 "Verify your auhost/auremotefile configuration points to a "
-                "WBS 6+ release endpoint."
+                "WBS 5.9+ release endpoint."
             )
+
+        if remote_major == _MIN_PYTHON_MAJOR_TESTING:
+            try:
+                remote_sub = int(manifest.versionsub)
+            except ValueError:
+                raise IncompatiblePlatformError(
+                    f"Remote manifest has non-integer versionsub: {manifest.versionsub!r}. "
+                    "Cannot determine test track compatibility."
+                )
+            if remote_sub < _MIN_PYTHON_SUB_TESTING:
+                raise IncompatiblePlatformError(
+                    f"Remote manifest is for WBS {manifest.version_str}."
+                    "This Python bot only accepts the 5.9.x test track or newer. "
+                    "Verify your update host configuration."
+                )
 
         declared = manifest.platform.lower().strip()
         if declared not in ("python", "any", ""):

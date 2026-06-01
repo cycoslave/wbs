@@ -241,7 +241,8 @@ class BotnetManager:
             log.info(f"Connecting to peer {handle} at {bot.address}:{bot.port} — awaiting auth")
             
         except Exception as e:
-            log.error(f"Failed to connect to {handle}: {e}")
+            #log.error(f"Failed to connect to {handle}: {e}")
+            pass
 
     async def disconnect_peer(self, botname: str):
         link = self.peers.pop(botname.lower(), None)
