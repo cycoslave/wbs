@@ -89,14 +89,14 @@ class UpdateManager:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        self._config    = config
-        self._lock      = asyncio.Lock()
-
-        self._auhost:       str = config.get("auhost", "").rstrip("/")
-        self._auremotefile: str = config.get("auremotefile", "/UPDATE")
-        self._useragent:    str = config.get("useragent", f"WBS/{__version__}")
-        self._timeout:      int = int(config.get("updatetimeout", 30))
-
+        self._config = config
+        self._lock = asyncio.Lock()
+        _update_cfg: dict[str, Any] = config.get("update", {})
+        self._auhost: str = _update_cfg.get("host", "").rstrip("/")
+        self._auto_updates: bool = bool(_update_cfg.get("auto_updates", False))
+        self._auremotefile: str = "/UPDATE"
+        self._useragent: str = f"WBS/{__version__}"
+        self._timeout: int = 30
         self._current: pkg_version.Version = pkg_version.parse(__version__)
 
     async def check_update(self) -> Optional[UpdateManifest]:
@@ -474,29 +474,31 @@ class UpdateManager:
     @staticmethod
     def _parse_manifest(raw: str) -> Optional[UpdateManifest]:
         """
-        Parse the raw UPDATE manifest text into an UpdateManifest.
+        Parse the remote RELEASE manifest into an UpdateManifest.
 
-        Expected format (one key: value per line; # lines are comments):
+        Expected format (one key value per line; # lines are comments):
 
-            version:      6
-            versionsub:   1
-            versionpatch: 0
-            fullupgrade:  no
-            author:       cyco
-            date:         30052026
-            url:          https://github.com/cycoslave/wbs/releases/download/v6.1.0/wbs-6.1.0.tar.gz
-            prereq:       6.0.0
-            sha256:       <64-char hex>
-            platform:     python
+            version 6
+            versionsub 1
+            versionpatch 0
+            fullupgrade no
+            author cyco
+            date 30052026
+            url https://wbsupdate.wcksoft.com/6.1/wbs6.1.0.tgz
+            prereq none
+            sha256 <64-char hex>
+            platform python
 
-        Unknown keys ignored. Missing keys use safe defaults.
+        Legacy keys (eggupg) accepted for backward compat.
+        Unknown keys are silently ignored.
+        Missing keys use safe defaults.
         """
         defaults: dict[str, str] = {
             "version":      "0",
             "versionsub":   "0",
             "versionpatch": "0",
             "fullupgrade":  "no",
-            "eggupg":       "no",       # legacy alias
+            "eggupg":       "no",       # legacy alias for fullupgrade
             "author":       "unknown",
             "date":         "01012000",
             "url":          "none",
@@ -510,11 +512,10 @@ class UpdateManager:
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            if ":" not in line:
+            parts = line.split(None, 1)
+            if len(parts) != 2:
                 continue
-            key, _, val = line.partition(":")
-            key = key.strip().lower()
-            val = val.strip()
+            key, val = parts[0].lower(), parts[1].strip()
             if key in data:
                 data[key] = val
 

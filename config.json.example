@@ -52,6 +52,10 @@
     "port_max": 40100,
     "max_sessions": 10
   },
+  "update": {
+    "host": "https://wbsupdate.wcksoft.com",
+    "auto_updates": false
+  },
   "settings": {
     "pid_file": "wbs.pid",
     "botnet": false,
