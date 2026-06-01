@@ -4,6 +4,7 @@ Unified async SQLite for WBS: bots/users/channels/seen.
 Supports multi-process (WAL mode).
 """
 import aiosqlite
+import asyncio
 import time
 import logging
 import bcrypt
@@ -13,19 +14,19 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+#logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("wbs.db")
 ALLOWED_TABLES = {'subnets', 'users', 'user_access', 'bots', 'bot_access', 'bot_subnets', 'servers', 'channels', 'channel_subnets', 'runtime', 'ignores', 
                   'loaded_modules', 'game_sessions', 'blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings' , 
                   'poker_cash', 'werewolf_stats', 'chanlock', 'limit_settings', 'seen', 'stats_global', 'stats_channel', 'stats_history', 'topiclock'}
 
-async def get_schema_sql() -> str:
-    """Load schema.sql."""
+def get_schema_sql() -> str:
+    """Load schema.sql (synchronous — call via asyncio.to_thread if needed)."""
     return SCHEMA_PATH.read_text(encoding="utf-8")
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
     """Idempotent schema apply."""
-    schema = await get_schema_sql()
+    schema = await asyncio.to_thread(get_schema_sql)
     await db.executescript(schema)
     await db.commit()
 
@@ -48,18 +49,18 @@ def _hash_password(password_cfg) -> str | None:
         return raw
     return bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
 
-async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool = False) -> None:
-    """Unified init: config path, schema file, WAL multi-process."""
+async def init_db(db_path: str, force: bool = False) -> None:
+    """Unified init: schema file, WAL multi-process."""
     db_path_obj = Path(db_path)
     db_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    
+
     async with aiosqlite.connect(db_path_obj) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA foreign_keys = ON")
         await db.commit()
-        
+
         if force:
             async with db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -70,16 +71,17 @@ async def init_db(db_path: str, schema_path: str = str(SCHEMA_PATH), force: bool
             try:
                 for (table,) in tables:
                     if table in ALLOWED_TABLES:
-                        await db.execute(f"DROP TABLE IF EXISTS {table}")
+                        # Whitelist-validated — safe to concatenate
+                        await db.execute("DROP TABLE IF EXISTS " + table)
                 await db.commit()
             except Exception:
                 await db.rollback()
                 raise
-        
-        await ensure_schema(db)
-        log.info(f"DB init at {db_path} {'(force)' if force else '(idempotent)'}")
 
-async def seed_db(db_path: str, config: dict):
+        await ensure_schema(db)
+        log.info("DB init at %s %s", db_path, "(force)" if force else "(idempotent)")
+
+async def seed_db(db_path: str, config: dict) -> None:
     """Seed from config.json: subnet, bot record, channels, users.
     Only called via './wbs --seed'. Never called on normal startup.
     """
@@ -87,7 +89,7 @@ async def seed_db(db_path: str, config: dict):
     nick = bot_config['nick']
 
     subnet_cfg = config.get('subnet', {})
-    subnet_id  = int(subnet_cfg.get('id', 1))
+    subnet_id   = int(subnet_cfg.get('id', 1))
     subnet_name = subnet_cfg.get('name', 'default')
 
     async with aiosqlite.connect(db_path) as db:
@@ -133,43 +135,35 @@ async def seed_db(db_path: str, config: dict):
                 log.error("seed_db: bad password config for '%s': %s", handle, exc)
                 continue
 
-            # Determine flags from access block
-            flags = '+n'
-            for acc in user_cfg.get('access', []):
-                if acc.get('is_admin'):
-                    flags = '+fhoimn'
-                    break
-                if acc.get('is_op'):
-                    flags = '+omn'
-
             await db.execute("""
                 INSERT INTO users (handle, password, created_by)
                 VALUES (?, ?, 'seed')
                 ON CONFLICT(handle) DO NOTHING
             """, (handle, pw_hash))
 
-            is_owner = False
-            is_admin = False
-            has_partyline = False
-            is_op = False
+            # Derive access flags directly from config — single pass
+            is_owner       = False
+            is_admin       = False
+            has_partyline  = False
+            is_op          = False
             for acc in user_cfg.get('access', []):
-                if acc.get('is_owner') or '+n' in flags:
-                    is_owner = True
-                if acc.get('is_admin') or '+A' in flags or is_owner:
-                    is_admin = True
                 has_partyline = True
+                if acc.get('is_owner'):
+                    is_owner = True
+                if acc.get('is_admin') or is_owner:
+                    is_admin = True
                 if acc.get('is_op'):
                     is_op = True
 
             await db.execute("""
                 INSERT INTO user_access (
-                    handle, channel,
+                    handle, channel, subnet_id,
                     has_partyline, is_admin, is_owner, is_op,
                     created_by
                 )
-                VALUES (?, NULL, ?, ?, ?, ?, 'seed')
+                VALUES (?, NULL, ?, ?, ?, ?, ?, 'seed')
                 ON CONFLICT(handle, channel, subnet_id) DO NOTHING
-            """, (handle, int(has_partyline), int(is_admin), int(is_owner), int(is_op)))
+            """, (handle, subnet_id, int(has_partyline), int(is_admin), int(is_owner), int(is_op)))
 
             # Host masks
             hosts = user_cfg.get('hosts', [])
@@ -225,11 +219,17 @@ async def init_runtime_state(db_path: str):
         )
         
         await db.commit()
-        log.info(f"Runtime state initialized: start_time={start_time}")
+        log.info("Runtime state initialized: start_time=%d", start_time)
 
 async def get_runtime(key: str, db_path: str) -> Optional[int]:
-    """Get typed runtime value from DB."""
+    """Get integer runtime value from DB. Returns None if key missing or value is non-integer."""
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("SELECT value FROM runtime WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()
-            return int(row[0]) if row else None
+            if row is None:
+                return None
+            try:
+                return int(row[0])
+            except (ValueError, TypeError):
+                log.warning("get_runtime: non-integer value for key %r: %r", key, row[0])
+                return None
