@@ -28,7 +28,7 @@ GLOBAL_FLAGS: dict[str, str] = {
     'q': 'is_devoice',
     'k': 'is_autokick',
 }
-CHAN_FLAGS = GLOBAL_FLAGS 
+CHAN_FLAGS: dict[str, str] = dict(GLOBAL_FLAGS)
 VALID_FLAG_COLUMNS: frozenset[str] = frozenset(GLOBAL_FLAGS.values())
 
 @dataclass
@@ -56,21 +56,28 @@ class User:
 
 @dataclass
 class UserAccess:
-    """Maps to the 'user_access' table."""
     handle: str
     channel: Optional[str] = None
     subnet_id: Optional[int] = None
     has_partyline: bool = False
     is_admin: bool = False
+    is_owner: bool = False
+    is_friend: bool = False
+    is_autoop: bool = False
     is_op: bool = False
     is_deop: bool = False
+    is_autohop: bool = False
+    is_hop: bool = False
+    is_dehop: bool = False
     is_voice: bool = False
     is_devoice: bool = False
-    is_friend: bool = False
+    is_autokick: bool = False
     created_at: int = field(default_factory=lambda: int(time.time()))
     updated_at: int = field(default_factory=lambda: int(time.time()))
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
+    deleted_at: Optional[int] = None
+    deleted_by: Optional[str] = None
 
 class UserManager:
     def __init__(self, db_path):
@@ -83,7 +90,6 @@ class UserManager:
         None = global (partyline access on all subnets).
         Handles resurrection of soft-deleted users.
         """
-        import time
         now = int(time.time())
         hostmasks = json.dumps([hostmask] if hostmask else [])
 
@@ -95,8 +101,7 @@ class UserManager:
 
             if row:
                 if row[1] is None:
-                    return False  # Already exists and active
-                # Resurrect
+                    return False
                 await db.execute(
                     "UPDATE users SET deleted_at = NULL, updated_at = ?, updated_by = ?, "
                     "hostmasks = ? WHERE handle = ?",
@@ -104,9 +109,9 @@ class UserManager:
                 )
             else:
                 await db.execute(
-                    "INSERT INTO users (handle, hostmasks, created_by, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (handle, hostmasks, added_by, now)
+                    "INSERT INTO users (handle, hostmasks, created_at, created_by, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (handle, hostmasks, now, added_by, now)
                 )
 
             # Create a default access entry scoped to subnet (or global if None)
@@ -121,7 +126,6 @@ class UserManager:
 
     async def deluser(self, handle: str, deleted_by: str = None) -> bool:
         """Soft-delete a user and their access entries."""
-        import time
         now = int(time.time())
         async with get_db(self.db_path) as db:
             cur = await db.execute(
@@ -130,9 +134,7 @@ class UserManager:
                 (now, now, deleted_by, handle)
             )
             if cur.rowcount == 0:
-                await db.commit()
                 return False
-            # Soft-delete all access rows too
             await db.execute(
                 "UPDATE user_access SET deleted_at = ?, updated_at = ? WHERE handle = ?",
                 (now, now, handle)
@@ -271,11 +273,16 @@ class UserManager:
                     return row['handle']
         return None
 
-    async def set_password(self, handle: str, password: str):
+    async def set_password(self, handle: str, password: str) -> bool:
+        """Hash and store password for handle. Returns False if handle not found."""
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else None
         async with get_db(self.db_path) as db:
-            await db.execute("UPDATE users SET password = ? WHERE handle = ?", (hashed, handle))
+            cur = await db.execute(
+                "UPDATE users SET password = ? WHERE handle = ? AND deleted_at IS NULL",
+                (hashed, handle)
+            )
             await db.commit()
+        return cur.rowcount > 0
 
     async def verify_password(self, handle: str, password: str) -> bool:
         """Verify a plaintext password against the stored bcrypt hash."""
@@ -294,13 +301,13 @@ class UserManager:
                 return False
 
             return bool(bcrypt.checkpw(password.encode(), stored_hash.encode()))
-        except Exception:
+        except (ValueError, TypeError):
             return False
 
     async def change_handle(self, handle: str, new_handle: str):
-            async with get_db(self.db_path) as db:
-                await db.execute("UPDATE users SET handle = ? WHERE handle = ?", (new_handle, handle))
-                await db.commit()            
+        async with get_db(self.db_path) as db:
+            await db.execute("UPDATE users SET handle = ? WHERE handle = ?", (new_handle, handle))
+            await db.commit()        
 
     async def matchattr(self, handle: str, flags: str, channel: Optional[str] = None) -> bool:
         """
@@ -348,17 +355,24 @@ class UserManager:
                         log.warning(f"matchattr: unknown global flag '{char}'")
                         return False
 
+                    col = GLOBAL_FLAGS.get(char)
+                    if col is None:
+                        log.warning(f"matchattr: unknown global flag '{char}'")
+                        return False
+                    assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist" 
+
                     row = await db.execute_fetchone(
-                        f"""
-                        SELECT 1 FROM user_access
-                        WHERE handle = ?
-                        AND channel IS NULL
-                        AND deleted_at IS NULL
-                        AND {col} = 1
-                        LIMIT 1
-                        """,
+                        f"SELECT 1 FROM user_access WHERE handle = ? AND channel IS NULL "
+                        f"AND deleted_at IS NULL AND {col} = 1 LIMIT 1",
                         (handle,)
                     )
+
+                    # Apply the same assert before the channel query block too
+                    col = CHAN_FLAGS.get(char)
+                    if col is None:
+                        log.warning(f"matchattr: unknown channel flag '{char}'")
+                        return False
+                    assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist"
                     has_flag = row is not None
                     if positive and not has_flag:
                         return False
@@ -412,33 +426,39 @@ class UserManager:
         return [User(**dict(r)) for r in rows]
     
     async def list_users_with_flag(self, flag: str) -> list[User]:
-        """Return all users who have the given flag column set to 1.
+        """Return all active users who have the given flag set on any access row.
+
         Args:
-            flag: A valid flag column name from GLOBAL_FLAGS.values().
+            flag: A valid flag column name from VALID_FLAG_COLUMNS
+                (e.g. 'is_admin', 'has_partyline').
         Raises:
             ValueError: If flag is not a recognized column name.
         """
         if flag not in VALID_FLAG_COLUMNS:
             raise ValueError(f"Invalid flag column: {flag!r}")
 
-        # Safe: flag is now guaranteed to be a known column name from our own dict
-        query = """
-            SELECT u.id, u.username, ua.global_flags
+        # flag is allowlisted — safe to interpolate as column name
+        query = f"""
+            SELECT DISTINCT u.handle, u.password, u.hostmasks, u.is_locked, u.comment,
+                u.created_at, u.updated_at, u.created_by, u.updated_by,
+                u.deleted_at, u.deleted_by
             FROM users u
-            JOIN user_access ua ON u.id = ua.user_id
-            WHERE ua.{} = 1
-        """.format(flag)  # f-string also fine here — flag is allowlisted above
-
-        async with self.db.execute(query) as cursor:
-            rows = await cursor.fetchall()
-        return [User.from_row(row) for row in rows]  
+            JOIN user_access ua ON u.handle = ua.handle
+            WHERE u.deleted_at IS NULL
+            AND ua.deleted_at IS NULL
+            AND ua.{flag} = 1
+            ORDER BY u.handle
+        """
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(query)
+        return [User(**dict(r)) for r in rows] 
         
     async def exist(self, handle: str) -> bool:
         """Return True if a user with this handle exists and is not deleted."""
         async with get_db(self.db_path) as db:
             row = await db.execute_fetchone(
                 "SELECT 1 FROM users WHERE handle = ? AND deleted_at IS NULL",
-                (handle.lower(),)
+                (handle,)
             )
         return row is not None
 
@@ -535,7 +555,7 @@ class UserManager:
                             updated_at = ?, updated_by = ?, deleted_at = ?
                         WHERE handle = ?""",
                         (
-                            user.get('password'), user.get('hostmasks', '[]'),
+                            pw, user.get('hostmasks', '[]'),
                             user.get('is_locked', 0), user.get('comment', ''),
                             remote_updated, from_bot, final_deleted, handle
                         )
@@ -555,7 +575,6 @@ class UserManager:
                     )
             await db.commit()
         log.info(f"UserManager.merge_from_peer: merged {len(users)} users from {from_bot}")
-
 
     async def merge_access_from_peer(self, access_list: list[dict], from_bot: str) -> None:
         """Merge user_access records from a botnet peer. Last-write-wins on updated_at."""
