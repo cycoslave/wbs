@@ -1019,4 +1019,4 @@ class BotnetManager:
 
         # Register new message
         self._msg_cache[msg_id] = now
-        return True        
+        return True

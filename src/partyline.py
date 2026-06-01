@@ -258,7 +258,7 @@ class Partyline:
         self.send_to_session(session_id, message)
     
     def broadcast(self, message: str, local_only=False, exclude_session: Optional[int] = None):
-        if not local_only and self.core.botnet and self.core.botnet.is_connected():
+        if not local_only and self.core.botnet and self.core.botnet.peers:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(

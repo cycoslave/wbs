@@ -120,35 +120,20 @@ class DCCManager:
         listen_ip       str     — interface to bind the active DCC listener (default: '0.0.0.0' — all interfaces)
     """
 
-    def __init__(self, session_id: int, nick: str,
-                reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                partyline, queue: asyncio.Queue):
-        self.session_id = session_id
-        self.nick       = nick
-        self.reader     = reader
-        self.writer     = writer
-        self.partyline  = partyline
-        self._queue     = queue
-        self._closed    = False
-        self._last_activity = time.time()
+    def __init__(self, core):
         self.core       = core
         self.cfg        = core.config.get('dcc', {})
-        self.settings = core.config.get('settings', {})
+        self.settings   = core.config.get('settings', {})
         self.enabled    = self.cfg.get('enabled', True)
-        self.mode       = self.cfg.get('mode', 'auto')          # auto|active|passive|irc
+        self.mode       = self.cfg.get('mode', 'auto')
         self.public_ip  = self.cfg.get('public_ip') or None
         self.port_min   = int(self.cfg.get('port_min', 1024))
         self.port_max   = int(self.cfg.get('port_max', 65535))
         self.max_sessions = int(self.cfg.get('max_sessions', 10))
-        self.listen_ip = self.settings.get('listen_host') or '0.0.0.0'
+        self.listen_ip  = self.settings.get('listen_host') or '0.0.0.0'
 
-        # pending passive tokens: token → {'nick': str, 'future': Future}
         self._passive_pending: Dict[str, dict] = {}
-
-        # active sessions: session_id → DCCSession
         self._sessions: Dict[int, DCCSession] = {}
-
-        # server used for passive mode (bot connects out, listens on random port)
         self._passive_server: Optional[asyncio.AbstractServer] = None
         self._passive_port: Optional[int] = None
 
