@@ -39,7 +39,8 @@ def _ip_to_int(ip: str) -> int:
 def _int_to_ip(n: int) -> str:
     return socket.inet_ntoa(struct.pack("!I", n))
 
-def _random_token(length: int = 8) -> str:
+def _random_token(length: int = 12) -> str:
+    """12 digits = 1 trillion combinations, negligible collision risk."""
     return ''.join(random.choices(string.digits, k=length))
 
 class DCCSession:
@@ -94,8 +95,6 @@ class DCCSession:
             await self.close()
 
     async def close(self):
-        if self._closed:
-            return
         self._closed = True
         try:
             self.writer.close()
@@ -121,7 +120,17 @@ class DCCManager:
         listen_ip       str     — interface to bind the active DCC listener (default: '0.0.0.0' — all interfaces)
     """
 
-    def __init__(self, core):
+    def __init__(self, session_id: int, nick: str,
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                partyline, queue: asyncio.Queue):
+        self.session_id = session_id
+        self.nick       = nick
+        self.reader     = reader
+        self.writer     = writer
+        self.partyline  = partyline
+        self._queue     = queue
+        self._closed    = False
+        self._last_activity = time.time()
         self.core       = core
         self.cfg        = core.config.get('dcc', {})
         self.settings = core.config.get('settings', {})
@@ -260,6 +269,7 @@ class DCCManager:
             await asyncio.sleep(ACTIVE_LISTEN_TIMEOUT)
             log.info(f"[DCC] Active listen timeout for {nick}, closing server.")
             server.close()
+            await server.wait_closed()
 
         asyncio.create_task(_timeout_watchdog())
 
@@ -268,7 +278,8 @@ class DCCManager:
                               writer: asyncio.StreamWriter,
                               server: asyncio.AbstractServer):
         """Accept the single connection from the user in active mode."""
-        server.close()          # Stop accepting more connections
+        server.close()
+        await server.wait_closed()
         peer = writer.get_extra_info('peername')
         log.info(f"[DCC] Active connection from {nick} ({peer})")
         await self._open_session(nick, reader, writer)
@@ -318,24 +329,25 @@ class DCCManager:
         )
         asyncio.create_task(session.recv_loop())
 
-    async def _open_session(self, nick: str,
+    async def _open_session(self, nick: str, host: str,
                             reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter):
-        """Register the socket as a partyline DCC session."""
-        # Check user auth before allowing partyline access
         user_mgr = self.core.partyline.user
-        user = await user_mgr.get(nick)
+        user = await user_mgr.get_by_host(f"{nick}!{host}")   # hostmask-aware lookup
         if not user:
-            log.warning(f"[DCC] Rejected unknown user: {nick}")
+            log.warning(f"[DCC] Rejected unmatched host: {nick}!{host}")
             try:
-                writer.write(b"Access denied: unknown user.\r\n")
+                writer.write(b"Access denied.\r\n")
                 await writer.drain()
                 writer.close()
             except Exception:
                 pass
             return
 
-        session = DCCSession.__new__(DCCSession)
+        q = asyncio.Queue()
+        session_id = self.core.partyline.register_remote('dcc', nick, q)
+        session = DCCSession(session_id, nick, reader, writer, self.core.partyline, q)
+        self._sessions[session_id] = session
         session.reader   = reader
         session.writer   = writer
         session.nick     = nick
@@ -380,10 +392,13 @@ class DCCManager:
                 break
 
     async def _find_free_port(self) -> Optional[int]:
-        """Find an available TCP port in configured range."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._find_free_port_sync)
+
+    def _find_free_port_sync(self) -> Optional[int]:
         ports = list(range(self.port_min, self.port_max + 1))
         random.shuffle(ports)
-        for port in ports[:50]:   # Try up to 50 random ports
+        for port in ports[:50]:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
@@ -419,10 +434,6 @@ class DCCIRCSession:
         self._closed     = False
 
     async def recv_loop(self):
-        """
-        Drain response_queue → IRC NOTICE to user.
-        Input arrives via core.py routing PRIVMSG → partyline.handle_input().
-        """
         while not self._closed:
             try:
                 msg = await asyncio.wait_for(self.response_queue.get(), timeout=5)
@@ -430,17 +441,17 @@ class DCCIRCSession:
                     text = msg.get('text', '')
                     if text:
                         self.core.irc_q.put_nowait({
-                            'cmd': 'notice',
-                            'target': self.nick,
-                            'text': text
+                            'cmd': 'notice', 'target': self.nick, 'text': text
                         })
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 log.warning(f"[DCC-IRC] recv_loop error: {e}")
                 break
+        await self.close()
 
-    def close(self):
+    async def close(self):
         self._closed = True
         if self.session_id is not None:
             self.core.partyline.unregister_session(self.session_id)
+            log.info(f"[DCC-IRC] Session closed: {self.nick} (sid={self.session_id})")
