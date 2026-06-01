@@ -96,7 +96,7 @@ class UpdateManager:
         _update_cfg: dict[str, Any] = config.get("update", {})
         self._auhost: str = _update_cfg.get("host", "").rstrip("/")
         self._auto_updates: bool = bool(_update_cfg.get("auto_updates", False))
-        self._auremotefile: str = "/UPDATE"
+        self._auremotefile: str = "/RELEASE"
         self._useragent: str = f"WBS/{__version__}"
         self._timeout: int = 30
         self._current: pkg_version.Version = pkg_version.parse(__version__)

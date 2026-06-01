@@ -1,8 +1,8 @@
 # src/__init__.py
 """WBS"""
 
-__version__ = "5.9.0"
-__build__ = 5090004
+__version__ = "5.9.1"
+__build__ = 5090100
 __author__ = "cyco"
 
 __all__ = ["__version__", "__build__","__author__"]
