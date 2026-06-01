@@ -13,13 +13,11 @@ from .db import get_db
 
 log = logging.getLogger("wbs.channel")
 _SYNC_ALLOWED_COLUMNS = frozenset({
-    'comment', 'is_inactive', 'is_bitch', 'is_autoop', 'is_autovoice',
+    'comment',
+    'is_inactive', 'is_bitch', 'is_autoop', 'is_autovoice',
     'is_revenge', 'is_revengebots', 'is_protectfriends', 'is_protectops',
-    'is_dontkickops', 'is_enforcebans', 'is_dynamicbans', 'is_dynamicexempts',
-    'is_dynamicinvites', 'is_pubcom', 'is_news', 'is_url', 'is_stats',
-    'is_locked', 'lock_by', 'lock_at', 'lock_reason',
-    'is_topiclock', 'topiclock', 'topiclock_by', 'topiclock_at', 'topiclock_reason',
-    'is_limit', 'limit_add', 'limit_rand', 'limit_tolerance', 'limit_delta',
+    'is_dontkickops', 'is_enforcebans', 'is_dynamicbans',
+    'is_dynamicexempts', 'is_dynamicinvites',
     'modes', 'bans', 'invites', 'exempts',
     'flood_pub', 'flood_pub_time', 'flood_ctcp', 'flood_ctcp_time',
     'flood_join', 'flood_join_time', 'flood_kick', 'flood_kick_time',
@@ -292,85 +290,6 @@ class Channel:
         await self._load_db_config()
         return bool(self._db_config.get('is_dynamicinvites', False)) if self._db_config else False
 
-    async def is_pubcom(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_pubcom', False)) if self._db_config else False
-
-    async def is_news(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_news', False)) if self._db_config else False
-
-    async def is_url(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_url', False)) if self._db_config else False
-
-    async def is_stats(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_stats', False)) if self._db_config else False
-
-    async def is_locked(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_locked', False)) if self._db_config else False
-
-    async def is_topiclock(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_topiclock', False)) if self._db_config else False
-
-    async def is_limit(self) -> bool:
-        await self._load_db_config()
-        return bool(self._db_config.get('is_limit', False)) if self._db_config else False
-
-    # Lock state
-    async def get_lock_by(self) -> Optional[str]:
-        await self._load_db_config()
-        return self._db_config.get('lock_by') if self._db_config else None
-
-    async def get_lock_at(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('lock_at', 0) if self._db_config else 0
-
-    async def get_lock_reason(self) -> str:
-        await self._load_db_config()
-        return self._db_config.get('lock_reason', '') if self._db_config else ''
-
-    # Topic lock
-    async def get_topiclock(self) -> str:
-        await self._load_db_config()
-        return self._db_config.get('topiclock', '') if self._db_config else ''
-
-    async def get_topiclock_by(self) -> Optional[str]:
-        await self._load_db_config()
-        return self._db_config.get('topiclock_by') if self._db_config else None
-
-    async def get_topiclock_at(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('topiclock_at', 0) if self._db_config else 0
-
-    async def get_topiclock_reason(self) -> str:
-        await self._load_db_config()
-        return self._db_config.get('topiclock_reason', '') if self._db_config else ''
-
-    # Channel limits
-    async def get_limit_add(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('limit_add', 15) if self._db_config else 15
-
-    async def get_limit_rand(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('limit_rand', 200) if self._db_config else 200
-
-    async def get_limit_tolerance(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('limit_tolerance', 2) if self._db_config else 2
-
-    async def get_limit_delta(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('limit_delta', 300) if self._db_config else 300
-
-    async def get_limit_at(self) -> int:
-        await self._load_db_config()
-        return self._db_config.get('limit_at', 0) if self._db_config else 0
-
     # Metadata
     async def get_comment(self) -> str:
         await self._load_db_config()
@@ -617,14 +536,11 @@ class ChannelManager:
                             is_bitch, is_autoop, is_autovoice, is_revenge, is_revengebots,
                             is_protectfriends, is_protectops, is_dontkickops, is_inactive,
                             is_enforcebans, is_dynamicbans, is_dynamicexempts, is_dynamicinvites,
-                            is_locked, lock_by, lock_at, lock_reason,
-                            is_topiclock, topiclock, topiclock_by, topiclock_at, topiclock_reason,
-                            is_limit, limit_add, limit_rand, limit_tolerance, limit_delta,
                             flood_pub, flood_pub_time, flood_ctcp, flood_ctcp_time,
                             flood_join, flood_join_time, flood_kick, flood_kick_time,
                             flood_deop, flood_deop_time, flood_nick, flood_nick_time,
                             created_at, updated_at, created_by, deleted_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             name, ch.get('comment', ''), ch.get('modes', ''),
                             bans, invites, exempts,
@@ -634,12 +550,6 @@ class ChannelManager:
                             ch.get('is_dontkickops', 0), ch.get('is_inactive', 0),
                             ch.get('is_enforcebans', 0), ch.get('is_dynamicbans', 0),
                             ch.get('is_dynamicexempts', 0), ch.get('is_dynamicinvites', 0),
-                            ch.get('is_locked', 0), ch.get('lock_by'), ch.get('lock_at', 0),
-                            ch.get('lock_reason', ''), ch.get('is_topiclock', 0),
-                            ch.get('topiclock', ''), ch.get('topiclock_by'), ch.get('topiclock_at', 0),
-                            ch.get('topiclock_reason', ''), ch.get('is_limit', 0),
-                            ch.get('limit_add', 15), ch.get('limit_rand', 200),
-                            ch.get('limit_tolerance', 2), ch.get('limit_delta', 300),
                             ch.get('flood_pub', 15), ch.get('flood_pub_time', 60),
                             ch.get('flood_ctcp', 3), ch.get('flood_ctcp_time', 60),
                             ch.get('flood_join', 5), ch.get('flood_join_time', 60),
