@@ -8,6 +8,8 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.history import InMemoryHistory
 
+from .partyline import Partyline
+
 log = logging.getLogger("wbs.console")
 
 class Console:
