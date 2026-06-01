@@ -2502,7 +2502,7 @@ async def cmd_whois(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_checkupdate(core, handle: str, session_id: int, arg: str, respond):
     """`.checkupdate` — check for a new WBS version."""
-    manifest = await core.updater.check_update()
+    manifest = await core.update.check_update()
     if manifest:
         await respond(f"Update available: {manifest.version_str} by {manifest.author}")
     else:
@@ -2511,12 +2511,12 @@ async def cmd_checkupdate(core, handle: str, session_id: int, arg: str, respond)
 
 async def cmd_update(core, handle: str, session_id: int, arg: str, respond):
     """`.update` — download and install the latest version."""
-    manifest = await core.updater.check_update()
+    manifest = await core.update.check_update()
     if not manifest:
         await respond("No update available.")
         return
     await respond(f"Installing {manifest.version_str}…")
-    ok = await core.updater.perform_update(manifest)
+    ok = await core.update.perform_update(manifest)
     if ok:
         await respond("Update installed. Restart the bot to load new code.")
     else:
