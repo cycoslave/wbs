@@ -1029,6 +1029,19 @@ async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> Non
             await respond(f"-> {bname}{role}")
             linked_count += 1
 
+    indirect = {}
+    if hasattr(core.botnet, 'topology'):
+        for handle, via in core.botnet.topology.items():
+            if handle.lower() not in [b.handle.lower() for b in all_bots]:
+                indirect[handle] = via
+
+    await respond(" ---Indirect (via relay):---")
+    if indirect:
+        for handle, via in indirect.items():
+            await respond(f" ~> {handle} (via {via})")
+    else:
+        await respond(" -> (none)")
+
     await respond(" ---Unlinked:---")
     unlinked_lines = []
     for row in rows:

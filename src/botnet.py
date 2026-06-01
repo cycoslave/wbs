@@ -175,6 +175,7 @@ class BotnetManager:
         self.bot = BotManager(self.db_path)
         self.subnet = SubnetManager(self.db_path)
         self.peers: Dict[str, BotLink] = {}
+        self.topology: Dict[str, str] = {}   # handle → via_peer (indirect bots)
         self.cmds: Dict[BotCommand, Callable] = {}
         self._peer_skew: dict[str, int] = {}
         
@@ -288,9 +289,12 @@ class BotnetManager:
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
-            # ← FIX: release the admission slot
             if self.guard and peer_ip:
                 self.guard.release(peer_ip)
+            self.topology = {
+                h: via for h, via in self.topology.items()
+                if via != handle.lower()
+            }
             log.info(f"Peer {handle} disconnected")
 
     async def process_incoming(self, from_bot: str, line: str, reader, writer):
@@ -409,6 +413,7 @@ class BotnetManager:
             })
             await self._safe_send(writer, f"LINKREADY {self.my_handle} WBS {__version__} {int(time.time())}\n")
             asyncio.create_task(self.share_all_data(from_bot))
+            asyncio.create_task(self.broadcast_topology())
             return
         
         elif cmd == "LINKREADY":
@@ -704,6 +709,40 @@ class BotnetManager:
 
             elif share == "BOTACCESS":
                 asyncio.create_task(self.handle_share_bot_access(' '.join(parts[2:]), from_bot))
+
+        elif cmd == "TOPOLOGY":
+            # TOPOLOGY <msg_id> <source_bot> <peer1> [peer2 ...]
+            if len(parts) < 3:
+                log.warning("Malformed TOPOLOGY from %s: %r", from_bot, line[:80])
+                return
+
+            msg_id     = parts[1]
+            source_bot = parts[2].lower()
+            peers_seen = [p.lower() for p in parts[3:]]
+
+            if not self._register_message(msg_id):
+                return  # duplicate — drop silently
+
+            # Register all peers the source bot can directly see as indirect for us,
+            # but only if we don't already have a direct link to them.
+            for handle in peers_seen:
+                if handle == self.my_handle.lower():
+                    continue   # that's us
+                if handle not in self.peers:
+                    self.topology[handle] = source_bot   # reachable via source_bot
+                else:
+                    self.topology.pop(handle, None)      # we have direct — clean up any stale indirect entry
+
+            # Flood-fill to our other peers
+            relay_line = f"TOPOLOGY {msg_id} {source_bot} {' '.join(parts[3:])}\n"
+            tasks = [
+                self._safe_send(link.writer, relay_line)
+                for name, link in self.peers.items()
+                if link.authed and link.connected and link.writer
+                and name != from_bot.lower()
+            ]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         else:
             log.error(f"Invalid command {cmd} from {from_bot}")
@@ -1030,3 +1069,25 @@ class BotnetManager:
         # Register new message
         self._msg_cache[msg_id] = now
         return True
+    
+    async def broadcast_topology(self) -> None:
+        """
+        Announce our directly-linked peers to the network so all bots
+        can build an indirect-link map for display and unicast routing.
+        """
+        direct = [
+            name for name, link in self.peers.items()
+            if link.authed and link.connected
+        ]
+        if not direct:
+            return
+        msg_id = str(uuid.uuid4())
+        peer_list = " ".join(direct)
+        line = f"TOPOLOGY {msg_id} {self.my_handle} {peer_list}\n"
+        tasks = [
+            self._safe_send(link.writer, line)
+            for link in self.peers.values()
+            if link.authed and link.connected and link.writer
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)    
