@@ -220,6 +220,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def __init__(self, config, core_q, irc_q):
         self.config = config
+        self._supervisor_ppid = os.getppid()
         self.chan = ChannelManager(self.config['db']['path'])
         self.user = UserManager(self.config['db']['path'])
         self.server_caps = ServerCaps()
@@ -817,9 +818,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             log.error(f"Command failed {cmd_data}: {e}")
 
     async def maintenance_loop(self):
-        """Maintenance every 30s (uncommented _enforce_settings later)"""
+        """Maintenance every 15s (uncommented _enforce_settings later)"""
         while True:  # Add while True
             try:
+                current_ppid = os.getppid()
+                if current_ppid != self._supervisor_ppid or current_ppid == 1:
+                    log.warning(f"Supervisor gone (ppid {self._supervisor_ppid} → {current_ppid}) — self-terminating")
+                    os._exit(1)
+
                 if self.is_connected:  # Check first
                     # Clean timers
                     for name, task in list(self.irc_timers.items()):
@@ -830,7 +836,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     await self._check_nick()
                     # await self._enforce_settings()
                 
-                await asyncio.sleep(30)
+                await asyncio.sleep(15)
                 
             except asyncio.CancelledError:
                 break

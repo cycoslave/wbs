@@ -2,7 +2,9 @@
 """
 Helper functions
 """
+import asyncio
 import sys
+import os
 import termios
 import logging
 
@@ -66,4 +68,13 @@ def restore_terminal() -> None:
             attrs[3] |= termios.ECHO
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
     except Exception as e:
-        log.warning("Could not restore terminal state: %s", e)            
+        log.warning("Could not restore terminal state: %s", e)
+
+async def _watch_parent(initial_ppid: int) -> None:
+    """Exit if our parent process dies (works on Linux + macOS + Windows)."""
+    while True:
+        await asyncio.sleep(2)
+        current = os.getppid()
+        if current != initial_ppid or current == 1:
+            log.warning("Parent process gone — self-terminating")
+            os._exit(1)         

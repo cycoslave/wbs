@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import signal
 from pathlib import Path
 from multiprocessing import Process, Queue
 from multiprocessing.connection import wait as mp_wait
@@ -145,7 +146,7 @@ def main():
         p = Process(
             target=core_process_launcher,
             args=(config, config_path, args, core_q, irc_q),
-            daemon=False,
+            daemon=True,
             name="Core"
         )
         p.start()
@@ -155,7 +156,7 @@ def main():
         p = Process(
             target=irc_process_launcher,
             args=(config, core_q, irc_q, None),
-            daemon=False,
+            daemon=True,
             name="IRC"
         )
         p.start()
@@ -171,6 +172,24 @@ def main():
 
     core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
     irc_proc  = _spawn_irc(config, core_q, irc_q)
+
+    procs = {"core": core_proc, "irc": irc_proc}
+
+    def _shutdown(signum=None, frame=None):
+        log.info("Supervisor shutting down — killing children")
+        for name, proc in procs.items():
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5.0)
+                if proc.is_alive():
+                    log.warning(f"{name} did not terminate, sending SIGKILL")
+                    proc.kill()
+        if not args.foreground:
+            remove_pidfile(pidfile)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT,  _shutdown)
 
     sentinels = {
         core_proc.sentinel: ("core", core_proc),
@@ -189,17 +208,17 @@ def main():
                 if name == "core":
                     if code == EXIT_OK:
                         log.info("Core clean exit — shutting down supervisor")
-                        irc_proc.terminate()
-                        irc_proc.join(timeout=3.0)
-                        sys.exit(0)
+                        _shutdown()
                     else:
                         log.info(f"Relaunching Core (exit code={code})...")
                         core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
+                        procs["core"] = core_proc   # ← UPDATE THE DICT
                         sentinels[core_proc.sentinel] = ("core", core_proc)
 
                 elif name == "irc":
                     log.warning(f"IRC process died (code={code}), relaunching...")
                     irc_proc = _spawn_irc(config, core_q, irc_q)
+                    procs["irc"] = irc_proc
                     sentinels[irc_proc.sentinel] = ("irc", irc_proc)
 
     finally:

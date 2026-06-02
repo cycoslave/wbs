@@ -53,6 +53,7 @@ class Core:
         self._event_buffer = deque()
         self._buffer_lock = threading.Lock()
         self.quit_event = mp.Event()
+        self._supervisor_ppid = os.getppid()
         
         # Managers
         self.guard = AccessGuard(db_path=self.db_path, config=self.config)
@@ -441,15 +442,15 @@ class Core:
         await asyncio.sleep(1.5)
         for child in self.children:
             if child.is_alive():
-                child.terminate()          # SIGTERM
+                child.terminate()
                 child.join(timeout=2.0)
                 if child.is_alive():
-                    child.kill()           # SIGKILL fallback
+                    child.kill()
                     child.join(timeout=1.0)
 
         log.info("All children terminated. Exiting.")
         restore_terminal()
-        os._exit(0)
+        sys.exit(0)
 
     async def on_command(self, event):
         """
@@ -787,6 +788,12 @@ class Core:
         if hasattr(self, 'botnet') and self.botnet:
             await self.botnet.poll_queues() if hasattr(self.botnet, 'poll_queues') else None
 
+        current_ppid = os.getppid()
+        if current_ppid != self._supervisor_ppid or current_ppid == 1:
+            log.warning(f"Supervisor gone (ppid {self._supervisor_ppid} → {current_ppid}) — self-terminating")
+            restore_terminal()
+            os._exit(1)
+
         if self.connected and self._lag_ping_sent is None:
             now = time.time()
             if not hasattr(self, '_last_lag_ping') or (now - self._last_lag_ping) >= 30.0:
@@ -1031,7 +1038,7 @@ class Core:
         except Exception as e:
             log.error(f"Failed to notify IRC of restart: {e}")
         await self._pre_exec_cleanup()
-        os._exit(0)  # hard exit so IRC's watcher sees the PID disappear
+        sys.exit(0)
 
     async def _pre_exec_cleanup(self) -> None:
         """Flush state before re-exec or exit."""

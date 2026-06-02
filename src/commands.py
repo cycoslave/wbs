@@ -1630,16 +1630,7 @@ async def cmd_delignore(core, handle: str, arg: str, respond, action: str):
         if result.rowcount:
             await respond(f"No longer ignoring {hostmask}")
         else:
-            await respond(f"Not ignoring {hostmask}")                
-
-async def cmd_restart(core, handle: str, session_id: int, arg: str, respond):
-    if handle != core.admin_name:
-        await respond("Access denied.")
-        return
-    
-    await respond("Restarting bot...")
-    await core.shutdown("Restart via partyline")
-    sys.exit(0)
+            await respond(f"Not ignoring {hostmask}")
 
 async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split()
@@ -2170,16 +2161,26 @@ async def cmd_mass(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split(maxsplit=1)
-    if not parts:
-        await respond("Usage: .net <op|deop|say|msg|join|part|mode|restart|die> [args]")
-        return
-
-    subcmd = parts[0].lower()
+    subcmd = parts[0].lower() if parts else ''
     rest   = parts[1] if len(parts) > 1 else ''
+
+    if not subcmd or subcmd == 'help':
+        await respond("Usage: .net <subcmd> [args]")
+        await respond("Subcommands:")
+        await respond("  op      <nick> <#chan>    - Give op on all linked bots")
+        await respond("  deop    <nick> <#chan>    - Remove op on all linked bots")
+        await respond("  say     <#chan> <msg>     - Say to channel on all bots")
+        await respond("  msg     <nick|#chan> <msg>- MSG to target on all bots")
+        await respond("  join    <#chan>           - Join channel on all bots")
+        await respond("  part    <#chan>           - Part channel on all bots")
+        await respond("  mode    <#chan> <modes>   - Set modes on all bots")
+        await respond("  restart                  - Restart all linked bots")
+        await respond("  die                      - Shutdown all linked bots")
+        return
 
     # Broadcast to all linked peers via botnet
     if hasattr(core, 'botnet') and core.botnet.peers:
-        await core.botnet.broadcast_all(subcmd, rest)   # ← fixed
+        await core.botnet.broadcast_all(subcmd, rest)
 
     # Also execute locally
     local_cmds = {
@@ -2196,7 +2197,7 @@ async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
     if subcmd in local_cmds:
         await local_cmds[subcmd](core, handle, session_id, rest, respond)
     else:
-        await respond(f"Unknown net subcmd: {subcmd}")
+        await respond(f"Unknown net subcmd: {subcmd}  (try .net help)")
 
 async def cmd_subnet(core, handle: str, session_id: int, arg: str, respond):
     """
@@ -2735,37 +2736,47 @@ async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
             "flags": {**flag_updates, **kv_updates},
         }))
 
-async def cmd_rehash(core, handle: str, session_id: int, arg: str, respond) -> None:
-    """Rehash: restart Core process, IRC stays connected. Requires 'm' flag."""
-    async with get_db(core.db_path) as db:
-        cursor = await db.execute(
-            "SELECT flags FROM users WHERE handle = ?", (handle,)
-        )
-        row = await cursor.fetchone()
-
-    if not row or 'm' not in (row['flags'] or ''):
-        await respond("Access denied. Requires 'm' flag.")
-        return
-
-    await respond("Rehashing...")
-    log.info("Rehash initiated by %s", handle)
-    await core.do_rehash()  # does not return
-
 async def cmd_restart(core, handle: str, session_id: int, arg: str, respond) -> None:
-    """Full restart: Core exits, supervisor relaunches. Requires 'n' flag."""
+    """Full restart: Core exits, supervisor relaunches. Requires '+A' (admin) flag."""
     async with get_db(core.db_path) as db:
         cursor = await db.execute(
-            "SELECT flags FROM users WHERE handle = ?", (handle,)
+            """SELECT EXISTS(
+                   SELECT 1 FROM user_access
+                   WHERE handle = ? AND channel IS NULL
+                   AND is_admin = 1 AND deleted_at IS NULL
+               ) AS has_access""",
+            (handle,)
         )
         row = await cursor.fetchone()
 
-    if not row or 'n' not in (row['flags'] or ''):
-        await respond("Access denied. Requires 'n' flag.")
+    if not row or not row['has_access']:
+        await respond("Access denied. Requires '+A' flag.")
         return
 
     await respond("Restarting...")
     log.info("Restart initiated by %s", handle)
-    await core.do_restart()  # does not return
+    await core.do_restart()
+
+async def cmd_rehash(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """Rehash: restart Core process, IRC stays connected. Requires '+A' (admin) flag."""
+    async with get_db(core.db_path) as db:
+        cursor = await db.execute(
+            """SELECT EXISTS(
+                   SELECT 1 FROM user_access
+                   WHERE handle = ? AND channel IS NULL
+                   AND is_admin = 1 AND deleted_at IS NULL
+               ) AS has_access""",
+            (handle,)
+        )
+        row = await cursor.fetchone()
+
+    if not row or not row['has_access']:
+        await respond("Access denied. Requires '+A' flag.")
+        return
+
+    await respond("Rehashing...")
+    log.info("Rehash initiated by %s", handle)
+    await core.do_rehash()
 
 # Command registry
 COMMANDS = {
