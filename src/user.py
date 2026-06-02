@@ -674,4 +674,16 @@ class UserManager:
                 FROM user_access"""
             )
             rows = await cursor.fetchall()
-        return [dict(row) for row in rows]        
+        return [dict(row) for row in rows]     
+
+    async def authenticate(self, handle: str, password: str) -> bool:
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT password_hash, locked FROM users "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (handle,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None or row[1]:
+            return False
+        return self.verify_password(password, row[0])      

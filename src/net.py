@@ -14,6 +14,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .db import get_db
+from .user import UserManager
+
 log = logging.getLogger("wbs.net")
 PER_IP_MAX = 3
 
@@ -338,7 +341,7 @@ class NetListener:
         if self.guard:
             allowed, reason = await self.guard.admit(peer_ip)
             if not allowed:
-                log.warning(f"NetListener: rejected {peer_ip} — {reason}")
+                #log.warning(f"NetListener: rejected {peer_ip} — {reason}")
                 try:
                     writer.write(f"ERROR :{reason}\r\n".encode())
                     await writer.drain()
@@ -411,14 +414,63 @@ class NetListener:
             writer.close()
             await writer.wait_closed()
 
-    async def _handle_partyline(self, line: str, peer: tuple, peer_ip: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        handle = f"user_{peer_ip}_{peer[1]}"
-        log.info(f"Partyline connect: {handle}")
+    async def _handle_partyline(self, line, peer, peer_ip, reader, writer):
+        if line.upper().startswith(("GET ", "POST ", "HEAD ", "OPTIONS ", "PUT ", "DELETE ")):
+            log.info(f"HTTP probe from {peer_ip} — dropped silently")
+            writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            return
+
+        cfg     = self.config.get("settings", {})
+        timeout = float(cfg.get("auth_timeout", 60))
+
+        async def _readline() -> str:
+            data = await asyncio.wait_for(reader.readline(), timeout)
+            return data.decode("utf-8", errors="ignore").strip()
+
+        try:
+            handle   = line
+            writer.write(b"Password: ")
+            await writer.drain()
+            password = await _readline()
+        except asyncio.TimeoutError:
+            log.warning(f"Auth timeout from {peer_ip}")
+            writer.write(b"ERROR :Login timeout\r\n")
+            await writer.drain()
+            return
+
+        authed = False
+        try:
+            async with get_db(self.config.get("db_path", "wbs.db")) as db:
+                async with db.execute(
+                    "SELECT password_hash, locked FROM users "
+                    "WHERE handle = ? AND deleted_at IS NULL",
+                    (handle,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+            if row and not row["locked"]:
+                from .user import UserManager
+                um = UserManager(self.config.get("db_path", "wbs.db"))
+                authed = um.verify_password(password, row["password_hash"])
+        except Exception as e:
+            log.error(f"Auth DB error for {handle!r} from {peer_ip}: {e}")
+
+        if not authed:
+            if self.guard:
+                await self.guard.record_failure(peer_ip, handle)
+            log.warning(f"Failed partyline auth: handle={handle!r} ip={peer_ip}")
+            writer.write(b"ERROR :Authentication failed\r\n")
+            await writer.drain()
+            return
+
+        if self.guard:
+            self.guard.record_success(peer_ip)
+
+        #log.info(f"Partyline auth OK: {handle} from {peer_ip}")
         self._pending_streams[handle.lower()] = (reader, writer)
         self.core_q.put_nowait({
-            "type":      "PARTYLINE_CONNECT",
-            "handle":    handle,
-            "peer":      peer,
-            "peer_ip":   peer_ip,
-            "firstline": line,
+            "type":    "PARTYLINE_CONNECT",
+            "handle":  handle,
+            "peer":    peer,
+            "peer_ip": peer_ip,
         })
