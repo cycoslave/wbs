@@ -125,7 +125,6 @@ class Core:
         else:
             log.info("Background mode")
 
-        self._setup_signals()
         await self.botnet.start()
         
         # Start event poller thread
@@ -428,10 +427,11 @@ class Core:
                 await self._console_task
             except (asyncio.CancelledError, Exception):
                 pass
+            sys.exit(0)
 
     async def _shutdown(self, message):
         if self.quit_event.is_set():
-            return  # already shutting down, don't re-enter
+            return
         self.running = False
         self.quit_event.set()
         log.info(f"Shutdown: {message}")
@@ -447,7 +447,6 @@ class Core:
                 if child.is_alive():
                     child.kill()
                     child.join(timeout=1.0)
-
         log.info("All children terminated. Exiting.")
         restore_terminal()
         sys.exit(0)
@@ -792,7 +791,7 @@ class Core:
         if current_ppid != self._supervisor_ppid or current_ppid == 1:
             log.warning(f"Supervisor gone (ppid {self._supervisor_ppid} → {current_ppid}) — self-terminating")
             restore_terminal()
-            os._exit(1)
+            sys.exit(0)
 
         if self.connected and self._lag_ping_sent is None:
             now = time.time()
@@ -996,21 +995,6 @@ class Core:
             except Exception as e:
                 log.error("Failed to restore game %s: %s", game_name, e)
 
-    def _setup_signals(self):
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(
-                sig,
-                lambda s=sig: asyncio.create_task(self._handle_signal(s))
-            )
-
-    async def _handle_signal(self, sig):
-        log.info(f"Signal {sig.name} received — shutting down")
-        # Cancel console task first so stdin read unblocks
-        if hasattr(self, '_console_task') and self._console_task:
-            self._console_task.cancel()
-        await self._shutdown("Signal received")
-
     async def do_rehash(self) -> None:
         """
         Soft rehash: re-exec Core only. IRC stays connected.
@@ -1057,6 +1041,9 @@ class Core:
 
 def core_process_launcher(config, config_path, args, core_q, irc_q):
     """Entry point for Core as a supervised child process."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
     tty_fd = config.pop('_tty_fd', None)
     if tty_fd is not None:
         try:
@@ -1065,4 +1052,4 @@ def core_process_launcher(config, config_path, args, core_q, irc_q):
             log.warning(f"Could not restore TTY fd {tty_fd}: {e}")
 
     core = Core(config=config, config_path=config_path, args=args, core_q=core_q, irc_q=irc_q)
-    asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))     
+    asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))

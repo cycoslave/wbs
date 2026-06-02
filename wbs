@@ -74,6 +74,7 @@ def remove_pidfile(path: str):
 
 def main():
     args = parse_args()
+    _shutting_down = False
 
     if args.mkpasswd:
         import bcrypt, getpass
@@ -176,6 +177,8 @@ def main():
     procs = {"core": core_proc, "irc": irc_proc}
 
     def _shutdown(signum=None, frame=None):
+        nonlocal _shutting_down
+        _shutting_down = True
         log.info("Supervisor shutting down — killing children")
         for name, proc in procs.items():
             if proc.is_alive():
@@ -206,20 +209,26 @@ def main():
                 log.info(f"{name} exited with code {code}")
 
                 if name == "core":
-                    if code == EXIT_OK:
+                    if _shutting_down:
+                        log.info("Core exited during shutdown — not relaunching")
+                        _shutdown()
+                    elif code == EXIT_OK:
                         log.info("Core clean exit — shutting down supervisor")
                         _shutdown()
                     else:
                         log.info(f"Relaunching Core (exit code={code})...")
                         core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
-                        procs["core"] = core_proc   # ← UPDATE THE DICT
+                        procs["core"] = core_proc
                         sentinels[core_proc.sentinel] = ("core", core_proc)
 
                 elif name == "irc":
-                    log.warning(f"IRC process died (code={code}), relaunching...")
-                    irc_proc = _spawn_irc(config, core_q, irc_q)
-                    procs["irc"] = irc_proc
-                    sentinels[irc_proc.sentinel] = ("irc", irc_proc)
+                    if _shutting_down:
+                        log.info("IRC exited during shutdown — not relaunching")
+                    else:
+                        log.warning(f"IRC process died (code={code}), relaunching...")
+                        irc_proc = _spawn_irc(config, core_q, irc_q)
+                        procs["irc"] = irc_proc
+                        sentinels[irc_proc.sentinel] = ("irc", irc_proc)
 
     finally:
         if not args.foreground:
