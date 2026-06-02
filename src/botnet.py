@@ -206,7 +206,7 @@ class BotnetManager:
             bot = await self.bot.get(handle)
 
             cfg = self.config.get('settings', {})
-            use_ssl = cfg.get('ssl', False)
+            use_ssl = cfg.get('ssl', True)
 
             if use_ssl:
                 ssl_ctx = ssl_lib.create_default_context()
