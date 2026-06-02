@@ -429,23 +429,26 @@ class ChannelManager:
 
     async def showchan(self, channel: str) -> str:
         async with get_db(self.db_path) as db:
-            row = await db.execute_fetchone(
+            async with db.execute(
                 "SELECT * FROM channels WHERE name = ?", (channel.lower(),)
-            )
+            ) as cur:
+                row = await cur.fetchone()
         if not row:
             return f"Channel '{channel}' not found."
-        
+
         result = [f"Channel: {row['name']}"]
         result.append(f"  Comment: {row['comment'] or 'None'}")
         return "\n".join(result)
 
+
     async def exist(self, channel: str) -> bool:
         """Return True if a channel exists and is not deleted."""
         async with get_db(self.db_path) as db:
-            row = await db.execute_fetchone(
+            async with db.execute(
                 "SELECT 1 FROM channels WHERE name = ? AND deleted_at IS NULL",
                 (channel.lower(),)
-            )
+            ) as cur:
+                row = await cur.fetchone()
         return row is not None
 
     def channel_to_dict(self, channel: Channel) -> dict:

@@ -288,10 +288,11 @@ class UserManager:
         """Verify a plaintext password against the stored bcrypt hash."""
         try:
             async with get_db(self.db_path) as db:
-                row = await db.execute_fetchone(
+                async with db.execute(
                     "SELECT password FROM users WHERE handle = ? AND is_locked = 0",
                     (handle,)
-                )
+                ) as cur:
+                    row = await cur.fetchone()
 
             if not row:
                 return False
@@ -361,11 +362,12 @@ class UserManager:
                         return False
                     assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist" 
 
-                    row = await db.execute_fetchone(
+                    async with db.execute(
                         f"SELECT 1 FROM user_access WHERE handle = ? AND channel IS NULL "
                         f"AND deleted_at IS NULL AND {col} = 1 LIMIT 1",
                         (handle,)
-                    )
+                    ) as cur:
+                        row = await cur.fetchone()
 
                     # Apply the same assert before the channel query block too
                     col = CHAN_FLAGS.get(char)
@@ -391,7 +393,7 @@ class UserManager:
                         log.warning(f"matchattr: unknown channel flag '{char}'")
                         return False
 
-                    row = await db.execute_fetchone(
+                    async with db.execute(
                         f"""
                         SELECT 1 FROM user_access
                         WHERE handle = ?
@@ -401,7 +403,8 @@ class UserManager:
                         LIMIT 1
                         """,
                         (handle, channel)
-                    )
+                    ) as cur:
+                        row = await cur.fetchone()
                     has_flag = row is not None
                     if positive and not has_flag:
                         return False
@@ -456,10 +459,11 @@ class UserManager:
     async def exist(self, handle: str) -> bool:
         """Return True if a user with this handle exists and is not deleted."""
         async with get_db(self.db_path) as db:
-            row = await db.execute_fetchone(
+            async with db.execute(
                 "SELECT 1 FROM users WHERE handle = ? AND deleted_at IS NULL",
                 (handle,)
-            )
+            ) as cur:
+                row = await cur.fetchone()
         return row is not None
 
     def to_dict(self, user: User) -> dict:

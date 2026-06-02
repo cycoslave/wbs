@@ -143,17 +143,19 @@ class BotManager:
 
         async with get_db(self.db_path) as db:
             if channel is None:
-                row = await db.execute_fetchone(
+                async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
                     f"WHERE handle = ? AND channel IS NULL",
                     (handle,)
-                )
+                ) as cur:
+                    row = await cur.fetchone()
             else:
-                row = await db.execute_fetchone(
+                async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
                     f"WHERE handle = ? AND channel = ?",
                     (handle, channel)
-                )
+                ) as cur:
+                    row = await cur.fetchone()
 
         if row is None:
             return False  # No access record — bot has no flags here
@@ -207,10 +209,11 @@ class BotManager:
     async def exist(self, handle: str) -> bool:
         """Return True if a bot with this handle exists and is not deleted."""
         async with get_db(self.db_path) as db:
-            row = await db.execute_fetchone(
+            async with db.execute(
                 "SELECT 1 FROM bots WHERE handle = ? AND deleted_at IS NULL",
                 (handle.lower(),)
-            )
+            ) as cur:
+                row = await cur.fetchone()
         return row is not None
 
     async def get(self, handle: str) -> Bot:
