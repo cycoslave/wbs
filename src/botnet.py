@@ -210,8 +210,9 @@ class BotnetManager:
 
             if use_ssl:
                 ssl_ctx = ssl_lib.create_default_context()
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl_lib.CERT_NONE
+                if not cfg.get('ssl_verify', True):
+                    ssl_ctx.check_hostname = False
+                    ssl_ctx.verify_mode = ssl_lib.CERT_NONE
                 reader, writer = await asyncio.open_connection(bot.address, bot.port, ssl=ssl_ctx, limit=4096)
             else:
                 reader, writer = await asyncio.open_connection(bot.address, bot.port, limit=4096)
