@@ -542,43 +542,62 @@ class Core:
         self.partyline.broadcast(f"Invite to join {channel} by {inviter_nick}")
 
     async def on_mode(self, event: Dict[str, Any]):
-        """Process MODE events - update channel tracking including limits"""
+        """
+        Process MODE events — update channel tracking including limits.
+
+        Argument consumption rules (target IRCd: UnrealIRCd / InspIRCd):
+        +o / -o   op/deop           always takes arg (nick)
+        +h / -h   halfop/dehalfop   always takes arg (nick)
+        +v / -v   voice/devoice     always takes arg (nick)
+        +b / -b   ban mask          always takes arg
+        +e / -e   exempt mask       always takes arg
+        +I / -I   invite mask       always takes arg
+        +k        set key           takes arg (the key string)
+        -k        unset key         takes NO arg
+        +l        set limit         takes arg (integer)
+        -l        unset limit       takes NO arg
+        All other chars (+n +t +i +m +s +p etc.) take no arg.
+        """
         channel = event.get('channel', '')
-        modes = event.get('modes', '')
-        args = event.get('args', [])
-        
+        modes   = event.get('modes', '')
+        args    = event.get('args', [])
+
         chan = self.channels.get(channel)
         if not chan:
             return
-            
-        mode_str = modes
+
         arg_index = 0
-        adding = True
-        
-        for char in mode_str:
+        adding    = True
+
+        for char in modes:
             if char == '+':
                 adding = True
             elif char == '-':
                 adding = False
-            elif char == 'o':  # Op mode
+            elif char in 'ovh':
                 if arg_index < len(args):
                     target_nick = args[arg_index]
-                    if target_nick.lower() == self.botname.lower():
-                        chan.bot_op = adding
-                    if adding and target_nick not in chan.ops:
-                        chan.ops.append(target_nick)
-                    elif not adding and target_nick in chan.ops:
-                        chan.ops.remove(target_nick)
                     arg_index += 1
-            elif char == 'v':  # Voice mode
-                if arg_index < len(args):
-                    target_nick = args[arg_index]
-                    if adding and target_nick not in chan.voiced:
-                        chan.voiced.append(target_nick)
-                    elif not adding and target_nick in chan.voiced:
-                        chan.voiced.remove(target_nick)
-                    arg_index += 1
-            elif char == 'l':  # Limit mode
+                    if char == 'o':
+                        if target_nick.lower() == self.botname.lower():
+                            chan.bot_op = adding
+                        if adding and target_nick not in chan.ops:
+                            chan.ops.append(target_nick)
+                        elif not adding and target_nick in chan.ops:
+                            chan.ops.remove(target_nick)
+                    elif char == 'h':
+                        if target_nick.lower() == self.botname.lower():
+                            chan.bot_halfop = adding
+                        if adding and target_nick not in chan.halfops:
+                            chan.halfops.append(target_nick)
+                        elif not adding and target_nick in chan.halfops:
+                            chan.halfops.remove(target_nick)
+                    elif char == 'v':
+                        if adding and target_nick not in chan.voiced:
+                            chan.voiced.append(target_nick)
+                        elif not adding and target_nick in chan.voiced:
+                            chan.voiced.remove(target_nick)
+            elif char == 'l':
                 if adding and arg_index < len(args):
                     try:
                         chan.limit = int(args[arg_index])
@@ -586,12 +605,16 @@ class Core:
                         chan.limit = 0
                     arg_index += 1
                 elif not adding:
-                    # -l removes limit
                     chan.limit = 0
-            elif char in 'kbeI':
-                # +k/-k both take an arg (+k=key, -k=* placeholder)
-                # +b/-b, +e/-e, +I/-I all take mask arg
-                arg_index += 1
+            elif char == 'k':
+                if adding and arg_index < len(args):
+                    chan.key = args[arg_index]
+                    arg_index += 1
+                elif not adding:
+                    chan.key = ''
+            elif char in 'beI':
+                if arg_index < len(args):
+                    arg_index += 1
         
     async def on_newchan(self, event: Dict[str, Any]):
         """User joined channel: update seen DB."""
