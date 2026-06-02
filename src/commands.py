@@ -2169,10 +2169,6 @@ async def cmd_mass(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Mass {action} sent for {len(targets)} user(s) in {channel}.")
 
 async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
-    """
-    .net <subcmd> [args]
-    Botnet-level commands: op deop say msg join part mode rehash restart die
-    """
     parts = arg.split(maxsplit=1)
     if not parts:
         await respond("Usage: .net <op|deop|say|msg|join|part|mode|restart|die> [args]")
@@ -2183,7 +2179,7 @@ async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
 
     # Broadcast to all linked peers via botnet
     if hasattr(core, 'botnet') and core.botnet.peers:
-        await core.botnet.broadcast({'type': 'NET_CMD', 'subcmd': subcmd, 'args': rest, 'from': handle})
+        await core.botnet.broadcast_all(subcmd, rest)   # ← fixed
 
     # Also execute locally
     local_cmds = {

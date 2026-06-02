@@ -198,7 +198,8 @@ class BotnetManager:
 
     async def start(self):
         """Start background tasks. Must be called from inside a running event loop."""
-        self.autolink.start()
+        self._register_net_handlers()
+        self.autolink.start()       
 
     async def connect_peer(self, handle: str):
         """Establish outgoing connection to peer."""
@@ -1092,3 +1093,90 @@ class BotnetManager:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)    
+
+    def _register_net_handlers(self) -> None:
+        """
+        Register handlers for commands dispatched via .net (CMD_ROUTE).
+        Each handler receives (cmd_key, args_list, from_bot) and executes
+        the action locally on this bot using the IRC queue.
+        """
+        net_cmds = {
+            'join':    self._net_join,
+            'part':    self._net_part,
+            'say':     self._net_say,
+            'msg':     self._net_say,
+            'op':      self._net_op,
+            'deop':    self._net_deop,
+            'mode':    self._net_mode,
+            'restart': self._net_restart,
+            'die':     self._net_die,
+        }
+        for name, handler in net_cmds.items():
+            self.register('net', name, handler)
+
+    async def _net_join(self, cmd_key, args, from_bot):
+        """CMD_ROUTE join #channel"""
+        if not args:
+            return
+        channel = args[0] if isinstance(args, list) else args.split()[0]
+        self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
+        log.info("net join %s (from %s)", channel, from_bot)
+
+    async def _net_part(self, cmd_key, args, from_bot):
+        """CMD_ROUTE part #channel [reason]"""
+        parts = args if isinstance(args, list) else args.split()
+        if not parts:
+            return
+        channel = parts[0]
+        reason  = ' '.join(parts[1:]) if len(parts) > 1 else ''
+        self.irc_q.put_nowait({'cmd': 'part', 'channel': channel, 'reason': reason})
+        log.info("net part %s (from %s)", channel, from_bot)
+
+    async def _net_say(self, cmd_key, args, from_bot):
+        """CMD_ROUTE say|msg #target message text"""
+        parts = args if isinstance(args, list) else args.split()
+        if len(parts) < 2:
+            return
+        target = parts[0]
+        text   = ' '.join(parts[1:])
+        self.irc_q.put_nowait({'cmd': 'msg', 'target': target, 'text': text})
+        log.info("net say %s (from %s)", target, from_bot)
+
+    async def _net_op(self, cmd_key, args, from_bot):
+        """CMD_ROUTE op nick #channel"""
+        parts = args if isinstance(args, list) else args.split()
+        if len(parts) < 2:
+            return
+        nick, chan = parts[0], parts[1]
+        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
+        log.info("net op %s on %s (from %s)", nick, chan, from_bot)
+
+    async def _net_deop(self, cmd_key, args, from_bot):
+        """CMD_ROUTE deop nick #channel"""
+        parts = args if isinstance(args, list) else args.split()
+        if len(parts) < 2:
+            return
+        nick, chan = parts[0], parts[1]
+        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'-o {nick}'})
+        log.info("net deop %s on %s (from %s)", nick, chan, from_bot)
+
+    async def _net_mode(self, cmd_key, args, from_bot):
+        """CMD_ROUTE mode #channel +modes"""
+        parts = args if isinstance(args, list) else args.split()
+        if len(parts) < 2:
+            return
+        chan  = parts[0]
+        modes = ' '.join(parts[1:])
+        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+        log.info("net mode %s %s (from %s)", chan, modes, from_bot)
+
+    async def _net_restart(self, cmd_key, args, from_bot):
+        """CMD_ROUTE restart"""
+        log.info("net restart triggered by %s", from_bot)
+        await self.core.shutdown("Restart via botnet")
+
+    async def _net_die(self, cmd_key, args, from_bot):
+        """CMD_ROUTE die [message]"""
+        msg = ' '.join(args) if isinstance(args, list) else args
+        log.info("net die triggered by %s: %s", from_bot, msg)
+        self.irc_q.put_nowait({'cmd': 'quit', 'message': msg or 'Killed via botnet'})                 
