@@ -190,14 +190,6 @@ CREATE TABLE IF NOT EXISTS net_blocklist (
     note        TEXT    NOT NULL DEFAULT ''
 );
 
--- Runtime
-CREATE TABLE IF NOT EXISTS runtime (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    expires_at INTEGER DEFAULT 0
-);
-
 -- Ignores
 CREATE TABLE IF NOT EXISTS ignores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,10 +246,6 @@ CREATE INDEX IF NOT EXISTS idx_bot_subnets_subnet ON bot_subnets(subnet_id);
 CREATE INDEX IF NOT EXISTS idx_channel_subnets_channel ON channel_subnets(channel_name);
 CREATE INDEX IF NOT EXISTS idx_channel_subnets_subnet ON channel_subnets(subnet_id);
 
--- Runtime
-CREATE INDEX IF NOT EXISTS idx_runtime_key ON runtime(key);
-CREATE INDEX IF NOT EXISTS idx_runtime_expires ON runtime(expires_at);
-
 -- Ignores
 CREATE INDEX IF NOT EXISTS idx_ignores_hostmask ON ignores(hostmask);
 
@@ -300,20 +288,6 @@ BEGIN
       subnet_id = OLD.subnet_id
       OR (subnet_id IS NULL AND OLD.subnet_id IS NULL)
     );
-END;
-
--- Runtime cleanup
-CREATE TRIGGER IF NOT EXISTS trig_runtime_cleanup
-AFTER INSERT ON runtime
-BEGIN
-  DELETE FROM runtime WHERE expires_at > 0 AND expires_at < strftime('%s', 'now');
-END;
-
--- Timestamp refresh on update
-CREATE TRIGGER IF NOT EXISTS trig_runtime_update_ts
-AFTER UPDATE ON runtime FOR EACH ROW
-BEGIN
-  UPDATE runtime SET updated_at = strftime('%s', 'now') WHERE key = OLD.key;
 END;
 
 -- =====================================================

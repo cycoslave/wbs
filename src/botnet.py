@@ -746,11 +746,15 @@ class BotnetManager:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         elif cmd == 'REQUEST_INVITE':
+            channel = cmd.get('channel', '')
+            target  = cmd.get('target', '')
             if self.core.bot_isop(channel):
                 self.core.send_irc({'cmd': 'invite', 'target': target, 'channel': channel})
                 log.info(f"[Botnet] Sent INVITE {target} to {channel}")
 
         elif cmd == 'REQUEST_UNBAN':
+            channel = cmd.get('channel', '')
+            target  = cmd.get('target', '')
             if self.core.bot_isop(channel):
                 # TODO: scan chan.bans for a mask matching target's nick/host
                 self.core.send_irc({'cmd': 'mode', 'channel': channel,
@@ -758,6 +762,8 @@ class BotnetManager:
                 log.info(f"[Botnet] Sent unban for {target} in {channel}")
 
         elif cmd == 'REQUEST_LIMIT_RAISE':
+            channel = cmd.get('channel', '')
+            target  = cmd.get('target', '')
             if self.core.bot_isop(channel):
                 chan = self.core.channels.get(channel)
                 new_limit = (chan.limit if chan else 0) + 10
