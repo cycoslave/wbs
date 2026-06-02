@@ -22,7 +22,6 @@ from src.core import Core
 from src.irc import irc_process_launcher
 from src.core import core_process_launcher 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger("wbs")
 
 def parse_args():
@@ -60,6 +59,7 @@ def daemonize(logfile: str = "logs/wbs.log"):
 
 def write_pidfile(path: str):
     try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         with open(path, 'w') as f:
             f.write(str(os.getpid()))
         log.info(f"PID file written: {path}")
@@ -136,9 +136,9 @@ def main():
         sys.exit(1)
 
     log.info(f"Launching WBS {__version__}")
+    write_pidfile(pidfile)
     if not args.foreground:
         daemonize(logfile)
-        write_pidfile(pidfile)
 
     EXIT_OK = 0
 
