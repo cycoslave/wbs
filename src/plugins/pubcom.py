@@ -185,8 +185,7 @@ class pubcomPlugin(Plugin):
     
     async def cmd_version(self, nick, uhost, channel, arg):
         """Show bot version"""
-        version = self.core.config.get('version', '6.0.0')
-        await self.send_privmsg(channel, f"I run Wicked Bot System {version}!")
+        await self.send_privmsg(channel, f"I run Wicked Bot System {__version__}!")
     
     async def cmd_uptime(self, nick, uhost, channel, arg):
         """Show uptime"""
