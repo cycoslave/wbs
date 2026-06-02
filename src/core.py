@@ -892,14 +892,11 @@ class Core:
         # Update channel objects
         channels_data = irc_data.get('channels', {})
         for chan_name, chan_data in channels_data.items():
-            if chan_name not in self.channels:
-                chan = Channel(name=chan_name)
-                chan._chan_mgr = self.chan
-                self.channels[chan_name] = chan
-            
-            self.channels[chan_name].update_irc_state(chan_data)
-        
-        # Remove channels we're no longer in
+            chan = self.channels.get(chan_name)
+            if chan:
+                chan.update_irc_state(chan_data)
+
+        # Remove channels the IRC process is no longer tracking
         current_chans = set(channels_data.keys())
         for chan_name in list(self.channels.keys()):
             if chan_name not in current_chans:

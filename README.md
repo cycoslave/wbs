@@ -43,23 +43,8 @@ options:
 - add dependencies to games, it needs pubcom to be enabled.
 - add ignore list/banlist for games.
 - try to fix duckhunt cheating.
-
-## Bugs
-- .net issue
-console> .net lag
-2026-05-23 16:36:23,834 ERROR Command 'net' error: 'BotnetManager' object has no attribute 'broadcast'
-Error executing .net
-
 - schema.sql — hostmasks / bans / invites as JSON Strings
 Storing structured data as JSON blobs (TEXT DEFAULT '[]') in SQLite is functional but unindexed. The index on users.hostmasks (idx_users_hostmasks) won't help with LIKE-style searches. For RC2 this is acceptable, but for production at scale, normalize hostmasks to a proper junction table.
 
-- part but the bot rejoins anyway
-2026-06-02 20:58:02,096 INFO net part #test666 (from shrapnel6)
-2026-06-02 20:58:02,205 INFO Bot parted #test666, removed from channels database
-2026-06-02 20:58:02,769 INFO Trying to join: #test666 (attempts in last 5m: 1)
-2026-06-02 20:58:02,826 INFO Building snapshot for #test666
-2026-06-02 20:58:02,862 INFO Joined #test666; requested ops from peers
-
-- these messages need to go, this is a server type program
-Press ENTER to continue...
-
+## Bugs
+- None for now.
