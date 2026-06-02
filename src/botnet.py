@@ -169,7 +169,6 @@ class BotnetManager:
         self.core = core
         self.db_path = self.core.db_path
         self.config = self.core.config
-        self.irc_q = self.core.irc_q
         self.user = UserManager(self.db_path)
         self.chan = ChannelManager(self.db_path)
         self.bot = BotManager(self.db_path)
@@ -1119,7 +1118,7 @@ class BotnetManager:
         if not args:
             return
         channel = args[0] if isinstance(args, list) else args.split()[0]
-        self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
+        self.core.send_irc({'cmd': 'join', 'channel': channel})
         log.info("net join %s (from %s)", channel, from_bot)
 
     async def _net_part(self, cmd_key, args, from_bot):
@@ -1129,7 +1128,7 @@ class BotnetManager:
             return
         channel = parts[0]
         reason  = ' '.join(parts[1:]) if len(parts) > 1 else ''
-        self.irc_q.put_nowait({'cmd': 'part', 'channel': channel, 'reason': reason})
+        self.core.send_irc({'cmd': 'part', 'channel': channel, 'reason': reason})
         log.info("net part %s (from %s)", channel, from_bot)
 
     async def _net_say(self, cmd_key, args, from_bot):
@@ -1139,7 +1138,7 @@ class BotnetManager:
             return
         target = parts[0]
         text   = ' '.join(parts[1:])
-        self.irc_q.put_nowait({'cmd': 'msg', 'target': target, 'text': text})
+        self.core.send_irc({'cmd': 'msg', 'target': target, 'text': text})
         log.info("net say %s (from %s)", target, from_bot)
 
     async def _net_op(self, cmd_key, args, from_bot):
@@ -1148,7 +1147,7 @@ class BotnetManager:
         if len(parts) < 2:
             return
         nick, chan = parts[0], parts[1]
-        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
+        self.core.send_irc({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
         log.info("net op %s on %s (from %s)", nick, chan, from_bot)
 
     async def _net_deop(self, cmd_key, args, from_bot):
@@ -1157,7 +1156,7 @@ class BotnetManager:
         if len(parts) < 2:
             return
         nick, chan = parts[0], parts[1]
-        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'-o {nick}'})
+        self.core.send_irc({'cmd': 'mode', 'channel': chan, 'modes': f'-o {nick}'})
         log.info("net deop %s on %s (from %s)", nick, chan, from_bot)
 
     async def _net_mode(self, cmd_key, args, from_bot):
@@ -1167,7 +1166,7 @@ class BotnetManager:
             return
         chan  = parts[0]
         modes = ' '.join(parts[1:])
-        self.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+        self.core.send_irc({'cmd': 'mode', 'channel': chan, 'modes': modes})
         log.info("net mode %s %s (from %s)", chan, modes, from_bot)
 
     async def _net_restart(self, cmd_key, args, from_bot):
@@ -1179,4 +1178,4 @@ class BotnetManager:
         """CMD_ROUTE die [message]"""
         msg = ' '.join(args) if isinstance(args, list) else args
         log.info("net die triggered by %s: %s", from_bot, msg)
-        self.irc_q.put_nowait({'cmd': 'quit', 'message': msg or 'Killed via botnet'})                 
+        self.core.send_irc({'cmd': 'quit', 'message': msg or 'Killed via botnet'})                 

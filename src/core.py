@@ -455,7 +455,7 @@ class Core:
         self.quit_event.set()
         log.info(f"Shutdown: {message}")
         try:
-            self.irc_q.put_nowait({'cmd': 'quit', 'message': message})
+            self.send_irc({'cmd': 'quit', 'message': message})
         except Exception:
             pass
         await asyncio.sleep(1.5)
@@ -709,7 +709,7 @@ class Core:
         for channel in channels:
             if channel is not None:
                 log.info(f"Joining {channel}..")
-                self.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
+                self.send_irc({'cmd': 'join', 'channel': channel})
                 await asyncio.sleep(0.2)
 
     async def on_disconnect(self, event: Dict[str, Any]):
@@ -792,13 +792,18 @@ class Core:
         error_msg = event.get('data', 'Unknown error')
         log.error(f"IRC error: {error_msg}")
 
-    def send_cmd(self, cmd_type: str, target: str, text: str = "", **kwargs):
-        """Send to IRC queue."""
-        cmd = {'cmd': cmd_type, 'target': target, 'text': text, **kwargs}
+    def send_irc(self, payload: dict) -> None:
+        """
+        Single point of entry for all IRC queue writes.
+        Always resolves self.irc_q at call time — safe across respawns.
+        """
         try:
-            self.irc_q.put_nowait(cmd)
-        except mp.queues.Full:
-            log.warning(f"IRC queue full, dropped: {cmd}")
+            self.irc_q.put_nowait(payload)
+        except Exception as e:
+            log.warning(f"[Core] IRC queue write dropped: {e} — payload={payload}")
+
+    def send_cmd(self, cmd_type: str, target: str, text: str = "", **kwargs) -> None:
+        self.send_irc({'cmd': cmd_type, 'target': target, 'text': text, **kwargs})
 
     async def _periodic_tasks(self):
         """Periodic tasks."""
@@ -1027,7 +1032,6 @@ class Core:
     async def do_restart(self) -> None:
         """
         Full restart: send IRC QUIT, tear down children, re-exec.
-        Requires: 'n' flag (owner).
         """
         log.info("[Core] Restarting...")
         self.partyline.broadcast("*** Restarting...")
