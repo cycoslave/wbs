@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from .commands import COMMANDS
 
 log = logging.getLogger("wbs.partyline")
-
+VALID_REMOTE_SESSION_TYPES = frozenset({'telnet', 'dcc', 'bot'})
 # Centralized partyline authorization policy.
 # Maps command name (without leading dot) -> required global flag using
 # UserManager.matchattr. None means no additional flags beyond having a
@@ -154,6 +154,11 @@ class Partyline:
         return session_id
     
     def register_remote(self, sessiontype: str, handle: str, responsequeue=None):
+        if sessiontype not in VALID_REMOTE_SESSION_TYPES:
+            raise ValueError(
+                f"Invalid session type {sessiontype!r}. "
+                f"Allowed: {', '.join(sorted(VALID_REMOTE_SESSION_TYPES))}"
+            )
         sessionid = self.next_id
         self.next_id += 1
         self.sessions[sessionid] = {'type': sessiontype, 'handle': handle, 'queue': responsequeue}
