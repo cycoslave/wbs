@@ -297,20 +297,32 @@ class NetListener:
         self._pending_streams: dict = {}
 
     def _build_ssl_context(self) -> ssl_lib.SSLContext | None:
-        """Build server-side TLS context, or None if disabled."""
+        """Build server-side TLS context, or None if SSL is disabled.
+
+        Raises RuntimeError at startup if ssl=true but cert/key files are
+        missing or fail to load. A security-first bot must never silently
+        downgrade to plaintext when the operator has requested TLS.
+        """
         cfg = self.config.get("settings", {})
         if not cfg.get("ssl", False):
             return None
         certfile = cfg.get("certfile")
         keyfile  = cfg.get("keyfile")
         if not certfile or not keyfile:
-            log.warning("SSL enabled but certfile/keyfile missing — falling back to plaintext")
-            return None
+            raise RuntimeError(
+                "SSL is enabled but certfile and/or keyfile are not configured. "
+                "Set ssl=false or provide valid cert/key paths in config."
+            )
         ctx = ssl_lib.SSLContext(ssl_lib.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl_lib.TLSVersion.TLSv1_2   # no TLS 1.0/1.1
-        ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-        ctx.verify_mode = ssl_lib.CERT_NONE
-        log.info(f"TLS enabled (cert={certfile}, min=TLSv1.2)")
+        ctx.minimum_version = ssl_lib.TLSVersion.TLSv1_2
+        try:
+            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        except (ssl_lib.SSLError, FileNotFoundError, PermissionError) as exc:
+            raise RuntimeError(
+                f"SSL is enabled but cert/key failed to load "
+                f"(cert={certfile!r}, key={keyfile!r}): {exc}"
+            ) from exc
+        log.info("TLS enabled (cert=%s, min=TLSv1.2)", certfile)
         return ctx
 
     async def listen(self) -> None:
