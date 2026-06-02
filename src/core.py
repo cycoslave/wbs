@@ -386,27 +386,8 @@ class Core:
         """Core event loop: drain buffer, handle events, periodic tasks."""
         last_periodic = time.time()
         while not self.quit_event.is_set():
-            # Drain events from child processes
-            events = []
-            with self._buffer_lock:
-                while self._event_buffer:
-                    events.append(self._event_buffer.popleft())
-            
-            for event in events:
-                if not isinstance(event, dict):
-                    log.error(f"Invalid event type received: {type(event)} - {event}")
-                    continue
-                    
-                if event.get('cmd') == 'quit':
-                    await self._shutdown(event.get('message', 'Quit'))
-                    return
-                await self.handle_event(event)
-            
-            # Periodic
-            if time.time() - last_periodic >= 5.0:
-                await self._periodic_tasks()
-                last_periodic = time.time()
-            
+            now = time.time()
+            last_periodic = await self._drain_and_dispatch_once(now, last_periodic)
             await asyncio.sleep(0.05)
 
     async def _main_loop_with_console(self):
@@ -423,21 +404,8 @@ class Core:
                         await self._shutdown("Console exited")
                     break
 
-                events = []
-                with self._buffer_lock:
-                    while self._event_buffer:
-                        events.append(self._event_buffer.popleft())
-
-                for event in events:
-                    if isinstance(event, dict) and event.get('cmd') == 'quit':
-                        await self._shutdown(event.get('message', 'Quit'))
-                        return
-                    await self.handle_event(event)
-
-                if time.time() - last_periodic >= 5.0:
-                    await self._periodic_tasks()
-                    last_periodic = time.time()
-
+                now = time.time()
+                last_periodic = await self._drain_and_dispatch_once(now, last_periodic)
                 await asyncio.sleep(0.05)
         finally:
             if self._console_task and not self._console_task.done():
@@ -1092,6 +1060,29 @@ class Core:
         except Exception:
             pass
         await asyncio.sleep(0.3)
+
+    async def _drain_and_dispatch_once(self, now: float, last_periodic: float) -> float:
+        """Drain buffered events, dispatch them, and run periodic tasks."""
+        events = []
+        with self._buffer_lock:
+            while self._event_buffer:
+                events.append(self._event_buffer.popleft())
+
+        for event in events:
+            if isinstance(event, dict) and event.get('cmd') == 'quit':
+                await self._shutdown(event.get('message', 'Quit'))
+                return last_periodic
+            if not isinstance(event, dict):
+                log.error(f"Invalid event type received: {type(event)} - {event}")
+                continue
+            await self.handle_event(event)
+
+        # Periodic tasks (5s)
+        if now - last_periodic >= 5.0:
+            await self._periodic_tasks()
+            last_periodic = now
+
+        return last_periodic
 
 def core_process_launcher(config, config_path, args, core_q, irc_q):
     """Entry point for Core as a supervised child process."""

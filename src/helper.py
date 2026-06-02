@@ -77,4 +77,4 @@ async def _watch_parent(initial_ppid: int) -> None:
         current = os.getppid()
         if current != initial_ppid or current == 1:
             log.warning("Parent process gone — self-terminating")
-            os._exit(1)         
+            os._exit(1)            
