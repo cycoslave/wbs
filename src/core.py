@@ -539,8 +539,7 @@ class Core:
         """Forward invite notice to partyline."""
         channel = event['channel']
         inviter_nick = event['inviter']
-        solicitation = event['solicitation']
-        self.partyline.broadcast(f"{solicitation} invite to join {channel} by {inviter_nick}")
+        self.partyline.broadcast(f"Invite to join {channel} by {inviter_nick}")
 
     async def on_mode(self, event: Dict[str, Any]):
         """Process MODE events - update channel tracking including limits"""
