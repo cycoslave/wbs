@@ -642,7 +642,7 @@ class Core:
 
     async def on_kick(self, event: Dict[str, Any]):
         """User kicked from channel."""
-        kicked_nick = event.get('kicked_nick', '')
+        kicked_nick = event.get('kicked', '')
         channel = event.get('channel', '')
         #await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
         # If bot was kicked, remove channel entirely
