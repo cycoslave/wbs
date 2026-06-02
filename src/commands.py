@@ -4,7 +4,6 @@ Partyline commands for WBS
 """
 import time
 import os
-import sys
 import platform
 import resource
 import shutil
@@ -52,8 +51,7 @@ async def cmd_help(core, handle, session_id, arg, respond):
 
    Channel management:
       +chan        -chan        channels     chaninfo
-      join         part         lockchan     unlockchan
-      topiclock    topicunlock  mode
+      join         part         mode
 
    Bot/Botnet management:
       +bot         -bot         bots         botattr
@@ -461,7 +459,7 @@ See also: +chan, -chan, chaninfo
 ###  chaninfo <#channel>
     Shows settings and info for a channel.
 
-See also: channels, lockchan, topiclock
+See also: channels
 """
 
     elif cmd == "join":
@@ -478,38 +476,6 @@ See also: part
     Makes the bot leave a channel.
 
 See also: join
-"""
-
-    elif cmd == "lockchan":
-        help_text = """\
-###  lockchan <#channel>
-    Locks a channel, preventing configuration changes.
-
-See also: unlockchan
-"""
-
-    elif cmd == "unlockchan":
-        help_text = """\
-###  unlockchan <#channel>
-    Unlocks a previously locked channel.
-
-See also: lockchan
-"""
-
-    elif cmd == "topiclock":
-        help_text = """\
-###  topiclock <#channel> [topic]
-    Locks the topic on a channel. Optionally sets the locked topic.
-
-See also: topicunlock
-"""
-
-    elif cmd == "topicunlock":
-        help_text = """\
-###  topicunlock <#channel>
-    Unlocks the topic on a channel.
-
-See also: topiclock
 """
 
     elif cmd == "+bot":
@@ -967,24 +933,6 @@ async def cmd_channels(core, handle: str, session_id: int, arg: str, respond):
             total += 1
         
         await respond(f"TOTAL CHANNELS: {total}")
-
-async def cmd_join(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .join #channel [key]")
-        return
-    parts = arg.split()
-    core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
-
-async def cmd_part(core, handle, session_id, arg, respond):
-    """Leave IRC channel."""
-    if not arg:
-        await respond("Usage: .part #channel [reason]")
-        return
-    parts = arg.split()
-    core.irc_q.put_nowait({'cmd': 'part', 'channel': parts[0],
-              'reason': parts[1] if len(parts) > 1 else ''})
-    await respond(f"→ PART {parts}")
 
 async def cmd_quit(core, handle, session_id, arg, respond):
     """Shutdown bot."""
@@ -1466,7 +1414,7 @@ async def cmd_handle(core, handle: str, session_id: int, arg: str, respond):
         core.user.change_handle(handle, new_handle)
         await respond(f"Your handle is now: {new_handle}")
     else:
-        await respond(f"Your handle was not changed.")
+        await respond("Your handle was not changed.")
     
 async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
     if not arg or len(arg.split()) != 2:
@@ -1620,11 +1568,7 @@ async def cmd_delignore(core, handle: str, arg: str, respond, action: str):
     if len(parts) < 1:
         await respond("Usage: -ignore <hostmask>")
         return
-    
     hostmask = parts[0].strip()
-    flags = parts[1][1:] if len(parts) > 1 and parts[1].startswith('%') else ''  # %flags
-    comment = parts[2] if len(parts) > 2 else ''
-    
     async with get_db(core.db_path) as db:
         result = await db.execute("DELETE FROM ignores WHERE hostmask = ?", (hostmask,))
         if result.rowcount:
@@ -1654,75 +1598,7 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
             (address, port, botname)
         )
         
-        await respond(f"Updated {botname}: {address}:{port}")
-
-async def cmd_lockchan(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .lock <channel>")
-        return
-    
-    chan = arg.strip().lstrip('#')
-    now = int(time.time())
-    
-    async with get_db(core.db_path) as db:
-        await db.execute("""
-            UPDATE channels SET 
-            is_locked = 1, lock_by = ?, lock_at = ?, lock_reason = ?
-            WHERE name = ?
-        """, (handle, now, f"Locked by {handle}", chan))
-        await respond(f"Locked channel {chan}")
-
-async def cmd_unlockchan(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .unlock <channel>")
-        return
-    
-    chan = arg.strip().lstrip('#')
-    now = int(time.time())
-    
-    async with get_db(core.db_path) as db:
-        await db.execute("""
-            UPDATE channels SET 
-            is_locked = 0, lock_by = NULL, lock_at = 0, lock_reason = NULL
-            WHERE name = ?
-        """, (chan,))
-        await respond(f"Unlocked channel {chan}")
-
-async def cmd_topiclock(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: [topicun]lock <channel> [topic]")
-        return
-    
-    parts = arg.split(maxsplit=1)
-    chan = parts[0].strip().lstrip('#')
-    topic = parts[1] if len(parts) > 1 else ''
-    now = int(time.time())
-    
-    async with get_db(core.db_path) as db:
-        await db.execute("""
-            UPDATE channels SET 
-            is_topiclock = 1, topiclock = ?, topiclock_by = ?, topiclock_at = ?
-            WHERE name = ?
-        """, (topic, handle, now, chan))
-        await respond(f"Topiclock {chan} {f'to: {topic}' if topic else ''}")
-
-async def cmd_topicunlock(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: [topicun]lock <channel> [topic]")
-        return
-    
-    parts = arg.split(maxsplit=1)
-    chan = parts[0].strip().lstrip('#')
-    topic = parts[1] if len(parts) > 1 else ''
-    now = int(time.time())
-    
-    async with get_db(core.db_path) as db:
-        await db.execute("""
-            UPDATE channels SET 
-            is_topiclock = 0, topiclock = NULL, topiclock_by = NULL, topiclock_at = 0
-            WHERE name = ?
-        """, (chan,))
-        await respond(f"Topic unlocked {chan}")            
+        await respond(f"Updated {botname}: {address}:{port}")      
 
 async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
     """
@@ -2188,8 +2064,8 @@ async def cmd_net(core, handle: str, session_id: int, arg: str, respond):
         'deop':    cmd_deop,
         'say':     cmd_msg,
         'msg':     cmd_msg,
-        'join':    cmd_join,
-        'part':    cmd_part,
+        'join':    cmd_addchan,
+        'part':    cmd_delchan,
         'mode':    cmd_mode,
         'restart': cmd_restart,
         'die':     cmd_quit,
@@ -2431,7 +2307,7 @@ async def cmd_infoleaf(core, handle: str, session_id: int, arg: str, respond):
     botname  = core.botname
     address  = cfg.get('address', '<your.host>')
     port     = cfg.get('listen_port', 3333)
-    await respond(f"To add this bot as a leaf on another hub, run:")
+    await respond("To add this bot as a leaf on another hub, run:")
     await respond(f"  .addleaf {botname} {address} {port}")
 
 
@@ -2793,8 +2669,8 @@ COMMANDS = {
     'deop': cmd_deop,
     'voice': cmd_voice,
     'devoice': cmd_devoice,
-    'join': cmd_join,
-    'part': cmd_part,
+    'join': cmd_addchan,
+    'part': cmd_delchan,
     'say': cmd_msg,
     'msg': cmd_msg,
     'act': cmd_act,
@@ -2850,10 +2726,6 @@ COMMANDS = {
     'part': cmd_delchan,
     'chaninfo': cmd_showchan,
     'channels': cmd_channels,
-    'lockchan': cmd_lockchan,
-    'unlockchan': cmd_unlockchan,
-    'topiclock': cmd_topiclock,
-    'topicunlock': cmd_topicunlock,
     # bot
     '+bot': cmd_addbot,
     '-bot': cmd_delbot,

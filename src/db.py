@@ -5,12 +5,10 @@ Supports multi-process (WAL mode).
 """
 import aiosqlite
 import asyncio
-import time
 import logging
 import bcrypt
 import json
 from pathlib import Path
-from typing import Optional
 from contextlib import asynccontextmanager
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
@@ -45,7 +43,7 @@ def _hash_password(password_cfg) -> str | None:
     enc = password_cfg.get("encryption", "none").lower() if isinstance(password_cfg, dict) else "none"
     if enc == "bcrypt":
         if not raw.startswith(("$2b$", "$2a$", "$2y$")):
-            raise ValueError(f"encryption=bcrypt but value is not a valid bcrypt hash")
+            raise ValueError("encryption=bcrypt but value is not a valid bcrypt hash")
         return raw
     return bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
 

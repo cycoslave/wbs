@@ -6,7 +6,7 @@ import logging
 import json
 import time
 from irc import modes
-from typing import Dict, Optional, List
+from typing import Optional, List
 from dataclasses import dataclass, field, asdict
 
 from .db import get_db

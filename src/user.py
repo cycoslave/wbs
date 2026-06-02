@@ -7,7 +7,7 @@ import bcrypt
 import time
 import logging
 import fnmatch
-from typing import List, Optional, Dict
+from typing import List, Optional
 from dataclasses import dataclass, asdict, field
 
 from .db import get_db 

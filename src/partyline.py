@@ -5,7 +5,7 @@ Partyline hub - coordinates chat between console, telnet, DCC, and botnet
 import asyncio
 import logging
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .commands import COMMANDS
 

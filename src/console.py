@@ -3,7 +3,6 @@
 import asyncio
 import sys
 import logging
-from typing import Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.history import InMemoryHistory

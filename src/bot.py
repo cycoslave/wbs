@@ -6,7 +6,7 @@ import json
 import bcrypt
 import time
 import logging
-from typing import List, Optional, Literal, Dict
+from typing import Optional, Literal
 from dataclasses import dataclass, asdict, field
 
 from .db import get_db 

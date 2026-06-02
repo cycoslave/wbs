@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import deque
 
-from . import __version__
 from .net import AccessGuard
 from .net import NetListener
 from .channel import ChannelManager, Channel
@@ -1022,7 +1021,6 @@ class Core:
 
     async def _autoload_games(self):
         async with get_db(self.db_path) as db:
-            # Step 1: which games were loaded
             async with db.execute(
                 "SELECT DISTINCT game_name FROM game_sessions WHERE state='running'"
             ) as cursor:
@@ -1096,11 +1094,6 @@ class Core:
         for name, task in list(self.timers.items()):
             task.cancel()
         self.timers.clear()
-        try:
-            async with get_db(self.db_path) as db:
-                pass
-        except Exception:
-            pass
         await asyncio.sleep(0.3)
 
     async def _drain_and_dispatch_once(self, now: float, last_periodic: float) -> float:

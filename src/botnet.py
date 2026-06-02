@@ -14,8 +14,8 @@ import uuid
 import ssl as ssl_lib
 from datetime import datetime, timezone
 from collections import OrderedDict
-from typing import Dict, Optional, Any, Literal, Callable, Coroutine
-from dataclasses import dataclass, field
+from typing import Dict, Optional, Literal, Callable
+from dataclasses import dataclass
 
 from . import __version__
 from .bot import BotManager
@@ -393,12 +393,12 @@ class BotnetManager:
                 try:
                     peer_ts = int(parts[3])
                     if not await self.check_clock_skew(peer_ts, from_bot):
-                        await self._safe_send(writer, f"ERROR :clock skew too large\n")
+                        await self._safe_send(writer, "ERROR :clock skew too large\n")
                         writer.close()
                         return
                 except ValueError:
                     log.error(f"LINKAUTH from {from_bot} has invalid or missing timestamp — rejecting link")
-                    await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
+                    await self._safe_send(writer, "ERROR :missing or invalid timestamp\n")
                     writer.close()
                     return
 
@@ -423,12 +423,12 @@ class BotnetManager:
                 try:
                     peer_ts = int(parts[-1])
                     if not await self.check_clock_skew(peer_ts, from_bot):
-                        await self._safe_send(writer, f"ERROR :clock skew too large\n")
+                        await self._safe_send(writer, "ERROR :clock skew too large\n")
                         writer.close()
                         return
                 except ValueError:
                     log.error(f"LINKREADY from {from_bot} has invalid or missing timestamp — rejecting link")
-                    await self._safe_send(writer, f"ERROR :missing or invalid timestamp\n")
+                    await self._safe_send(writer, "ERROR :missing or invalid timestamp\n")
                     writer.close()
                     return
 
@@ -540,7 +540,6 @@ class BotnetManager:
                     log.warning(f"Malformed CMD_ROUTE subnet from {from_bot}: {line[:80]}")
                     return
                 msg_id    = parts[2]
-                source    = parts[3]
                 try:
                     subnet_id = int(parts[5])
                 except ValueError:
@@ -552,7 +551,6 @@ class BotnetManager:
             else:
                 # CMD_ROUTE broadcast|unicast <msg_id> <source> <target_or_dash> <command> [args...]
                 msg_id  = parts[2]
-                source  = parts[3]
                 target  = parts[4]
                 command = parts[5].lower()
                 args    = " ".join(parts[6:])

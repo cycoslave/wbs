@@ -461,7 +461,6 @@ class NetListener:
                 ) as cursor:
                     row = await cursor.fetchone()
             if row and not row["locked"]:
-                from .user import UserManager
                 um = UserManager(self.config.get("db_path", "wbs.db"))
                 authed = um.verify_password(password, row["password_hash"])
         except Exception as e:

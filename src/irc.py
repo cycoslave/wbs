@@ -3,8 +3,6 @@
 IRC client process
 """
 import os
-import sys
-import subprocess
 import queue
 import threading
 import time
@@ -16,7 +14,6 @@ import irc.bot
 import irc.client
 import ssl as ssl_lib
 import socket as socket_module
-import multiprocessing as mp
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from jaraco.stream import buffer
