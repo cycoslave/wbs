@@ -526,6 +526,19 @@ class ChannelManager:
                                 f"UPDATE channels SET {set_clause} WHERE name = ?",
                                 (*safe.values(), name)
                             )
+
+                    cur = await db.execute(
+                        "SELECT 1 FROM channels WHERE name = ?", (name,)
+                    )
+                    if await cur.fetchone():
+                        for sid in ch.get('subnet_ids', []):
+                            await db.execute(
+                                """INSERT OR IGNORE INTO channel_subnets
+                                (channel_name, subnet_id, created_by)
+                                VALUES (?, ?, ?)""",
+                                (name, sid, from_bot)
+                            )
+
                 else:
                     bans    = ch.get('bans', '[]')
                     invites = ch.get('invites', '[]')
@@ -533,6 +546,7 @@ class ChannelManager:
                     if not isinstance(bans, str):    bans    = json.dumps(bans)
                     if not isinstance(invites, str): invites = json.dumps(invites)
                     if not isinstance(exempts, str): exempts = json.dumps(exempts)
+
                     await db.execute(
                         """INSERT INTO channels
                             (name, comment, modes, bans, invites, exempts,
@@ -563,14 +577,17 @@ class ChannelManager:
                         )
                     )
 
-                # Merge channel_subnets — idempotent
-                for sid in ch.get('subnet_ids', []):
-                    await db.execute(
-                        """INSERT OR IGNORE INTO channel_subnets
-                        (channel_name, subnet_id, created_by)
-                        VALUES (?, ?, ?)""",
-                        (name, sid, from_bot)   # created_by — not added_by
+                    cur = await db.execute(
+                        "SELECT 1 FROM channels WHERE name = ?", (name,)
                     )
+                    if await cur.fetchone():
+                        for sid in ch.get('subnet_ids', []):
+                            await db.execute(
+                                """INSERT OR IGNORE INTO channel_subnets
+                                (channel_name, subnet_id, created_by)
+                                VALUES (?, ?, ?)""",
+                                (name, sid, from_bot)
+                            )
 
             await db.commit()
         log.info(f"ChannelManager.merge_from_peer: merged {len(channels)} channels from {from_bot}")

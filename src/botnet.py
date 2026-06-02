@@ -695,22 +695,22 @@ class BotnetManager:
         elif cmd == "SHARE":
             share = parts[1]
             if share == "SUBNETS":
-                asyncio.create_task(self.handle_share_subnets(' '.join(parts[2:]), from_bot))
-
-            elif share == "CHANNELS":
-                asyncio.create_task(self.handle_share_channels(' '.join(parts[2:]), from_bot))
-
-            elif share == "USERS":
-                asyncio.create_task(self.handle_share_users(' '.join(parts[2:]), from_bot))
-
-            elif share == "USERACCESS":
-                asyncio.create_task(self.handle_share_user_access(' '.join(parts[2:]), from_bot))
+                await self.handle_share_subnets(' '.join(parts[2:]), from_bot)
 
             elif share == "BOTS":
-                asyncio.create_task(self.handle_share_bots(' '.join(parts[2:]), from_bot))
+                await self.handle_share_bots(' '.join(parts[2:]), from_bot)
 
             elif share == "BOTACCESS":
-                asyncio.create_task(self.handle_share_bot_access(' '.join(parts[2:]), from_bot))
+                await self.handle_share_bot_access(' '.join(parts[2:]), from_bot)
+
+            elif share == "USERS":
+                await self.handle_share_users(' '.join(parts[2:]), from_bot)
+
+            elif share == "USERACCESS":
+                await self.handle_share_user_access(' '.join(parts[2:]), from_bot)
+
+            elif share == "CHANNELS":
+                await self.handle_share_channels(' '.join(parts[2:]), from_bot)
 
         elif cmd == "TOPOLOGY":
             # TOPOLOGY <msg_id> <source_bot> <peer1> [peer2 ...]
@@ -915,10 +915,10 @@ class BotnetManager:
         
         # Share in dependency order
         await self.share_subnets(link)
+        await self.share_bots(link, target_bot)
+        await self.share_bot_access(link)
         await self.share_users(link)
         await self.share_user_access(link)
-        await self.share_bots(link, target_bot)  # Exclude target
-        await self.share_bot_access(link)
         await self.share_channels(link)
 
     async def share_users(self, link: BotLink):

@@ -591,6 +591,18 @@ class UserManager:
                 remote_deleted = acc.get('deleted_at')
 
                 cur = await db.execute(
+                    "SELECT 1 FROM users WHERE handle = ?", (handle,)
+                )
+                if not await cur.fetchone():
+                    now = int(time.time())
+                    await db.execute(
+                        """INSERT OR IGNORE INTO users
+                        (handle, hostmasks, created_at, updated_at, created_by)
+                        VALUES (?, '[]', ?, ?, ?)""",
+                        (handle, now, now, from_bot)
+                    )
+
+                cur = await db.execute(
                     """SELECT updated_at, deleted_at FROM user_access
                     WHERE handle = ?
                         AND (channel = ? OR (channel IS NULL AND ? IS NULL))
@@ -598,7 +610,6 @@ class UserManager:
                     (handle, channel, channel, subnet_id, subnet_id)
                 )
                 existing = await cur.fetchone()
-
                 if existing:
                     if remote_updated <= (existing[0] or 0):
                         continue
