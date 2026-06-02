@@ -747,23 +747,65 @@ class Core:
         if chan:
             chan.exempts.append(event['exempt'])       
 
-    async def on_471(self, event):  # ERR_CHANNELISFULL
-        """Add exempt to list"""
-        chan = self.channels.get(event['channel'])
-        if chan:
-            log.info(f"Channel join {chan}: Channel full.")  
+    async def on_471(self, event: Dict[str, Any]):
+        """
+        ERR_CHANNELISFULL (+l limit reached).
+        Request a linked bot with ops in the channel to raise the limit.
+        Rejoin is handled by the periodic IRC timer — no retry logic here.
+        """
+        channel = event.get('channel', '')
+        log.warning(f"Cannot join {channel}: channel is full (+l).")
+        self.partyline.broadcast(
+            f"*** Cannot join {channel}: channel full (+l) — "
+            f"requesting a linked bot to raise the limit"
+        )
+        if self.botnet and self.botnet.peers:
+            await self.botnet.broadcast({
+                'cmd':     'REQUEST_LIMIT_RAISE',
+                'channel': channel,
+                'target':  self.botname,
+            })
+            log.info(f"Broadcasted REQUEST_LIMIT_RAISE for {channel} to botnet peers")
 
-    async def on_473(self, event):  # ERR_INVITEONLYCHAN
-        """Add exempt to list"""
-        chan = self.channels.get(event['channel'])
-        if chan:
-            log.info(f"Channel join {chan}: Channel invite only.")    
+    async def on_473(self, event: Dict[str, Any]):
+        """
+        ERR_INVITEONLYCHAN (+i set).
+        Request a linked bot with ops in the channel to invite the bot.
+        Rejoin is handled by the periodic IRC timer — no retry logic here.
+        """
+        channel = event.get('channel', '')
+        log.warning(f"Cannot join {channel}: invite only (+i).")
+        self.partyline.broadcast(
+            f"*** Cannot join {channel}: invite only (+i) — "
+            f"requesting a linked bot to send an invite"
+        )
+        if self.botnet and self.botnet.peers:
+            await self.botnet.broadcast({
+                'cmd':     'REQUEST_INVITE',
+                'channel': channel,
+                'target':  self.botname,
+            })
+            log.info(f"Broadcasted REQUEST_INVITE for {channel} to botnet peers")
 
-    async def on_474(self, event):  # ERR_BANNEDFROMCHAN
-        """Add exempt to list"""
-        chan = self.channels.get(event['channel'])
-        if chan:
-            log.info(f"Channel join {chan}: I am banned.")                                         
+    async def on_474(self, event: Dict[str, Any]):
+        """
+        ERR_BANNEDFROMCHAN — bot is banned.
+        Request a linked bot with ops in the channel to remove the ban.
+        Rejoin is handled by the periodic IRC timer — no retry logic here.
+        """
+        channel = event.get('channel', '')
+        log.warning(f"Cannot join {channel}: I am banned.")
+        self.partyline.broadcast(
+            f"*** Cannot join {channel}: bot is banned — "
+            f"requesting a linked bot to remove the ban"
+        )
+        if self.botnet and self.botnet.peers:
+            await self.botnet.broadcast({
+                'cmd':     'REQUEST_UNBAN',
+                'channel': channel,
+                'target':  self.botname,
+            })
+            log.info(f"Broadcasted REQUEST_UNBAN for {channel} to botnet peers")                                        
 
     async def request_botlinks(self, event: dict):
         """Merge botnet.peers + user flags"""
