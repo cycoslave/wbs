@@ -1,7 +1,7 @@
 # src/plugins/netop.py
 """
 WBS Plugin: netop.py 
-version: 0.1.1
+version: 0.1.2
 by: cyco
 Description: Get op from linked bots & Give ops to linked bots.
 """
@@ -13,14 +13,13 @@ from ..botnet import BotCommand
 
 class netopPlugin(Plugin):
     name    = "netop"
-    version = "0.1.1"
+    version = "0.1.2"
+    self.COOLDOWN = 10  # seconds
 
     def __init__(self, core):
         super().__init__(core) 
         self.reqop: Dict[str, float] = {}
         self.sugop: Dict[str, float] = {}
-        _recently_opped: dict[str, dict[str, float]] = {}
-        COOLDOWN = 10  # seconds
         
     async def load(self):
         """Initialize plugin and register timers"""
@@ -104,7 +103,7 @@ class netopPlugin(Plugin):
                     self.reqop.pop((chan, victim), None)
                     if not self.core.bot_isop(chan):
                         last_req = self.reqop.get((chan, self.core.botname.lower()), 0)
-                        if now - last_req > 10:
+                        if now - last_req > self.COOLDOWN:
                             await self.msg_to_bot(victim, f"reqop {self.core.botname} {chan}")
                             self.reqop[(chan, self.core.botname.lower())] = now
                             self.log.debug(f"Linked bot {victim} got opped on {chan}, requesting op.")
@@ -129,7 +128,7 @@ class netopPlugin(Plugin):
         channel = args[1].lower() if len(args) > 1 else ''
         now = time.time()
         key = (channel, target)
-        if self.reqop.get(key, 0) + 10 > now:
+        if self.reqop.get(key, 0) + self.COOLDOWN > now:
             self.log.debug(f"Reqop cooldown {channel}/{target}, skipping")
             return
 
@@ -169,7 +168,7 @@ class netopPlugin(Plugin):
             if self.core.nick_isop(nick, chan):
                 continue
             last_opped = self.reqop.get((chan, nick), 0)
-            if now - last_opped > 10:
+            if now - last_opped > self.COOLDOWN:
                 self.core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
                 self.reqop[(chan, nick)] = now
                 self.log.debug(f"Opping peer {nick} on {chan}.")
