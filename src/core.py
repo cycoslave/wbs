@@ -37,6 +37,7 @@ from .helper import restore_terminal
 
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
+_AUTH_TIMEOUT = 20
 
 class Core:
     """Main process: Core event loop + child process manager."""
@@ -266,67 +267,85 @@ class Core:
             await self.botnet.process_incoming(handle, event['data'], link.reader, link.writer)     
 
     async def on_partyline_connect(self, event: dict):
-        """Recreate socket from DUP'd FD → reader/writer."""
-        handle = event['handle']
-        peer = event.get('peer', 'unknown')
-        dup_fd = event.get('sockfd')
-        
-        log.info(f"Partyline newuser {handle} fd={dup_fd}")
-        
-        if dup_fd is None:
-            log.warning(f"No dup_fd for {handle}")
+        handle  = event["handle"]
+        peer_ip = event.get("peer_ip", "unknown")
+
+        log.info(f"Partyline newuser {handle}")
+
+        streams = self.net_listener._pending_streams.pop(handle.lower(), None)
+        if streams is None:
+            log.warning(f"No pending streams for {handle} — releasing guard slot")
+            if self.guard:
+                self.guard.release(peer_ip)
             return
-        
+
+        reader, writer = streams
+
         try:
-            dup_sock = socket.socket(fileno=dup_fd)
-            dup_sock.setblocking(False)
-            
-            reader, writer = await asyncio.open_connection(sock=dup_sock, limit=4096)
-            
             response_q = mp.Queue()
-            session_id = self.partyline.register_remote('telnet', handle, response_q)
-            
-            #log.info(f"DEBUG creating Session: id={session_id}, reader={repr(reader)}, writer={repr(writer)}")
-            session = Session(session_id, 'telnet', handle=handle,
-                              reader=reader, writer=writer,
-                              core_q=self.core_q, response_q=response_q)
-            #log.info("DEBUG Session created OK")
-            session.peer_ip = event.get('peer_ip', 'unknown')
+            session_id = self.partyline.register_remote("telnet", handle, response_q)
+            session = Session(
+                session_id, "telnet", handle=handle,
+                reader=reader, writer=writer,
+                core_q=self.core_q, response_q=response_q,
+            )
+            session.peer_ip = peer_ip
             self.party_sessions[session_id] = session
-            asyncio.create_task(session.run())
-            
-            #await session.send("Welcome to WBS partyline! Type .help")
-            log.info(f"Remote session {session_id} (telnet) registered for {handle}")
-            
         except Exception as e:
-            log.error(f"Session dup_fd {dup_fd} failed: {e}")
-            # Cleanup: close dup_fd IF socket creation failed
+            log.error(f"Session setup failed for {handle}: {e}")
+            if self.guard:
+                self.guard.release(peer_ip)
             try:
-                os.close(dup_fd)
-            except OSError:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
                 pass
+            return
+
+        async def _run_with_timeout():
+            try:
+                async with asyncio.timeout(_AUTH_TIMEOUT):
+                    await session.run()
+                # Clean exit — on_partyline_disconnect fires and calls release there
+            except asyncio.TimeoutError:
+                log.warning(f"Auth timeout: {handle} ({peer_ip}) — evicting")
+                if self.guard:
+                    await self.guard.record_failure(peer_ip)
+                    self.guard.release(peer_ip)       # ← direct call, no closure
+                self.party_sessions.pop(session_id, None)
+                self.partyline.sessions.pop(session_id, None)
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        asyncio.create_task(_run_with_timeout(), name=f"session:{handle}")
 
     async def on_partyline_disconnect(self, event: dict):
-        session_id = event['session_id']
-        peer_ip = None
-        if session_id in self.party_sessions:
-            session = self.party_sessions.pop(session_id)
-            peer_ip = getattr(session, 'peer_ip', None)
+        session_id = event["session_id"]
+        session = self.party_sessions.pop(session_id, None)
+        peer_ip = getattr(session, "peer_ip", None) if session else None
+
+        if session:
             try:
                 if session.writer:
                     session.writer.close()
                     await session.writer.wait_closed()
             except Exception as e:
                 log.warning(f"Session {session_id} close failed: {e}")
-        if hasattr(self, 'partyline') and self.partyline:
-            if session_id in self.partyline.sessions:
-                handle = self.partyline.sessions[session_id]['handle']
-                del self.partyline.sessions[session_id]
-                log.info(f"Partyline unregistered {handle}#{session_id}")
-                self.partyline.broadcast(f"{handle} left the partyline", exclude_session=session_id)
-        log.debug(f"Partyline disconnect complete: {session_id}")
+
+        if self.partyline and session_id in self.partyline.sessions:
+            handle = self.partyline.sessions[session_id]["handle"]
+            del self.partyline.sessions[session_id]
+            log.info(f"Partyline unregistered {handle}#{session_id}")
+            self.partyline.broadcast(f"{handle} left the partyline",
+                                    exclude_session=session_id)
+
         if self.guard and peer_ip:
             self.guard.release(peer_ip)
+
+        log.debug(f"Partyline disconnect complete: {session_id}")
 
     async def on_dcc_chat_request(self, event: Dict[str, Any]):
         """Route DCC CHAT CTCP from irc.py → DCCManager."""

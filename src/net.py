@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger("wbs.net")
+PER_IP_MAX = 3
 
 @dataclass
 class _BlockEntry:
@@ -96,6 +97,11 @@ class AccessGuard:
         """
         if not self._loaded:
             await self.load()
+
+        ip_count = self._active.get(ip, 0)
+        if ip_count >= PER_IP_MAX:
+            log.warning(f"AccessGuard: DENY {ip} — per-IP limit ({PER_IP_MAX})")
+            return False, "Too many connections from your IP"
 
         if sum(self._active.values()) >= self.max_connections:
             return False, "Connection limit reached"
