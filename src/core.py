@@ -1026,18 +1026,32 @@ class Core:
 
     async def do_restart(self) -> None:
         """
-        Full restart: Core tells IRC to respawn it, then exits cleanly.
-        IRC stays connected throughout.
+        Full restart: send IRC QUIT, tear down children, re-exec.
         Requires: 'n' flag (owner).
         """
-        log.info("[Core] Restarting — notifying IRC, then exiting")
+        log.info("[Core] Restarting...")
         self.partyline.broadcast("*** Restarting...")
+
         try:
-            self.irc_q.put_nowait({'cmd': 'spawn_core_after_exit', 'delay': 2.0})
+            self.irc_q.put_nowait({
+                'cmd': 'quit',
+                'message': 'Restarting'
+            })
         except Exception as e:
-            log.error(f"Failed to notify IRC of restart: {e}")
+            log.warning(f"[Core] Could not send IRC QUIT: {e}")
+
+        await asyncio.sleep(2.0)
+
+        # Terminate child processes
+        for child in self.children:
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=3.0)
+                if child.is_alive():
+                    child.kill()
+
         await self._pre_exec_cleanup()
-        sys.exit(0)
+        os.execv(sys.executable, sys.argv)
 
     async def _pre_exec_cleanup(self) -> None:
         """Flush state before re-exec or exit."""
