@@ -886,7 +886,7 @@ class Core:
         
         # Update core's IRC state
         self.connected = irc_data.get('connected', False)
-        self.botname = irc_data.get('botname')
+        self.botname = irc_data.get('botname') or self.botname
         
         # Update channel objects
         channels_data = irc_data.get('channels', {})
@@ -1042,14 +1042,12 @@ class Core:
     async def _pre_exec_cleanup(self) -> None:
         """Flush state before re-exec or exit."""
         self.running = False
-        # Cancel all plugin tasks
         for name, task in list(self.timers.items()):
             task.cancel()
         self.timers.clear()
-        # Give aiosqlite a moment to flush
         try:
-            db = await get_db(self.db_path)
-            await db.close()
+            async with get_db(self.db_path) as db:
+                pass
         except Exception:
             pass
         await asyncio.sleep(0.3)
