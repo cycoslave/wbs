@@ -7,6 +7,9 @@ import sys
 import os
 import termios
 import logging
+from pathlib import Path
+
+from .db import get_db
 
 log = logging.getLogger("wbs.helper")
 
@@ -138,3 +141,12 @@ async def _list_loadables(core, respond, manager_attr: str, config_key: str, src
         f"On disk ({len(avail)}): {avail or 'none'}\n"
         f"Available to load: {not_loaded or 'none'}"
     )    
+
+def _botnet_sync(core, sync_method: str, op: str, payload: dict) -> None:
+    """Fire-and-forget a botnet sync task if botnet is active."""
+    if hasattr(core, "botnet"):
+        fn = getattr(core.botnet, sync_method, None)
+        if fn:
+            asyncio.create_task(fn(op, payload))
+        else:
+            log.warning("_botnet_sync: no method %r on botnet", sync_method)    

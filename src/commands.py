@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 from . import __version__
 from .db import get_db
-from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables
+from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables, _botnet_sync
 
 log = logging.getLogger("wbs.commands")
 
@@ -999,10 +999,7 @@ async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
         core.irc_q.put_nowait({'cmd': 'join', 'channel': channel})
         subnet_label = subnet_arg or f"subnet {subnet_id}"
         await respond(f"→ Channel {channel} added (scope: {subnet_label})!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_channel("ADD", {
-                "name": channel, "subnet_id": subnet_id
-            }))
+        _botnet_sync(core, "sync_channel", "ADD", {"name": channel, "subnet_id": subnet_id})
     except ValueError as e:
         await respond(f"→ {e}")
     except Exception as e:
@@ -1018,8 +1015,7 @@ async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
     if await core.chan.delchan(channel, deleted_by=handle):
         core.irc_q.put_nowait({'cmd': 'part', 'channel': channel})
         await respond(f"→ Channel {channel} deleted!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_channel("DEL", {"name": channel}))
+        _botnet_sync(core, "sync_channel", "DEL", {"name": channel})
     else:
         await respond(f"→ Channel {channel} not found or already deleted.")
 
@@ -1052,12 +1048,7 @@ async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     if await core.user.adduser(new_handle, hostmask, subnet_id=subnet_id, created_by=handle):
         scope = subnet_arg or f"subnet {subnet_id}"
         await respond(f"→ User {new_handle} added (scope: {scope})!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_user("ADD", {
-                "handle": new_handle,
-                "hostmask": hostmask,
-                "subnet_id": subnet_id,
-            }))
+        _botnet_sync(core, "sync_user", "ADD", {"handle": new_handle, "hostmask": hostmask, "subnet_id": subnet_id})
     else:
         await respond(f"→ User {new_handle} NOT added (already exists?).")
 
@@ -1069,8 +1060,7 @@ async def cmd_deluser(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split()
     if await core.user.deluser(parts[0], deleted_by=handle):
         await respond(f"→ User {parts[0]} deleted!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_user("DEL", {"handle": parts[0]}))
+        _botnet_sync(core, "sync_user", "DEL", {"handle": parts[0]})
     else:
         await respond(f"→ User {parts[0]} NOT deleted (not found?).")
 
@@ -1149,13 +1139,7 @@ async def cmd_addbot(core, handle: str, session_id: int, arg: str, respond):
     ok = await core.bot.addbot(bot, hostmask, address, port)
     if ok:
         await respond(f"→ Bot {bot} added!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_bot("ADD", {
-                "handle": bot,
-                "hostmask": hostmask,
-                "address": address,
-                "port": port,
-            }))
+        _botnet_sync(core, "sync_bot", "ADD", {"handle": bot, "hostmask": hostmask, "address": address, "port": port})
     else:
         await respond(f"→ Bot {bot} NOT added!")
 
@@ -1166,8 +1150,7 @@ async def cmd_delbot(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split()
     if await core.bot.delbot(parts[0]):
         await respond(f"→ Bot {parts[0]} deleted!")
-        if hasattr(core, 'botnet'):
-            asyncio.create_task(core.botnet.sync_bot("DEL", {"handle": parts[0]}))
+        _botnet_sync(core, "sync_bot", "DEL", {"handle": parts[0]})
     else:
         await respond(f"→ Bot {parts[0]} NOT deleted!")
 
