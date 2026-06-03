@@ -1455,7 +1455,7 @@ async def cmd_status(core, handle: str, session_id: int, arg: str, respond):
     users = len(core.partyline.sessions)
     channels = await core.chan.getchans()
     
-    await respond(f"I am {core.botname}, running wbs v0.1: {users} users (mem: {mem_kb:.0f}k).")
+    await respond(f"I am {core.botname}, running WBS {__version__}: {users} users (mem: {mem_kb:.0f}k).")
     await respond(f"Online for {days} days, {hours:02d}:{int((uptime%3600)//60):02d} "
                   f"(background) - CPU: --:--.-- - Cache hit: --%")
     await respond(f"Config file: {core.config_path}")
