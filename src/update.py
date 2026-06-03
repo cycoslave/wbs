@@ -578,3 +578,62 @@ class UpdateManager:
                 "Remote manifest has unparseable version: %r", manifest.version_str
             )
             return False
+        
+async def run_standalone_update(config: dict) -> int:
+    """
+    Standalone CLI entry point for --update.
+
+    Checks for a newer release and, if found, performs the full update.
+    Intended to be called from the wbs launcher outside of a running bot.
+
+    Returns:
+        0  -- already up to date, or update applied successfully
+        1  -- update available but install failed
+        2  -- configuration error (auhost not set)
+        3  -- unexpected error
+    """
+    update_cfg = config.get("update", {})
+    if not update_cfg.get("host", "").strip():
+        print(
+            "[wbs-update] ERROR: update.host is not configured in config.json.\n"
+            "             Set 'update': {'host': 'https://your-update-server'} first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    mgr = UpdateManager(config)
+
+    try:
+        print(f"[wbs-update] Current version: {__version__}")
+        print("[wbs-update] Checking for updates...")
+
+        manifest = await mgr.check_update()
+
+        if manifest is None:
+            print("[wbs-update] Already up to date.")
+            return 0
+
+        print(
+            f"[wbs-update] Update available: {__version__} → {manifest.version_str}"
+            f"  (by {manifest.author}, dated {manifest.date})"
+        )
+
+        ok = await mgr.perform_update(manifest)
+        if ok:
+            print(
+                f"[wbs-update] ✓ Updated to {manifest.version_str}. "
+                "Restart wbs to load the new code."
+            )
+            return 0
+        else:
+            print(
+                "[wbs-update] ✗ Update failed. Previous version preserved. "
+                "Check logs for details.",
+                file=sys.stderr,
+            )
+            return 1
+
+    except Exception as exc:
+        print(f"[wbs-update] Unexpected error: {exc}", file=sys.stderr)
+        log.exception("run_standalone_update: unhandled exception")
+        return 3        

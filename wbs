@@ -38,6 +38,9 @@ def parse_args():
     parser.add_argument("-s", "--seed", action="store_true",
                         help="Initialize the database and seed from config.json, then exit. "
                             "Must be run once before first launch.")
+    parser.add_argument("-u", "--update", action="store_true",
+                        help="Check for a newer WBS release and install it if available, then exit. "
+                            "The bot does not need to be running. Requires update.host in config.json.")
     parser.add_argument("--pidfile", default=None,
                         help="Override pid file path (default: from config settings.pid_file)")
     parser.add_argument("--logfile", default=None,
@@ -122,6 +125,10 @@ def main():
     settings = config.get('settings', {})
     pidfile  = args.pidfile or settings.get('pid_file', 'wbs.pid')
     logfile  = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
+
+    if args.update:
+        from src.update import run_standalone_update
+        sys.exit(asyncio.run(run_standalone_update(config)))
 
     if args.seed:
         from src.db import init_db, seed_db
