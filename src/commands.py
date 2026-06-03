@@ -798,6 +798,13 @@ ERROR: Unknown command: {cmd}
     for line in help_text.split('\n'):
         await respond(line)
 
+async def _require_flag(core, handle: str, flag: str, respond) -> bool:
+    """Return True if handle has the required flag; respond+return False otherwise."""
+    if not await core.user.matchattr(handle, flag):
+        await respond(f"Access denied (need {flag}).")
+        return False
+    return True
+
 async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"WBS {__version__}")
 
@@ -830,84 +837,42 @@ async def cmd_uptime(core, handle, session_id, arg, respond):
     return
 
 async def cmd_mode(core, handle, session_id, arg, respond):
-    """Change channel modes (.mode #chan +o nick)."""
-    if core.config.get('limbo_hub'):
+    """Set channel modes. Requires +o on that channel."""
+    if core.config.get("limbo_hub"):
         return await respond("Cannot use MODE as limbo hub.")
-    
     parts = arg.split(maxsplit=1)
     if len(parts) < 2:
         return await respond("Usage: .mode <#channel> <modes>")
-    
     chan, modes = parts
-    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
+    if not await _require_flag(core, handle, "+o", respond):
+        return
+    core.irc_q.put_nowait({"cmd": "mode", "channel": chan, "modes": modes})
     await respond(f"Mode set: {chan} {modes}")
-    #user = UserManager()
-    #
-    #if await user.matchattr(hand, 'o|o', chan):
-    #    # Queue IRC command
-    #    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-    #    await respond(f"Mode set: {chan} {modes}")
-    #else:
-    #    await respond("Access denied (need +o)")
-    return 1
+
+async def _chan_mode_cmd(core, handle, arg, respond, mode_str: str, label: str, msg: str):
+    """Shared implementation for op/deop/voice/devoice."""
+    if core.config.get("limbo_hub"):
+        return await respond("Cannot use this command as limbo hub.")
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond(f"Usage: .{label} <nick> <#channel>")
+    nick, chan = parts[0], parts[1]
+    if not await _require_flag(core, handle, "+o", respond):
+        return
+    core.irc_q.put_nowait({"cmd": "mode", "channel": chan, "modes": f"{mode_str} {nick}"})
+    await respond(f"{msg} {nick} on {chan}")
 
 async def cmd_op(core, handle, session_id, arg, respond):
-    """Change channel modes (.mode #chan +o nick)."""
-    #if core.config.get('limbo_hub'):
-    #    return await respond("Cannot use MODE as limbo hub.")
-    
-    parts = arg.split()
-    if len(parts) < 2:
-        return await respond("Usage: .op <nick> <#channel>")
-    
-    nick, chan = parts
-    modes = f"+o {nick}"
-    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-    await respond(f"Gave op to {nick} on {chan}")
-    return 1
+    await _chan_mode_cmd(core, handle, arg, respond, "+o", "op", "Gave op to")
 
 async def cmd_deop(core, handle, session_id, arg, respond):
-    """Change channel modes (.mode #chan +o nick)."""
-    #if core.config.get('limbo_hub'):
-    #    return await respond("Cannot use MODE as limbo hub.")
-    
-    parts = arg.split()
-    if len(parts) < 2:
-        return await respond("Usage: .deop <nick> <#channel>")
-    
-    nick, chan = parts
-    modes = f"-o {nick}"
-    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-    await respond(f"Took op from {nick} on {chan}")
-    return 1
+    await _chan_mode_cmd(core, handle, arg, respond, "-o", "deop", "Took op from")
 
 async def cmd_voice(core, handle, session_id, arg, respond):
-    #if core.config.get('limbo_hub'):
-    #    return await respond("Cannot use MODE as limbo hub.")
-    
-    parts = arg.split()
-    if len(parts) < 2:
-        return await respond("Usage: .voice <nick> <#channel>")
-    
-    nick, chan = parts
-    modes = f"+v {nick}"
-    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-    await respond(f"Gave voice to {nick} on {chan}")
-    return 1
+    await _chan_mode_cmd(core, handle, arg, respond, "+v", "voice", "Gave voice to")
 
 async def cmd_devoice(core, handle, session_id, arg, respond):
-    #if core.config.get('limbo_hub'):
-    #    return await respond("Cannot use MODE as limbo hub.")
-    
-    parts = arg.split()
-    if len(parts) < 2:
-        return await respond("Usage: .devoice <nick> <#channel>")
-    
-    nick, chan = parts
-    modes = f"-v {nick}"
-    core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': modes})
-    await respond(f"Took voice from {nick} on {chan}")
-    return 1
+    await _chan_mode_cmd(core, handle, arg, respond, "-v", "devoice", "Took voice from")
 
 async def cmd_channels(core, handle: str, session_id: int, arg: str, respond):
     async with get_db(core.db_path) as db:
