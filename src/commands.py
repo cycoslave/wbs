@@ -1581,26 +1581,24 @@ async def cmd_status(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Active channels: {', '.join(channels) if channels else 'none'}")
 
 async def cmd_backup(core, handle: str, session_id: int, arg: str, respond):
+    if not await _require_flag(core, handle, "+A", respond):
+        return
     await respond("Backing up the channel & user files...")
-    db_path = core.db_path  # "db/wbs.db"
-    config_path = core.config_path    # "config.json"
-    
-    # Backup DB file
-    await respond("Backing up user file...")
-    db_backup = f"{db_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
-    shutil.copy2(db_path, db_backup)
-    await respond(f"Database file backed up to {os.path.basename(db_backup)}")
-    
-    # Backup config
-    await respond("Backing up channel file...")
-    config_backup = f"{config_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
-    shutil.copy2(config_path, config_backup)
-    await respond(f"Config file backed up to {os.path.basename(config_backup)}")
-    
-    await respond("Backup complete.")
+    db_path = core.db_path
+    config_path = core.config_path
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-async def cmd_module(core, handle: str, session_id: int, arg: str, respond):
-    await respond("Modules not enabled yet.")
+    await respond("Backing up database...")
+    db_backup = f"{db_path}.{ts}.bak"
+    shutil.copy2(db_path, db_backup)
+    await respond(f"Database backed up to {os.path.basename(db_backup)}")
+
+    await respond("Backing up config...")
+    config_backup = f"{config_path}.{ts}.bak"
+    shutil.copy2(config_path, config_backup)
+    await respond(f"Config backed up to {os.path.basename(config_backup)}")
+
+    await respond("Backup complete.")
 
 async def cmd_ignores(core, handle: str, session_id: int, arg: str, respond):
     async with get_db(core.db_path) as db:
@@ -2753,7 +2751,6 @@ COMMANDS = {
     'die': cmd_quit,
     'status': cmd_status,
     'backup': cmd_backup,
-    'module': cmd_module,
     'chattr':       cmd_chattr,
     'relay':        cmd_relay,
     'mass':         cmd_mass,
