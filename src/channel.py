@@ -701,3 +701,17 @@ class ChannelManager:
                 (subnet_id,),
             )
         return [row["name"] for row in rows]    
+    
+    async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
+        """
+        Delete a channel record received via botnet UPDATE CHANNEL DEL.
+        payload must contain at least {'name': <str>}.
+        """
+        name = payload.get("name", "").strip().lower()
+        if not name:
+            log.warning("delete_from_peer: missing name in payload from %s", from_bot)
+            return
+        async with get_db(self.db_path) as db:
+            await db.execute("DELETE FROM channels WHERE name = ?", (name,))
+            await db.execute("DELETE FROM channel_subnets WHERE channel_name = ?", (name,))
+        log.info("ChannelManager.delete_from_peer: deleted channel '%s' from %s", name, from_bot)    

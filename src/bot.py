@@ -549,4 +549,18 @@ class BotManager:
         async with get_db(self.db_path) as db:
             cursor = await db.execute("SELECT * FROM bot_access")
             rows = await cursor.fetchall()
-        return [dict(row) for row in rows]    
+        return [dict(row) for row in rows]
+    
+    async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
+        """
+        Delete a bot record received via botnet UPDATE BOT DEL.
+        payload must contain at least {'handle': <str>}.
+        """
+        handle = payload.get("handle", "").strip().lower()
+        if not handle:
+            log.warning("delete_from_peer: missing handle in payload from %s", from_bot)
+            return
+        async with get_db(self.db_path) as db:
+            await db.execute("DELETE FROM bots WHERE handle = ?", (handle,))
+            await db.execute("DELETE FROM bot_access WHERE handle = ?", (handle,))
+        log.info("BotManager.delete_from_peer: deleted bot '%s' from %s", handle, from_bot)    

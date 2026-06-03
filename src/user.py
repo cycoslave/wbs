@@ -927,3 +927,17 @@ class UserManager:
             await db.commit()
 
         return "ok" if cur.rowcount > 0 else "no_access"    
+    
+    async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
+        """
+        Delete a user record received via botnet UPDATE USER DEL.
+        payload must contain at least {'handle': <str>}.
+        """
+        handle = payload.get("handle", "").strip().lower()
+        if not handle:
+            log.warning("delete_from_peer: missing handle in payload from %s", from_bot)
+            return
+        async with get_db(self.db_path) as db:
+            await db.execute("DELETE FROM users WHERE handle = ?", (handle,))
+            await db.execute("DELETE FROM user_access WHERE handle = ?", (handle,))
+        log.info("UserManager.delete_from_peer: deleted user '%s' from %s", handle, from_bot)
