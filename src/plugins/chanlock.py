@@ -46,7 +46,7 @@ class limitPlugin(Plugin):
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit() 
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
             'name': 'limit',
             'interval': 300
@@ -55,7 +55,7 @@ class limitPlugin(Plugin):
     
     async def unload(self):
         """Unload plugin and unregister timers"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'limit'
         })
@@ -94,7 +94,7 @@ class limitPlugin(Plugin):
                 continue
 
             self.log.info(f"Setting limit on {chan} from {current_limit} to {newlimit}")
-            self.core.irc_q.put_nowait({
+            self.core.send_irc({
                 'cmd': 'mode',
                 'channel': chan,
                 'modes': f"+l {newlimit}"
