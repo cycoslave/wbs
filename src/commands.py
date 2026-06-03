@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 from . import __version__
 from .db import get_db
-from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables, _botnet_sync
+from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables, _botnet_sync, _modify_hostmask
 
 log = logging.getLogger("wbs.commands")
 
@@ -1469,34 +1469,16 @@ async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"User not found: {old_handle}")
 
 async def cmd_addhost(core, handle: str, session_id: int, arg: str, respond):
-    """.+host <hostmask> — add a hostmask to your user record."""
     if not arg:
-        await respond("Usage: .+host <hostmask>  (e.g. *!you@*.example.com)")
+        await respond("Usage: .+host <hostmask>")
         return
-    hostmask = arg.strip()
-    result = await core.user.addhost(handle, hostmask, updated_by=handle)
-    messages = {
-        "ok":        f"Added host: {hostmask}",
-        "duplicate": f"Host already listed: {hostmask}",
-        "not_found": f"User not found: {handle}",
-        "invalid":   "Invalid hostmask format. Use: nick!user@host  (wildcards OK, e.g. *!user@*.example.com)",
-    }
-    await respond(messages.get(result, f"Unexpected error: {result}"))
+    await _modify_hostmask(core, handle, arg.strip(), add=True, respond=respond)
 
 async def cmd_delhost(core, handle: str, session_id: int, arg: str, respond):
-    """.-host <hostmask> — remove a hostmask from your user record."""
     if not arg:
         await respond("Usage: .-host <hostmask>")
         return
-    hostmask = arg.strip()
-    result = await core.user.delhost(handle, hostmask, updated_by=handle)
-    messages = {
-        "ok":           f"Removed host: {hostmask}",
-        "no_such_host": f"Host not found: {hostmask}",
-        "not_found":    f"User not found: {handle}",
-        "invalid":      "Invalid hostmask format. Use: nick!user@host",
-    }
-    await respond(messages.get(result, f"Unexpected error: {result}"))
+    await _modify_hostmask(core, handle, arg.strip(), add=False, respond=respond)
      
 async def cmd_status(core, handle: str, session_id: int, arg: str, respond):
     uptime = time.time() - core.start_time

@@ -149,4 +149,28 @@ def _botnet_sync(core, sync_method: str, op: str, payload: dict) -> None:
         if fn:
             asyncio.create_task(fn(op, payload))
         else:
-            log.warning("_botnet_sync: no method %r on botnet", sync_method)    
+            log.warning("_botnet_sync: no method %r on botnet", sync_method)
+
+async def _modify_hostmask(core, handle: str, hostmask: str, add: bool, respond) -> None:
+    if "!" not in hostmask or "@" not in hostmask:
+        await respond("Invalid hostmask format. Use: nick!user@host")
+        return
+    user = core.user.get(handle)
+    if not user:
+        await respond("User not found.")
+        return
+    hosts: list[str] = user.hostmasks
+    if add:
+        if hostmask in hosts:
+            await respond(f"Host already exists: {hostmask}")
+            return
+        hosts.append(hostmask)
+        await core.user.save_user(user)
+        await respond(f"Added host: {hostmask}")
+    else:
+        if hostmask not in hosts:
+            await respond(f"Host not found: {hostmask}")
+            return
+        hosts.remove(hostmask)
+        await core.user.save_user(user)
+        await respond(f"Removed host: {hostmask}")        
