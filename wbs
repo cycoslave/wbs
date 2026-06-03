@@ -18,7 +18,6 @@ from multiprocessing import Process, Queue
 from multiprocessing.connection import wait as mp_wait
 
 from src import __version__
-from src.core import Core
 from src.irc import irc_process_launcher
 from src.core import core_process_launcher 
 
