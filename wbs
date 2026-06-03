@@ -196,10 +196,10 @@ def main():
 
     EXIT_OK = 42
 
-    def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
+    def _spawn_core(config, config_path, args, core_q, irc_q, sup_q) -> Process:
         p = Process(
             target=core_process_launcher,
-            args=(config, config_path, args, core_q, irc_q),
+            args=(config, config_path, args, core_q, irc_q, sup_q),
             daemon=True,
             name="Core"
         )
@@ -218,13 +218,14 @@ def main():
 
     core_q = Queue()
     irc_q  = Queue()
+    sup_q = Queue()
     if args.foreground:
         try:
             config['_tty_fd'] = os.dup(sys.stdin.fileno())
         except Exception:
             config['_tty_fd'] = None
 
-    core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
+    core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q, sup_q)
     irc_proc  = _spawn_irc(config, core_q, irc_q)
 
     procs = {"core": core_proc, "irc": irc_proc}
@@ -256,6 +257,20 @@ def main():
         while True:
             ready = mp_wait(list(sentinels.keys()), timeout=30.0)
 
+            while not sup_q.empty():
+                try:
+                    msg = sup_q.get_nowait()
+                    cmd = msg.get('cmd')
+                    if cmd == 'quit':
+                        log.info(f"Core requested quit: {msg.get('message', '')}")
+                        _shutdown()
+                    elif cmd == 'restart':
+                        log.info("Core requested restart — respawning")
+                        # handle restart (existing logic)
+                    # future: 'rehash', 'alert', etc.
+                except Exception:
+                    pass            
+
             for s in ready:
                 name, proc = sentinels.pop(s)
                 code = proc.exitcode
@@ -270,7 +285,7 @@ def main():
                         _shutdown()
                     else:
                         log.info(f"Relaunching Core (exit code={code})...")
-                        core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q)
+                        core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q, sup_q)
                         procs["core"] = core_proc
                         sentinels[core_proc.sentinel] = ("core", core_proc)
 

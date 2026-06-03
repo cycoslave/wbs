@@ -40,7 +40,7 @@ CLEAN_EXIT_CODE = 42
 class Core:
     """Main process: Core event loop + child process manager."""
     
-    def __init__(self, config: dict, config_path: str, args, core_q=None, irc_q=None):
+    def __init__(self, config: dict, config_path: str, args, core_q=None, irc_q=None, sup_q=None):
         self.config      = config
         self.config_path = config_path
         self.db_path = self.config.get('db', {}).get('path', 'db/wbs.db')
@@ -49,6 +49,7 @@ class Core:
             self.config['db']['path'] = db_path_override
         self.core_q = core_q if core_q is not None else mp.Queue()
         self.irc_q  = irc_q  if irc_q  is not None else mp.Queue()
+        self.sup_q  = sup_q
         self._event_buffer = deque()
         self._buffer_lock = threading.Lock()
         self.quit_event = mp.Event()
@@ -412,10 +413,15 @@ class Core:
             sys.exit(0)
 
     async def _shutdown(self, message):
-        if self.quit_event.is_set():
-            return
         self.running = False
         self.quit_event.set()
+        if self.sup_q is not None:
+            try:
+                self.sup_q.put_nowait({'cmd': 'quit', 'message': message})
+            except Exception:
+                pass
+            if self.quit_event.is_set():
+                return
         log.info(f"Shutdown: {message}")
         try:
             self.send_irc({'cmd': 'quit', 'message': message})
@@ -1078,7 +1084,7 @@ class Core:
 
         return last_periodic
 
-def core_process_launcher(config, config_path, args, core_q, irc_q):
+def core_process_launcher(config, config_path, args, core_q, irc_q, sup_q):
     """Entry point for Core as a supervised child process."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -1090,5 +1096,5 @@ def core_process_launcher(config, config_path, args, core_q, irc_q):
         except Exception as e:
             log.warning(f"Could not restore TTY fd {tty_fd}: {e}")
 
-    core = Core(config=config, config_path=config_path, args=args, core_q=core_q, irc_q=irc_q)
+    core = Core(config=config, config_path=config_path, args=args, core_q=core_q, irc_q=irc_q, sup_q=sup_q)
     asyncio.run(core.run(foreground=getattr(args, 'foreground', False)))
