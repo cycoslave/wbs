@@ -926,7 +926,8 @@ async def cmd_act(core, handle, session_id, arg, respond):
 
 async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> None:
     """
-    .bots — List all known bots: self, linked (with roles), and unlinked.
+    .bots — List all known bots: self, linked (with roles), unlinked, and
+    indirect (topology-aware bots known via relay but not in the DB).
     Mirrors WBS5 dwckbots layout.
     """
     my_name = core.botname
@@ -934,12 +935,15 @@ async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> Non
         rows = await db.execute_fetchall(
             "SELECT handle, role FROM bots WHERE deleted_at IS NULL ORDER BY handle"
         )
-    linked_names: set[str] = set(core.botnet.peers.keys()) if hasattr(core, 'botnet') else set()
+
+    linked_names: set[str] = set(core.botnet.peers.keys()) if hasattr(core, "botnet") else set()
+
     def role_tag(role: str | None) -> str:
         r = (role or "").lower()
-        if r == "hub":   return " (hub)"
-        if r == "leaf":  return " (leaf)"
+        if r == "hub":  return " (hub)"
+        if r == "leaf": return " (leaf)"
         return ""
+
     linked_count   = 1  # self counts as linked
     unlinked_count = 0
 
@@ -948,30 +952,33 @@ async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> Non
     await respond(f"-> {my_name} (me!)")
     for row in rows:
         bname = row["handle"]
-        role  = role_tag(row["role"])
         if bname.lower() == my_name.lower():
-            continue  # already printed as (me!)
+            continue
         if bname in linked_names:
-            await respond(f"-> {bname}{role}")
+            await respond(f"-> {bname}{role_tag(row['role'])}")
             linked_count += 1
 
-    indirect = {}
-    if hasattr(core, 'botnet') and hasattr(core.botnet, 'topology'):
+    indirect: dict[str, str] = {}
+    if hasattr(core, "botnet") and hasattr(core.botnet, "topology"):
         known_handles = {row["handle"].lower() for row in rows}
         known_handles.add(my_name.lower())
-        for handle, via in core.botnet.topology.items():
-            if handle.lower() not in known_handles:
-                indirect[handle] = via
+        for bname, via in core.botnet.topology.items():
+            if bname.lower() not in known_handles:
+                indirect[bname] = via
+
+    if indirect:
+        #await respond(" ---Indirect (via relay):---")
+        for bname, via in sorted(indirect.items()):
+            await respond(f"-> {bname} (via {via})")
 
     await respond(" ---Unlinked:---")
     unlinked_lines = []
     for row in rows:
         bname = row["handle"]
-        role  = role_tag(row["role"])
         if bname.lower() == my_name.lower():
             continue
         if bname not in linked_names:
-            unlinked_lines.append(f"-> {bname}{role}")
+            unlinked_lines.append(f"-> {bname}{role_tag(row['role'])}")
             unlinked_count += 1
 
     if unlinked_lines:
@@ -980,8 +987,14 @@ async def cmd_bots(core, handle: str, session_id: int, arg: str, respond) -> Non
     else:
         await respond("-> (none)")
 
-    total = linked_count + unlinked_count
-    await respond(f"Linked: {linked_count}  Unlinked: {unlinked_count}  -- TOTAL BOTS: {total}")
+    indirect_count = len(indirect)
+    total = linked_count + unlinked_count + indirect_count
+    total_linked = linked_count + indirect_count
+    parts = [f"Linked: {total_linked}", f"Unlinked: {unlinked_count}"]
+    #if indirect_count:
+    #    parts.append(f"Indirect: {indirect_count}")
+    parts.append(f"-- TOTAL BOTS: {total}")
+    await respond("  ".join(parts))
 
 async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
     """
@@ -1196,7 +1209,7 @@ async def cmd_delbot(core, handle: str, session_id: int, arg: str, respond):
         await respond("Usage: .-bot <bot>")
         return
     parts = arg.split()
-    if await core.bot.delbot(parts[0]) == True:
+    if await core.bot.delbot(parts[0]):
         await respond(f"→ Bot {parts[0]} deleted!")
         if hasattr(core, 'botnet'):
             asyncio.create_task(core.botnet.sync_bot("DEL", {"handle": parts[0]}))
