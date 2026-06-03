@@ -89,7 +89,6 @@ class BotManager:
         async with get_db(self.db_path) as db:
             cursor = await db.execute(
                 "UPDATE bots SET password = ? WHERE handle = ?",
-                #               ^^^^  correct table
                 (hashed, handle)
             )
             await db.commit()
@@ -116,7 +115,6 @@ class BotManager:
         Returns False if the bot or access record doesn't exist,
         or if any unrecognised flag character is present.
         """
-        columns = [_FLAG_MAP[c] for c in flag_chars]
         if not flags:
             return False
 
@@ -130,6 +128,7 @@ class BotManager:
 
         if not flag_chars:
             return False
+        columns = [_FLAG_MAP[c] for c in flag_chars]
 
         # Validate all chars are known before hitting the DB
         unknown = [c for c in flag_chars if c not in _FLAG_MAP]
