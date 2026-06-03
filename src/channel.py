@@ -533,7 +533,7 @@ class ChannelManager:
                     if await cur.fetchone():
                         for sid in ch.get('subnet_ids', []):
                             sub_check = await db.execute(
-                                "SELECT 1 FROM botnet_subnets WHERE id = ?", (sid,)
+                                "SELECT 1 FROM subnets WHERE id = ?", (sid,)
                             )
                             if await sub_check.fetchone():
                                 await db.execute(
@@ -592,7 +592,7 @@ class ChannelManager:
                     if await cur.fetchone():
                         for sid in ch.get('subnet_ids', []):
                             sub_check = await db.execute(
-                                "SELECT 1 FROM botnet_subnets WHERE id = ?", (sid,)
+                                "SELECT 1 FROM subnets WHERE id = ?", (sid,)
                             )
                             if await sub_check.fetchone():
                                 await db.execute(
