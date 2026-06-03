@@ -241,8 +241,7 @@ def main():
                 if proc.is_alive():
                     log.warning(f"{name} did not terminate, sending SIGKILL")
                     proc.kill()
-        if not args.foreground:
-            remove_pidfile(pidfile)
+        remove_pidfile(pidfile)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -305,8 +304,7 @@ def main():
                         sentinels[irc_proc.sentinel] = ("irc", irc_proc)
 
     finally:
-        if not args.foreground:
-            remove_pidfile(pidfile)
+        remove_pidfile(pidfile)
 
 if __name__ == '__main__':
     main()
