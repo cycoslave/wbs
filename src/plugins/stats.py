@@ -68,7 +68,7 @@ class statsPlugin(Plugin):
                 )
             await db.commit()
 
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
             'name': 'stats_cleanup',
             'interval': 3600
@@ -77,7 +77,7 @@ class statsPlugin(Plugin):
 
     async def unload(self):
         """Unregister timer and drop plugin tables."""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'stats_cleanup'
         })

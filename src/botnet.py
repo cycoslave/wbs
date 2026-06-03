@@ -409,7 +409,7 @@ class BotnetManager:
             link.connected_at = datetime.now(timezone.utc)
             self.subnet.register_peer(from_bot, link.subnet_id)
             self.core.bot_sessions[from_bot.lower()] = link
-            self.core.irc_q.put({
+            self.core.send_irc({
                 'type': 'BOTLINK_LINK',
                 'handle': link.name,
                 'nick': link.name
@@ -439,7 +439,7 @@ class BotnetManager:
             self.subnet.register_peer(from_bot, link.subnet_id)
             self.core.bot_sessions[from_bot.lower()] = link
             link.connected_at = datetime.now(timezone.utc)
-            self.core.irc_q.put({
+            self.core.send_irc({
                 'type': 'BOTLINK_LINK',
                 'handle': link.name,
                 'nick': link.name

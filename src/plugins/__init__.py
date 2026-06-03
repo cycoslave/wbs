@@ -59,7 +59,7 @@ class Plugin:
     # Helper methods for IRC communication
     async def send_privmsg(self, target, message):
         """Send message to channel/user"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'msg',
             'target': target,
             'text': message
@@ -67,7 +67,7 @@ class Plugin:
     
     async def send_notice(self, target, message):
         """Send notice to user"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'notice',
             'target': target,
             'text': message
@@ -75,7 +75,7 @@ class Plugin:
     
     async def send_mode(self, channel, mode, target):
         """Send mode command"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'mode',
             'channel': channel,
             'mode': mode,

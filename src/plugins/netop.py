@@ -14,7 +14,7 @@ from ..botnet import BotCommand
 class netopPlugin(Plugin):
     name    = "netop"
     version = "0.1.2"
-    self.COOLDOWN = 10  # seconds
+    COOLDOWN = 10  # seconds
 
     def __init__(self, core):
         super().__init__(core) 
@@ -24,7 +24,7 @@ class netopPlugin(Plugin):
     async def load(self):
         """Initialize plugin and register timers"""
         await super().load()
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
             'name': 'netop',
             'interval': 30  # Frequent op checks
@@ -35,7 +35,7 @@ class netopPlugin(Plugin):
     
     async def unload(self):
         """Unload plugin and unregister timers"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'netop'
         })
@@ -153,7 +153,7 @@ class netopPlugin(Plugin):
 
         try:
             if not self.core.nick_isop(target, channel) and self.core.bot_isop(channel):
-                self.core.irc_q.put_nowait({
+                self.core.send_irc({
                     'cmd': 'mode',
                     'channel': channel,
                     'modes': f"+o {target}"
@@ -188,6 +188,6 @@ class netopPlugin(Plugin):
                 continue
             last_opped = self.reqop.get((chan, nick), 0)
             if now - last_opped > self.COOLDOWN:
-                self.core.irc_q.put_nowait({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
+                self.core.send_irc({'cmd': 'mode', 'channel': chan, 'modes': f'+o {nick}'})
                 self.reqop[(chan, nick)] = now
                 self.log.debug(f"Opping peer {nick} on {chan}.")

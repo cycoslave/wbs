@@ -174,7 +174,7 @@ class Game:
 
     async def send_privmsg(self, target, message):
         """Send message to channel/user"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'msg',
             'target': target,
             'text': message
@@ -182,7 +182,7 @@ class Game:
     
     async def send_notice(self, target, message):
         """Send notice to user"""
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'notice',
             'target': target,
             'text': message

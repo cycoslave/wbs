@@ -812,7 +812,7 @@ class Core:
         linked_bots = {}
         for link in botnet_peers.values():
             linked_bots[link.name] = link.nick
-        self.irc_q.put({'cmd': 'UPDATE_BOTLINK', 'botlinks': linked_bots})
+        self.send_irc({'cmd': 'UPDATE_BOTLINK', 'botlinks': linked_bots})
 
     async def on_null(self, event: Dict[str, Any]):
         """Just do nothing."""
@@ -852,7 +852,7 @@ class Core:
             if not hasattr(self, '_last_lag_ping') or (now - self._last_lag_ping) >= 30.0:
                 self._lag_ping_sent = time.time() * 1000
                 self._last_lag_ping = now
-                self.irc_q.put_nowait({'cmd': 'ping', 'token': f'LAG{int(now)}'})
+                self.send_irc({'cmd': 'ping', 'token': f'LAG{int(now)}'})
 
         await self._check_irc_process()
 
@@ -1067,7 +1067,7 @@ class Core:
         self.partyline.broadcast("*** Restarting...")
 
         try:
-            self.irc_q.put_nowait({
+            self.send_irc({
                 'cmd': 'quit',
                 'message': 'Restarting'
             })

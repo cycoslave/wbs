@@ -32,7 +32,7 @@ class Plugin(Plugin):
         
         # Register IRC timer (runs in irc.py process)
         self.irc_timer_name = 'example_irc_timer'
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'REGISTER_TIMER',
             'name': self.irc_timer_name,
             'interval': 30,
@@ -47,7 +47,7 @@ class Plugin(Plugin):
             self.core.unregister_timer(self.core_timer_name)
         
         if self.irc_timer_name:
-            self.core.irc_q.put({
+            self.core.send_irc({
                 'cmd': 'UNREGISTER_TIMER',
                 'name': self.irc_timer_name
             })

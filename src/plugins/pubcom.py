@@ -529,7 +529,7 @@ class pubcomPlugin(Plugin):
         target = parts[0] if parts else nick
         reason = parts[1] if len(parts) > 1 else nick
         
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'KICK',
             'channel': channel,
             'nick': target,
@@ -550,7 +550,7 @@ class pubcomPlugin(Plugin):
         # Set ban mode
         # Kick user
         await self.send_mode(channel, '+b', f'*!*@{target}')
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'KICK',
             'channel': channel,
             'nick': target,
@@ -563,7 +563,7 @@ class pubcomPlugin(Plugin):
             await self.send_notice(nick, "You must identify first")
             return
         
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'MODE',
             'channel': channel,
             'modes': arg
@@ -594,7 +594,7 @@ class pubcomPlugin(Plugin):
             return
         
         await self.send_privmsg(channel, "Jumping server...")
-        self.core.irc_q.put({
+        self.core.send_irc({
             'cmd': 'JUMP',
             'server': arg if arg else None
         })

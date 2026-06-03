@@ -395,14 +395,14 @@ class DCCManager:
 
     async def _irc_ctcp(self, nick: str, message: str):
         """Send raw CTCP — bypass clean_message which strips \x01."""
-        self.core.irc_q.put_nowait({
+        self.core.send_irc({
             'cmd': 'raw',
             'line': f"PRIVMSG {nick} :{message}"
         })
 
     async def _irc_notice(self, nick: str, text: str):
         """Send a plain NOTICE to a nick."""
-        self.core.irc_q.put_nowait({'cmd': 'notice', 'target': nick, 'text': text})
+        self.core.send_irc({'cmd': 'notice', 'target': nick, 'text': text})
 
 class DCCIRCSession:
     """
@@ -425,7 +425,7 @@ class DCCIRCSession:
                 if msg:
                     text = msg.get('text', '')
                     if text:
-                        self.core.irc_q.put_nowait({
+                        self.core.send_irc({
                             'cmd': 'notice', 'target': self.nick, 'text': text
                         })
             except asyncio.TimeoutError:
