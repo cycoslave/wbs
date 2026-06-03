@@ -532,12 +532,21 @@ class ChannelManager:
                     )
                     if await cur.fetchone():
                         for sid in ch.get('subnet_ids', []):
-                            await db.execute(
-                                """INSERT OR IGNORE INTO channel_subnets
-                                (channel_name, subnet_id, created_by)
-                                VALUES (?, ?, ?)""",
-                                (name, sid, from_bot)
+                            sub_check = await db.execute(
+                                "SELECT 1 FROM botnet_subnets WHERE id = ?", (sid,)
                             )
+                            if await sub_check.fetchone():
+                                await db.execute(
+                                    """INSERT OR IGNORE INTO channel_subnets
+                                    (channel_name, subnet_id, created_by)
+                                    VALUES (?, ?, ?)""",
+                                    (name, sid, from_bot)
+                                )
+                            else:
+                                log.debug(
+                                    "merge_from_peer: skipping unknown subnet_id %s for channel %s from %s",
+                                    sid, name, from_bot
+                                )
 
                 else:
                     bans    = ch.get('bans', '[]')
@@ -582,12 +591,21 @@ class ChannelManager:
                     )
                     if await cur.fetchone():
                         for sid in ch.get('subnet_ids', []):
-                            await db.execute(
-                                """INSERT OR IGNORE INTO channel_subnets
-                                (channel_name, subnet_id, created_by)
-                                VALUES (?, ?, ?)""",
-                                (name, sid, from_bot)
+                            sub_check = await db.execute(
+                                "SELECT 1 FROM botnet_subnets WHERE id = ?", (sid,)
                             )
+                            if await sub_check.fetchone():
+                                await db.execute(
+                                    """INSERT OR IGNORE INTO channel_subnets
+                                    (channel_name, subnet_id, created_by)
+                                    VALUES (?, ?, ?)""",
+                                    (name, sid, from_bot)
+                                )
+                            else:
+                                log.debug(
+                                    "merge_from_peer: skipping unknown subnet_id %s for channel %s from %s",
+                                    sid, name, from_bot
+                                )
 
             await db.commit()
         log.info(f"ChannelManager.merge_from_peer: merged {len(channels)} channels from {from_bot}")
