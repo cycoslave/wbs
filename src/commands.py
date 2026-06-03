@@ -1219,43 +1219,51 @@ async def cmd_botinfo(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"> Python Ver.: {py_ver}")
 
 async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
+    if not await _require_flag(core, handle, "+n", respond):
+        return
     if not arg:
         await respond("Usage: .link <bot>")
         return
-    parts = arg.split()
-    botname = parts[0]
+    botname = arg.split()[0]
     try:
         bot = await core.bot.get(botname)
         if not bot.address:
-            await respond(f"Please set address on {botname}")
+            await respond(f"Please set address on {botname} first (.chaddr).")
+            return
         if not bot.port:
-            await respond(f"Please set port on {botname}")
+            await respond(f"Please set port on {botname} first (.chaddr).")
+            return
         await respond(f"Initiating link to {botname}...")
         await core.botnet.connect_peer(botname)
     except ValueError as e:
         log.debug("link cmd failed for %s: %s", botname, e)
-        await respond(f"Bot {botname} not found!") 
+        await respond(f"Bot {botname} not found!")
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
+    if not await _require_flag(core, handle, "+n", respond):
+        return
     if not arg:
         await respond("Usage: .unlink <bot>")
         return
     botname = arg.strip()
     if botname not in core.botnet.peers:
-        await respond(f"Not linked to {botname}")
+        await respond(f"Not linked to {botname}.")
         return
-    
     link = core.botnet.peers[botname]
     await respond(f"Unlinking from {botname}...")
     try:
         if link.writer:
             link.writer.close()
             await link.writer.wait_closed()
-        del core.botnet.peers[botname]
+        # Use botnet method if available to avoid concurrent dict mutation
+        if hasattr(core.botnet, "remove_peer"):
+            core.botnet.remove_peer(botname)
+        else:
+            core.botnet.peers.pop(botname, None)
         link.connected = False
         await respond(f"Unlinked from {botname} ({link.host}:{link.port}).")
     except Exception as e:
-        await respond(f"Unlink failed: {str(e)}")
+        await respond(f"Unlink failed: {e}")
 
 async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #if not arg:
@@ -1408,51 +1416,35 @@ async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"User not found: {old_handle}")
 
 async def cmd_addhost(core, handle: str, session_id: int, arg: str, respond):
+    """.+host <hostmask> — add a hostmask to your user record."""
     if not arg:
-        await respond("Usage: +host <user> <hostmask>")
+        await respond("Usage: .+host <hostmask>  (e.g. *!you@*.example.com)")
         return
-    
     hostmask = arg.strip()
-    if not hostmask.startswith('!') and '@' not in hostmask:
-        await respond("Invalid hostmask (use nick!user@host)")
-        return
-    user = core.user.get(handle)
-    if not user:
-        await respond("User not found.")
-        return
-    
-    hosts = user.hostmasks  # List[str]
-
-    if hostmask not in hosts:
-        hosts.append(hostmask)
-        core.userdb.save_user(user)
-        await respond(f"Added host: {hostmask}")
-    else:
-        await respond(f"Host already exists: {hostmask}")
+    result = await core.user.addhost(handle, hostmask, updated_by=handle)
+    messages = {
+        "ok":        f"Added host: {hostmask}",
+        "duplicate": f"Host already listed: {hostmask}",
+        "not_found": f"User not found: {handle}",
+        "invalid":   "Invalid hostmask format. Use: nick!user@host  (wildcards OK, e.g. *!user@*.example.com)",
+    }
+    await respond(messages.get(result, f"Unexpected error: {result}"))
 
 async def cmd_delhost(core, handle: str, session_id: int, arg: str, respond):
+    """.-host <hostmask> — remove a hostmask from your user record."""
     if not arg:
-        await respond("Usage: -host <user> <hostmask>")
+        await respond("Usage: .-host <hostmask>")
         return
-    
     hostmask = arg.strip()
-    if not hostmask.startswith('!') and '@' not in hostmask:
-        await respond("Invalid hostmask (use nick!user@host)")
-        return
-    user = core.user.get(handle)
-    if not user:
-        await respond("User not found.")
-        return
-    
-    hosts = user.hostmasks  # List[str]
-
-    if hostmask in hosts:
-        hosts.remove(hostmask)
-        core.userdb.save_user(user)
-        await respond(f"Removed host: {hostmask}")
-    else:
-        await respond(f"Host not found: {hostmask}")       
-
+    result = await core.user.delhost(handle, hostmask, updated_by=handle)
+    messages = {
+        "ok":           f"Removed host: {hostmask}",
+        "no_such_host": f"Host not found: {hostmask}",
+        "not_found":    f"User not found: {handle}",
+        "invalid":      "Invalid hostmask format. Use: nick!user@host",
+    }
+    await respond(messages.get(result, f"Unexpected error: {result}"))
+     
 async def cmd_status(core, handle: str, session_id: int, arg: str, respond):
     uptime = time.time() - core.start_time
     days = int(uptime // 86400)
@@ -1543,11 +1535,12 @@ async def cmd_delignore(core, handle: str, session_id: int, arg: str, respond):
             await respond(f"Not ignoring {hostmask}")
 
 async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
-    parts = arg.split()
-    if len(parts) < 2:
-        await respond("Usage: .chaddr <bot> <address> [port]")
+    if not await _require_flag(core, handle, "+n", respond):
         return
-    
+    parts = arg.split()
+    if len(parts) < 3:
+        await respond("Usage: .chaddr <bot> <address> <port>")
+        return
     botname = parts[0]
     address = parts[1]
     try:
@@ -1557,20 +1550,19 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
     except ValueError:
         await respond("Invalid port. Must be 1–65535.")
         return
-    
+
     async with get_db(core.db_path) as db:
-        cursor = await db.execute("SELECT * FROM bots WHERE handle = ?", (botname,))
+        cursor = await db.execute("SELECT handle FROM bots WHERE handle = ?", (botname,))
         row = await cursor.fetchone()
         if not row:
             await respond(f"Bot {botname} not found!")
             return
-        
         await db.execute(
             "UPDATE bots SET address = ?, port = ? WHERE handle = ?",
-            (address, port, botname)
+            (address, port, botname),
         )
         await db.commit()
-        await respond(f"Updated {botname}: {address}:{port}")      
+    await respond(f"Updated {botname}: {address}:{port}")    
 
 async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
     """

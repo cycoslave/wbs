@@ -698,3 +698,84 @@ class UserManager:
         if row is None or row[1]:
             return False
         return self.verify_password(password, row[0])      
+    
+    async def addhost(self, handle: str, hostmask: str, updated_by: str = None) -> str:
+        """
+        Add a hostmask to a user's hostmask list.
+
+        Returns:
+            "ok"           – hostmask added successfully
+            "not_found"    – user does not exist or is deleted
+            "duplicate"    – hostmask already present
+            "invalid"      – hostmask format is wrong (missing ! or @)
+        """
+        if "!" not in hostmask or "@" not in hostmask:
+            return "invalid"
+
+        now = int(time.time())
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT hostmasks FROM users WHERE handle = ? AND deleted_at IS NULL",
+                (handle,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return "not_found"
+
+            try:
+                masks: list[str] = json.loads(row["hostmasks"]) if row["hostmasks"] else []
+            except (json.JSONDecodeError, ValueError):
+                masks = []
+
+            if hostmask in masks:
+                return "duplicate"
+
+            masks.append(hostmask)
+            await db.execute(
+                "UPDATE users SET hostmasks = ?, updated_at = ?, updated_by = ? "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (json.dumps(masks), now, updated_by, handle),
+            )
+            await db.commit()
+        return "ok"
+
+
+    async def delhost(self, handle: str, hostmask: str, updated_by: str = None) -> str:
+        """
+        Remove a hostmask from a user's hostmask list.
+
+        Returns:
+            "ok"           – hostmask removed successfully
+            "not_found"    – user does not exist or is deleted
+            "no_such_host" – hostmask not in user's list
+            "invalid"      – hostmask format is wrong (missing ! or @)
+        """
+        if "!" not in hostmask or "@" not in hostmask:
+            return "invalid"
+
+        now = int(time.time())
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT hostmasks FROM users WHERE handle = ? AND deleted_at IS NULL",
+                (handle,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return "not_found"
+
+            try:
+                masks: list[str] = json.loads(row["hostmasks"]) if row["hostmasks"] else []
+            except (json.JSONDecodeError, ValueError):
+                masks = []
+
+            if hostmask not in masks:
+                return "no_such_host"
+
+            masks.remove(hostmask)
+            await db.execute(
+                "UPDATE users SET hostmasks = ?, updated_at = ?, updated_by = ? "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (json.dumps(masks), now, updated_by, handle),
+            )
+            await db.commit()
+        return "ok"    

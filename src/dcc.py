@@ -186,7 +186,7 @@ class DCCManager:
         """
         entry = self._passive_pending.pop(token, None)
         if not entry:
-            log.warning(f"[DCC] Unknown passive token {token!r} from {nick}")
+            log.warning(f"[DCC] Unknown passive token from {nick}")
             return
         if entry['nick'] != nick:
             log.warning(f"[DCC] Token nick mismatch: expected {entry['nick']}, got {nick}")
@@ -284,13 +284,13 @@ class DCCManager:
 
         ctcp_msg = f"\x01DCC CHAT chat 0 0 {token}\x01"
         await self._irc_ctcp(nick, ctcp_msg)
-        log.info(f"[DCC] Sent passive offer to {nick} (token={token})")
+        log.info(f"[DCC] Sent passive offer to {nick}")
 
         # Expire the token after timeout
         async def _expire():
             await asyncio.sleep(PASSIVE_CONNECT_TIMEOUT)
             if self._passive_pending.pop(token, None):
-                log.info(f"[DCC] Passive token {token} expired for {nick}")
+                log.info(f"[DCC] Passive token expired for {nick}")
 
         asyncio.create_task(_expire())
 
