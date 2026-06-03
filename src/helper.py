@@ -77,4 +77,64 @@ async def _watch_parent(initial_ppid: int) -> None:
         current = os.getppid()
         if current != initial_ppid or current == 1:
             log.warning("Parent process gone — self-terminating")
-            os._exit(1)            
+            os._exit(1)
+
+async def _require_flag(core, handle: str, flag: str, respond) -> bool:
+    """Return True if handle has the required flag; respond+return False otherwise."""
+    if not await core.user.matchattr(handle, flag):
+        await respond(f"Access denied (need {flag}).")
+        return False
+    return True
+
+async def _resolve_subnet_arg(
+    core, subnet_arg: str | None, respond
+) -> tuple[int | None, bool]:
+    """
+    Resolve a subnet name argument to a subnet_id.
+
+    Returns (subnet_id, ok):
+      - ok=False means we already responded with an error; caller must return.
+      - subnet_id=None means global (no subnet binding).
+    """
+    if subnet_arg is None:
+        return core.config.get("botnet", {}).get("subnet_id", None), True
+    if subnet_arg == "*":
+        return None, True
+    async with get_db(core.db_path) as db:
+        cursor = await db.execute("SELECT id FROM subnets WHERE name = ?", (subnet_arg,))
+        row = await cursor.fetchone()
+    if not row:
+        await respond(f"Unknown subnet: {subnet_arg}")
+        return None, False
+    return row["id"], True            
+
+async def _chan_mode_cmd(core, handle, arg, respond, mode_str: str, label: str, msg: str):
+    """Shared implementation for op/deop/voice/devoice."""
+    if core.config.get("limbo_hub"):
+        return await respond("Cannot use this command as limbo hub.")
+    parts = arg.split()
+    if len(parts) < 2:
+        return await respond(f"Usage: .{label} <nick> <#channel>")
+    nick, chan = parts[0], parts[1]
+    if not await _require_flag(core, handle, "+o", respond):
+        return
+    core.irc_q.put_nowait({"cmd": "mode", "channel": chan, "modes": f"{mode_str} {nick}"})
+    await respond(f"{msg} {nick} on {chan}")
+
+async def _list_loadables(core, respond, manager_attr: str, config_key: str, src_subdir: str) -> None:
+    loaded = sorted(getattr(core, manager_attr).games.keys()
+                    if manager_attr == "game"
+                    else getattr(core, manager_attr).plugins.keys())
+    auto_load = sorted(core.config.get(config_key, []))
+    src_dir = Path("src") / src_subdir
+    if src_dir.is_dir():
+        avail = sorted(p.stem for p in src_dir.glob("*.py") if p.name != "__init__.py")
+    else:
+        avail = []
+    not_loaded = sorted(set(avail) - set(loaded))
+    await respond(
+        f"Loaded ({len(loaded)}): {loaded or 'none'}\n"
+        f"Auto-load ({len(auto_load)}): {auto_load or 'none'}\n"
+        f"On disk ({len(avail)}): {avail or 'none'}\n"
+        f"Available to load: {not_loaded or 'none'}"
+    )    

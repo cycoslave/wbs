@@ -19,6 +19,7 @@ from typing import Any, Dict
 
 from . import __version__
 from .db import get_db
+from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables
 
 log = logging.getLogger("wbs.commands")
 
@@ -798,13 +799,6 @@ ERROR: Unknown command: {cmd}
     for line in help_text.split('\n'):
         await respond(line)
 
-async def _require_flag(core, handle: str, flag: str, respond) -> bool:
-    """Return True if handle has the required flag; respond+return False otherwise."""
-    if not await core.user.matchattr(handle, flag):
-        await respond(f"Access denied (need {flag}).")
-        return False
-    return True
-
 async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"WBS {__version__}")
 
@@ -847,19 +841,6 @@ async def cmd_mode(core, handle, session_id, arg, respond):
         return
     core.irc_q.put_nowait({"cmd": "mode", "channel": chan, "modes": modes})
     await respond(f"Mode set: {chan} {modes}")
-
-async def _chan_mode_cmd(core, handle, arg, respond, mode_str: str, label: str, msg: str):
-    """Shared implementation for op/deop/voice/devoice."""
-    if core.config.get("limbo_hub"):
-        return await respond("Cannot use this command as limbo hub.")
-    parts = arg.split()
-    if len(parts) < 2:
-        return await respond(f"Usage: .{label} <nick> <#channel>")
-    nick, chan = parts[0], parts[1]
-    if not await _require_flag(core, handle, "+o", respond):
-        return
-    core.irc_q.put_nowait({"cmd": "mode", "channel": chan, "modes": f"{mode_str} {nick}"})
-    await respond(f"{msg} {nick} on {chan}")
 
 async def cmd_op(core, handle, session_id, arg, respond):
     await _chan_mode_cmd(core, handle, arg, respond, "+o", "op", "Gave op to")
@@ -1009,22 +990,9 @@ async def cmd_addchan(core, handle: str, session_id: int, arg: str, respond):
     channel = parts[0]
     subnet_arg = parts[1] if len(parts) > 1 else None
 
-    # Resolve subnet_id
-    subnet_id = None  # None = global
-
-    if subnet_arg is None or subnet_arg == '*':
-        if subnet_arg is None:
-            # Default: use bot's own subnet
-            subnet_id = core.config.get('botnet', {}).get('subnet_id', None)
-    else:
-        # Named subnet — look it up
-        async with get_db(core.db_path) as db:
-            cursor = await db.execute("SELECT id FROM subnets WHERE name = ?", (subnet_arg,))
-            row = await cursor.fetchone()
-        if not row:
-            await respond(f"Unknown subnet: {subnet_arg}")
-            return
-        subnet_id = row["id"]
+    subnet_id, ok = await _resolve_subnet_arg(core, subnet_arg, respond)
+    if not ok:
+        return
 
     try:
         await core.chan.addchan(channel, subnet_id=subnet_id, created_by=handle)
@@ -1077,21 +1045,9 @@ async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     hostmask   = parts[1] if len(parts) > 1 else None
     subnet_arg = parts[2] if len(parts) > 2 else None
 
-    # Resolve subnet_id
-    subnet_id = None
-
-    if subnet_arg is None:
-        subnet_id = core.config.get('botnet', {}).get('subnet_id', None)
-    elif subnet_arg == '*':
-        subnet_id = None  # Global
-    else:
-        async with get_db(core.db_path) as db:
-            cursor = await db.execute("SELECT id FROM subnets WHERE name = ?", (subnet_arg,))
-            row = await cursor.fetchone()
-        if not row:
-            await respond(f"Unknown subnet: {subnet_arg}")
-            return
-        subnet_id = row["id"]
+    subnet_id, ok = await _resolve_subnet_arg(core, subnet_arg, respond)
+    if not ok:
+        return
 
     if await core.user.adduser(new_handle, hostmask, subnet_id=subnet_id, created_by=handle):
         scope = subnet_arg or f"subnet {subnet_id}"
@@ -1676,39 +1632,6 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
         await db.commit()
     await respond(f"Updated {botname}: {address}:{port}")    
 
-async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
-    """
-    .plugins  → list loaded / auto-load / available (src/plugins/*.py)
-    """
-    # Loaded (runtime)
-    loaded = sorted(core.plugin.plugins.keys())
-
-    # Auto-load from config.json
-    auto_load = sorted(core.config.get('plugins', []))
-
-    # Available .py in src/plugins (excluding __init__.py)
-    plugins_dir = os.path.join("src", "plugins")
-    if os.path.isdir(plugins_dir):
-        all_files = glob.glob(os.path.join(plugins_dir, "*.py"))
-        avail = [
-            os.path.splitext(os.path.basename(p))[0]
-            for p in all_files
-            if os.path.basename(p) != "__init__.py"
-        ]
-    else:
-        avail = []
-
-    # Available-but-not-loaded helper
-    available_not_loaded = sorted(set(avail) - set(loaded))
-
-    msg_lines = [
-        f"Loaded ({len(loaded)}): {loaded or 'none'}",
-        f"Auto-load ({len(auto_load)}): {auto_load or 'none'}",
-        f"On disk ({len(avail)}): {avail or 'none'}",
-        f"Available to load: {available_not_loaded or 'none'}",
-    ]
-    await respond("\n".join(msg_lines))
-
 async def cmd_load(core, handle: str, session_id: int, arg: str, respond):
     """load <plugin> - Load plugin from src/plugins/"""
     args = arg.strip().split()
@@ -1798,23 +1721,6 @@ def _parse_kv(tokens: list[str]) -> Dict[str, Any]:
                     out[k] = v
                     
     return out
-
-async def cmd_games(core, handle: str, session_id: int, arg: str, respond):
-    """
-    .games -> list loaded / auto-load / available games
-    """
-    loaded = sorted(core.game.games.keys())
-    auto_load = sorted(core.config.get("games", []))
-    avail = _game_files()
-    available_not_loaded = sorted(set(avail) - set(loaded))
-
-    msg_lines = [
-        f"Loaded ({len(loaded)}): {loaded or 'none'}",
-        f"Auto-load ({len(auto_load)}): {auto_load or 'none'}",
-        f"On disk ({len(avail)}): {avail or 'none'}",
-        f"Available to load: {available_not_loaded or 'none'}",
-    ]
-    await respond("\n".join(msg_lines))
 
 async def cmd_gload(core, handle: str, session_id: int, arg: str, respond):
     """gload <game> - Load game from src/games/"""
@@ -2727,6 +2633,12 @@ async def cmd_rehash(core, handle: str, session_id: int, arg: str, respond) -> N
     await respond("Rehashing...")
     log.info("Rehash initiated by %s", handle)
     await core.do_rehash()
+
+async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
+    await _list_loadables(core, respond, "plugin", "plugins", "plugins")
+
+async def cmd_games(core, handle: str, session_id: int, arg: str, respond):
+    await _list_loadables(core, respond, "game", "games", "games")
 
 # Command registry
 COMMANDS = {
