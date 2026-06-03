@@ -373,12 +373,7 @@ class UserManager:
                     if col is None:
                         log.warning(f"matchattr: unknown global flag '{char}'")
                         return False
-
-                    col = GLOBAL_FLAGS.get(char)
-                    if col is None:
-                        log.warning(f"matchattr: unknown global flag '{char}'")
-                        return False
-                    assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist" 
+                    assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist"
 
                     async with db.execute(
                         f"SELECT 1 FROM user_access WHERE handle = ? AND channel IS NULL "
@@ -387,12 +382,6 @@ class UserManager:
                     ) as cur:
                         row = await cur.fetchone()
 
-                    # Apply the same assert before the channel query block too
-                    col = CHAN_FLAGS.get(char)
-                    if col is None:
-                        log.warning(f"matchattr: unknown channel flag '{char}'")
-                        return False
-                    assert col in VALID_FLAG_COLUMNS, f"matchattr: col {col!r} not in allowlist"
                     has_flag = row is not None
                     if positive and not has_flag:
                         return False

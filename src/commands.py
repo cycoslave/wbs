@@ -22,6 +22,14 @@ from .db import get_db
 from .helper import _require_flag, _resolve_subnet_arg, _chan_mode_cmd, _list_loadables, _botnet_sync, _modify_hostmask
 
 log = logging.getLogger("wbs.commands")
+_CHATTR_ALLOWED_COLUMNS: frozenset[str] = frozenset({
+    "is_admin", "has_partyline", "is_op",
+    "is_voice", "is_friend", "is_deop", "is_devoice",
+})
+_BOTATTR_ALLOWED_COLUMNS: frozenset[str] = frozenset({
+    "autolink", "role", "autolink_retry_interval",
+    "share_level", "password", "comment",
+})
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
