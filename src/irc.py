@@ -354,7 +354,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         }
         for numeric, handler in numerics.items():
             conn.add_global_handler(numeric, handler, -20)
-        #log.info(f"[IRC] Sending USERHOST for {conn.get_nickname()}")
         conn.send_raw(f"USERHOST {conn.get_nickname()}")
         self._emit_event({
             'type': EventType.READY,
@@ -978,9 +977,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'channels': {}
             }
             
-            #log.info(f"self.channels type: {type(self.channels)}")
-            #log.info(f"self.channels content: {self.channels}")
-            #log.info(f"self.channels.keys(): {list(self.channels.keys())}")
             for chan_name in list(self.channels.keys()):
                 chan_obj = self.channels.get(chan_name)
                 
@@ -1065,8 +1061,6 @@ def start_irc_process(config, core_q, irc_q):
 
     log.info(f"IRC process started. (pid={os.getpid()})")
     irc.start()
-
-    #irc.maintenance_task.cancel()
 
 def irc_process_launcher(config: dict, core_q, irc_q, core_pid=None, core_argv=None):
     """IRC subprocess entry point. core_pid/core_argv accepted but unused."""

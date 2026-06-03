@@ -1544,7 +1544,7 @@ async def cmd_ignores(core, handle: str, session_id: int, arg: str, respond):
         else:
             await respond(f"Total ignores: {count}")    
 
-async def cmd_addignore(core, handle: str, arg: str, respond, action: str):
+async def cmd_addignore(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split(maxsplit=2)
     if len(parts) < 1:
         await respond("Usage: +ignore <hostmask> [%<XyXdXhXm>] [comment]")
@@ -1564,7 +1564,7 @@ async def cmd_addignore(core, handle: str, arg: str, respond, action: str):
         except Exception:
             await respond(f"{hostmask} already ignored.")
 
-async def cmd_delignore(core, handle: str, arg: str, respond, action: str):
+async def cmd_delignore(core, handle: str, session_id: int, arg: str, respond):
     parts = arg.split(maxsplit=2)
     if len(parts) < 1:
         await respond("Usage: -ignore <hostmask>")
@@ -1585,7 +1585,14 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
     
     botname = parts[0]
     address = parts[1]
-    port = int(parts[2]) if len(parts) > 2 else 3333
+    try:
+        port = int(parts[2])
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        await respond("Invalid port. Must be 1–65535.")
+        return
+    
     async with get_db(core.db_path) as db:
         cursor = await db.execute("SELECT * FROM bots WHERE handle = ?", (botname,))
         row = await cursor.fetchone()
@@ -1593,12 +1600,11 @@ async def cmd_chaddr(core, handle: str, session_id: int, arg: str, respond):
             await respond(f"Bot {botname} not found!")
             return
         
-        # Update address/port
         await db.execute(
             "UPDATE bots SET address = ?, port = ? WHERE handle = ?",
             (address, port, botname)
         )
-        
+        await db.commit()
         await respond(f"Updated {botname}: {address}:{port}")      
 
 async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
@@ -2668,8 +2674,6 @@ COMMANDS = {
     'deop': cmd_deop,
     'voice': cmd_voice,
     'devoice': cmd_devoice,
-    'join': cmd_addchan,
-    'part': cmd_delchan,
     'say': cmd_msg,
     'msg': cmd_msg,
     'act': cmd_act,
@@ -2678,7 +2682,6 @@ COMMANDS = {
     'status': cmd_status,
     'backup': cmd_backup,
     'module': cmd_module,
-    'restart': cmd_restart,
     'chattr':       cmd_chattr,
     'relay':        cmd_relay,
     'mass':         cmd_mass,

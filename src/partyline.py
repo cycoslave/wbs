@@ -83,10 +83,7 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "channels": "A",
     "+chan": "A",
     "-chan": "A",
-    "lockchan": "A",
-    "unlockchan": "A",
-    "topiclock": "A",
-    "topicunlock": "A",
+    "chaninfo": "A",
 
     # Scheduler / timers
     "taskset": "A",
