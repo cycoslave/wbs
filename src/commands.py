@@ -1268,6 +1268,7 @@ async def cmd_link(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"Initiating link to {botname}...")
         await core.botnet.connect_peer(botname)
     except ValueError as e:
+        log.debug("link cmd failed for %s: %s", botname, e)
         await respond(f"Bot {botname} not found!") 
 
 async def cmd_unlink(core, handle: str, session_id: int, arg: str, respond):
@@ -2014,10 +2015,8 @@ async def cmd_mass(core, handle: str, session_id: int, arg: str, respond):
 
     if action == 'op':
         targets = [u for u in users if u != botname and u not in ops]
-        mode_char = '+o'
     elif action == 'deop':
         targets = [u for u in users if u != botname and u in ops]
-        mode_char = '-o'
     else:
         await respond(f"Unknown mass action: {action}. Valid: op deop")
         return

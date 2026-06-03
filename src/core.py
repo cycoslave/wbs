@@ -9,7 +9,6 @@ import time
 import logging
 import os
 import sys
-import socket
 import random
 import signal
 from pathlib import Path

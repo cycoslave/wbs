@@ -242,7 +242,7 @@ class BotnetManager:
             log.info(f"Connecting to peer {handle} at {bot.address}:{bot.port} — awaiting auth")
             
         except Exception as e:
-            #log.error(f"Failed to connect to {handle}: {e}")
+            log.debug("connect_peer %s: %s", handle, e)
             pass
 
     async def disconnect_peer(self, botname: str):
@@ -263,6 +263,7 @@ class BotnetManager:
             peer_info = writer.get_extra_info("peername")
             peer_ip = peer_info[0] if peer_info else None
         except Exception:
+            log.debug("read_peer %s: %s", handle, e)
             pass
 
         try:
@@ -745,15 +746,15 @@ class BotnetManager:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         elif cmd == 'REQUEST_INVITE':
-            channel = cmd.get('channel', '')
-            target  = cmd.get('target', '')
+            channel = parts[1] if len(parts) > 1 else ''
+            target  = parts[2] if len(parts) > 2 else ''
             if self.core.bot_isop(channel):
                 self.core.send_irc({'cmd': 'invite', 'target': target, 'channel': channel})
                 log.info(f"[Botnet] Sent INVITE {target} to {channel}")
 
         elif cmd == 'REQUEST_UNBAN':
-            channel = cmd.get('channel', '')
-            target  = cmd.get('target', '')
+            channel = parts[1] if len(parts) > 1 else ''
+            target  = parts[2] if len(parts) > 2 else ''
             if self.core.bot_isop(channel):
                 # TODO: scan chan.bans for a mask matching target's nick/host
                 self.core.send_irc({'cmd': 'mode', 'channel': channel,
@@ -761,8 +762,8 @@ class BotnetManager:
                 log.info(f"[Botnet] Sent unban for {target} in {channel}")
 
         elif cmd == 'REQUEST_LIMIT_RAISE':
-            channel = cmd.get('channel', '')
-            target  = cmd.get('target', '')
+            channel = parts[1] if len(parts) > 1 else ''
+            target  = parts[2] if len(parts) > 2 else ''
             if self.core.bot_isop(channel):
                 chan = self.core.channels.get(channel)
                 new_limit = (chan.limit if chan else 0) + 10

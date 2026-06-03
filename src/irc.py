@@ -701,7 +701,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         • len(nick) >= NICKLEN - 1       → truncate to NICKLEN-2, append 2 random digits
         • len(nick) <= NICKLEN - 2       → append 2 random digits directly
         """
-        current = conn.get_nickname()           # what we tried (may be '*' pre-reg)
         desired = self._nick_adjusted           # last attempted nick
         nicklen = int(self.server_caps.get('NICKLEN', 9))
 
@@ -815,7 +814,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             log.error(f"Command failed {cmd_data}: {e}")
 
     async def maintenance_loop(self):
-        """Maintenance every 15s (uncommented _enforce_settings later)"""
+        """Maintenance every 15s"""
         while True:  # Add while True
             try:
                 current_ppid = os.getppid()
@@ -831,7 +830,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     
                     await self._check_channels()
                     await self._check_nick()
-                    # await self._enforce_settings()
                 
                 await asyncio.sleep(15)
                 
@@ -911,31 +909,6 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 self._nick_adjusted = desired
                 self.maintenance_state['last_nick_attempt'] = now
                 log.info(f"[IRC] Trying to reclaim nick: '{desired}'")
-
-    async def _enforce_settings(self):
-        """Apply locks/limits/topiclock from DB"""
-        if self.is_connected:
-            channels = await self.chan.get_all_channels()
-            for chan_obj in channels:
-                if chan_obj.name not in self.connection.channels:
-                    continue
-                    
-                now = datetime.now()
-                
-                # Channel lock
-                #if chan_obj.is_locked and now - datetime.fromtimestamp(chan_obj.lock_at) > timedelta(minutes=1):
-                #    irc_q.put({'cmd': 'part', 'channel': chan_obj.name, 'reason': f'Locked by {chan_obj.lock_by}'})
-                
-                # Topic lock
-                #if chan_obj.is_topiclock and now - datetime.fromtimestamp(chan_obj.topiclock_at) > timedelta(minutes=1):
-                #    irc_q.put({'cmd': 'topic', 'channel': chan_obj.name, 'topic': chan_obj.topiclock})
-                #    self.maintenance_state['last_topic'][chan_obj.name] = now
-                
-                # Limit
-                #if chan_obj.is_limit and now - datetime.fromtimestamp(chan_obj.limit_at) > timedelta(minutes=2):
-                #    modes = f"+l {chan_obj.limit_add}"
-                #    irc_q.put({'cmd': 'mode', 'channel': chan_obj.name, 'modes': modes})
-                #    self.maintenance_state['last_limit'][chan_obj.name] = now 
 
     def _schedule_register_timer(self, name: str, interval: float):
         """Schedule timer registration on the event loop."""

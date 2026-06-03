@@ -108,14 +108,33 @@ class netopPlugin(Plugin):
                             self.reqop[(chan, self.core.botname.lower())] = now
                             self.log.debug(f"Linked bot {victim} got opped on {chan}, requesting op.")
 
-    #async def on_JOIN(self, event):
-    #    channel = event.get('channel', '').lower()
-    #    nick = event.get('nick', '').lower()
-    #    
-    #    # Check if a linked bot joined - request ops for them
-    #    if nick in self.core.botnet.peers.keys():
-    #        await self.msg_to_bots(f"reqop {nick} {channel}")
-    #        self.log.info(f"Linked bot {nick} joined {channel}; suggesting op")
+    async def on_JOIN(self, event):
+        channel = event.get('channel', '').lower()
+        nick    = event.get('nick', '').lower()
+
+        # Skip self — on_NEWCHAN handles our own joins
+        if nick == self.core.botname.lower():
+            return
+
+        peers = getattr(self.core.botnet, 'peers', {})
+        bot_nicks = {
+            (link.nick or link.name).lower(): handle
+            for handle, link in peers.items()
+            if link.authed and link.connected
+        }
+
+        if nick not in bot_nicks:
+            return  # not a linked bot, nothing to do
+
+        now = time.time()
+        key = (channel, nick)
+        if self.sugop.get(key, 0) + self.COOLDOWN > now:
+            self.log.debug("sugop cooldown %s/%s, skipping", channel, nick)
+            return
+
+        await self.msg_to_bots(f"sugop {nick} {channel}")
+        self.sugop[key] = now
+        self.log.info("Linked bot %s joined %s; broadcasting sugop", nick, channel)
 
     async def on_NEWCHAN(self, event):
         channel = event.get('channel', '').lower()
