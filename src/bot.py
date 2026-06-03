@@ -22,6 +22,7 @@ _FLAG_MAP: dict[str, str] = {
     'l': 'is_hop',
     'r': 'is_dehop',
 }
+_BOT_FLAG_COLUMNS: frozenset[str] = frozenset(_FLAG_MAP.values())
 
 @dataclass
 class Bot:
@@ -115,6 +116,7 @@ class BotManager:
         Returns False if the bot or access record doesn't exist,
         or if any unrecognised flag character is present.
         """
+        columns = [_FLAG_MAP[c] for c in flag_chars]
         if not flags:
             return False
 
@@ -137,23 +139,24 @@ class BotManager:
             )
             return False
 
-        # Build column list and query bot_access
-        columns = [_FLAG_MAP[c] for c in flag_chars]
-        col_select = ', '.join(columns)
+        for col in columns:
+            if col not in _BOT_FLAG_COLUMNS:
+                raise ValueError(f"matchattr: disallowed bot flag column: {col!r}")
 
+        col_select = ", ".join(columns)
         async with get_db(self.db_path) as db:
             if channel is None:
                 async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
-                    f"WHERE handle = ? AND channel IS NULL",
-                    (handle,)
+                    "WHERE handle = ? AND channel IS NULL",
+                    (handle,),
                 ) as cur:
                     row = await cur.fetchone()
             else:
                 async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
-                    f"WHERE handle = ? AND channel = ?",
-                    (handle, channel)
+                    "WHERE handle = ? AND channel = ?",
+                    (handle, channel),
                 ) as cur:
                     row = await cur.fetchone()
 
