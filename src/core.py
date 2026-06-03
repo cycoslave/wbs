@@ -30,7 +30,6 @@ from .dcc import DCCManager
 from .update import UpdateManager
 from .db import init_db, get_db
 from .commands import COMMANDS
-from .irc import irc_process_launcher
 from .helper import restore_terminal
 
 log = logging.getLogger("wbs.core")
@@ -69,7 +68,6 @@ class Core:
         self.update = UpdateManager(self.config)
 
         # Runtime variables
-        self.children = []
         self.start_time = time.time()
         self.running = True
         self.connected = False
@@ -86,8 +84,6 @@ class Core:
         self._lag_ping_sent: float | None = None
         self._last_lag_ms: float = 0.0
         self.public_ip: Optional[str] = None
-        self._irc_respawn_delay: float = 5.0
-        self._irc_last_respawn: float = 0.0
         self.botnet.guard = self.net_listener.guard
         log.info(f"Core process started. (pid={os.getpid()})")
 
@@ -854,43 +850,6 @@ class Core:
                 self._lag_ping_sent = time.time() * 1000
                 self._last_lag_ping = now
                 self.send_irc({'cmd': 'ping', 'token': f'LAG{int(now)}'})
-
-        await self._check_irc_process()
-
-    async def _check_irc_process(self):
-        """Respawn IRC process if it has died."""
-        for i, child in enumerate(self.children):
-            if child.name != "IRC":
-                continue
-            if child.is_alive():
-                return
-
-            exit_code = child.exitcode
-            now = time.time()
-            if (now - self._irc_last_respawn) < self._irc_respawn_delay:
-                return  # not yet time
-
-            log.warning(f"IRC process died (exitcode={exit_code}), respawning in {self._irc_respawn_delay:.0f}s...")
-            self.connected = False
-            self.channels.clear()
-
-            self.irc_q = mp.Queue()
-
-            new_proc = mp.Process(
-                target=irc_process_launcher,
-                args=(self.config, self.core_q, self.irc_q, os.getpid(), sys.argv),
-                daemon=False,
-                name="IRC"
-            )
-            new_proc.start()
-            self.children[i] = new_proc
-            self._irc_last_respawn = now
-
-            # Backoff: 5s → 10s → 20s → 40s → cap at 300s
-            self._irc_respawn_delay = min(self._irc_respawn_delay * 2, 300.0)
-
-            log.info(f"IRC process respawned (pid={new_proc.pid}), next backoff={self._irc_respawn_delay:.0f}s")
-            self.partyline.broadcast(f"*** IRC process respawned (pid={new_proc.pid})")
 
     async def register_timer(self, name: str, callback, interval: float, randomize: bool = False):
         log.debug(f"Registered timer '{name}': {interval}s")   # ← once, at registration

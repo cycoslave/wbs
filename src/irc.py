@@ -24,9 +24,7 @@ from .channel import ChannelManager
 from . import __version__
 
 log = logging.getLogger("wbs.irc")
-_core_argv: list = []
 
-# Event type constants
 class EventType:
     PUBMSG = 'PUBMSG'
     PRIVMSG = 'PRIVMSG'
@@ -1062,6 +1060,6 @@ def start_irc_process(config, core_q, irc_q):
     log.info(f"IRC process started. (pid={os.getpid()})")
     irc.start()
 
-def irc_process_launcher(config: dict, core_q, irc_q, core_pid=None, core_argv=None):
+def irc_process_launcher(config: dict, core_q, irc_q):
     """IRC subprocess entry point. core_pid/core_argv accepted but unused."""
     start_irc_process(config, core_q, irc_q)

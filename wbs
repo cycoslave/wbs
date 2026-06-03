@@ -14,6 +14,7 @@ import os
 import sys
 import signal
 import psutil
+import time
 from pathlib import Path
 from multiprocessing import Process, Queue
 from multiprocessing.connection import wait as mp_wait
@@ -59,8 +60,6 @@ def daemonize(logfile: str = "logs/wbs.log"):
     log_fh     = open(logfile, 'a')
     sys.stdout = log_fh
     sys.stderr = log_fh
-
-import psutil  # already in pyproject.toml
 
 def write_pidfile(path: str) -> None:
     """Write PID and process create_time to pidfile for reuse-safe checks."""
@@ -146,6 +145,8 @@ def main():
     _log_cfg = config.get('logging', {})
     _level   = getattr(logging, _log_cfg.get('level', 'INFO').upper(), logging.INFO)
     _logfile = args.logfile or _log_cfg.get('file', 'logs/wbs.log')
+    _irc_respawn_delay = 5.0
+    _irc_last_respawn  = 0.0
 
     if args.foreground:
         logging.basicConfig(
@@ -208,7 +209,7 @@ def main():
     def _spawn_irc(config, core_q, irc_q) -> Process:
         p = Process(
             target=irc_process_launcher,
-            args=(config, core_q, irc_q, None),
+            args=(config, core_q, irc_q),
             daemon=True,
             name="IRC"
         )
@@ -277,7 +278,13 @@ def main():
                     if _shutting_down:
                         log.info("IRC exited during shutdown — not relaunching")
                     else:
+                        now = time.time()
+                        if (now - _irc_last_respawn) < _irc_respawn_delay:
+                            log.warning(f"IRC died too quickly — waiting {_irc_respawn_delay:.0f}s before respawn")
+                            time.sleep(_irc_respawn_delay)
                         log.warning(f"IRC process died (code={code}), relaunching...")
+                        _irc_last_respawn = time.time()
+                        _irc_respawn_delay = min(_irc_respawn_delay * 2, 300.0)
                         irc_proc = _spawn_irc(config, core_q, irc_q)
                         procs["irc"] = irc_proc
                         sentinels[irc_proc.sentinel] = ("irc", irc_proc)
