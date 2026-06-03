@@ -73,7 +73,6 @@ class AccessGuard:
 
     async def load(self) -> None:
         """Load persisted blocklist from DB.  Call once at startup."""
-        from .db import get_db
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
                 "SELECT ip, reason, added_by, added_at, expires_at, note "
@@ -198,8 +197,6 @@ class AccessGuard:
         Reverse-resolve IP → hostname, then fnmatch against the host
         portion of every mask in users + bots tables.
         """
-        from .db import get_db
-
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, socket.gethostbyaddr, ip
@@ -239,7 +236,6 @@ class AccessGuard:
         )
 
     async def _persist(self, entry: _BlockEntry) -> None:
-        from .db import get_db
         async with get_db(self.db_path) as db:
             await db.execute(
                 """
@@ -259,7 +255,6 @@ class AccessGuard:
 
     async def _remove_from_blocklist(self, ip: str, reason: str = "") -> None:
         self._blocklist.pop(ip, None)
-        from .db import get_db
         async with get_db(self.db_path) as db:
             await db.execute(
                 "DELETE FROM net_blocklist WHERE ip = ?", (ip,)
