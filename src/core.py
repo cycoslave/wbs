@@ -36,6 +36,7 @@ from .helper import restore_terminal
 log = logging.getLogger("wbs.core")
 BASE_DIR = Path(__file__).parent.parent
 _AUTH_TIMEOUT = 20
+CLEAN_EXIT_CODE = 42
 
 class Core:
     """Main process: Core event loop + child process manager."""
@@ -434,7 +435,7 @@ class Core:
                     child.join(timeout=1.0)
         log.info("All children terminated. Exiting.")
         restore_terminal()
-        sys.exit(0)
+        os._exit(42)
 
     async def on_command(self, event):
         """

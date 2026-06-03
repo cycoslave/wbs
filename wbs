@@ -2,7 +2,7 @@
 # wbs (main.py)
 """
 WBS Launcher
-version: 5.9.4
+version: 5.9.5
 by: cycoslave
 link: https://github.com/cycoslave/wbs
 """
@@ -141,7 +141,7 @@ def main():
     if not args.foreground:
         daemonize(logfile)
 
-    EXIT_OK = 0
+    EXIT_OK = 42
 
     def _spawn_core(config, config_path, args, core_q, irc_q) -> Process:
         p = Process(
