@@ -810,7 +810,6 @@ async def cmd_version(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_date(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Current time is: {datetime.now().ctime()}")
-    return  
 
 async def cmd_whoami(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"You are {handle}@{core.botname}")
