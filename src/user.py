@@ -143,19 +143,37 @@ class UserManager:
             return True
 
     async def listusers(self) -> str:
-        """List active (non-deleted) users."""
+        """List active users and bots."""
         async with get_db(self.db_path) as db:
-            rows = await db.execute_fetchall(
+            user_rows = await db.execute_fetchall(
                 "SELECT handle, comment, is_locked FROM users "
                 "WHERE deleted_at IS NULL ORDER BY handle"
             )
-            if not rows:
-                return "No users."
-            lines = ["Users:"]
-            for r in rows:
+            bot_rows = await db.execute_fetchall(
+                "SELECT handle, role, address, port FROM bots "
+                "WHERE deleted_at IS NULL ORDER BY handle"
+            )
+
+        lines = []
+
+        lines.append("Users:")
+        if user_rows:
+            for r in user_rows:
                 lock = " [LOCKED]" if r["is_locked"] else ""
                 lines.append(f"  {r['handle']}{lock} - {r['comment'] or ''}")
-            return "\n".join(lines)
+        else:
+            lines.append("  (none)")
+
+        lines.append("Bots:")
+        if bot_rows:
+            for r in bot_rows:
+                role = f" [{r['role']}]" if r["role"] else ""
+                addr = f" {r['address']}:{r['port']}" if r["address"] else ""
+                lines.append(f"  {r['handle']}{role}{addr}")
+        else:
+            lines.append("  (none)")
+
+        return "\n".join(lines)
 
     async def showuser(self, target_handle: str) -> str:
         """Show detailed info for specific user."""

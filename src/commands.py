@@ -345,9 +345,9 @@ See also: +user
     elif cmd == "users":
         help_text = """\
 ###  users
-    Lists all users in the database.
+    Lists all users and bots in the database.
 
-See also: whois, userinfo
+See also: whois, userinfo, bots
 """
 
     elif cmd == "userinfo":
