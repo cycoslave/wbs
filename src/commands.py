@@ -2425,7 +2425,6 @@ async def cmd_blocklist(core, session_id, args, respond):
     Show all current blocklist entries.
     Requires: master flag (n)
     """
-    import datetime
     entries = core.guard.list_blocked()
     if not entries:
         await respond("Blocklist is empty.")
