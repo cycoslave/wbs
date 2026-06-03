@@ -779,3 +779,133 @@ class UserManager:
             )
             await db.commit()
         return "ok"    
+    
+    async def set_comment(self, handle: str, comment: str, updated_by: str = None) -> str:
+        """
+        Set the comment field on a user record.
+
+        Returns:
+            "ok"         – comment updated
+            "not_found"  – user does not exist or is deleted
+        """
+        now = int(time.time())
+        async with get_db(self.db_path) as db:
+            cur = await db.execute(
+                "UPDATE users SET comment = ?, updated_at = ?, updated_by = ? "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (comment, now, updated_by, handle),
+            )
+            await db.commit()
+        return "ok" if cur.rowcount > 0 else "not_found"
+
+    async def set_locked(self, handle: str, locked: bool, updated_by: str = None) -> str:
+        """
+        Lock or unlock a user account.
+
+        Args:
+            locked: True to lock, False to unlock.
+
+        Returns:
+            "ok"         – state updated
+            "not_found"  – user does not exist or is deleted
+            "no_change"  – user was already in the requested state
+        """
+        now = int(time.time())
+        target = 1 if locked else 0
+        async with get_db(self.db_path) as db:
+            # Check current state first to detect no-change
+            cur = await db.execute(
+                "SELECT is_locked FROM users WHERE handle = ? AND deleted_at IS NULL",
+                (handle,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return "not_found"
+            if bool(row["is_locked"]) == locked:
+                return "no_change"
+
+            await db.execute(
+                "UPDATE users SET is_locked = ?, updated_at = ?, updated_by = ? "
+                "WHERE handle = ? AND deleted_at IS NULL",
+                (target, now, updated_by, handle),
+            )
+            await db.commit()
+        return "ok"
+
+    async def chattr(self, handle: str, flag_str: str,
+                    channel: str = None, subnet_id: int = None,
+                    updated_by: str = None) -> str:
+        """
+        Add or remove flags on a user's access row.
+
+        flag_str format: +<flags> and/or -<flags>  e.g. "+Ao-v"
+        channel: scopes the change to a channel row; None = global row.
+        subnet_id: further scopes to a subnet (None = any/all).
+
+        Returns:
+            "ok"         – flags updated
+            "not_found"  – user does not exist or is deleted
+            "bad_flag"   – an unrecognised flag character was encountered
+            "no_access"  – no matching user_access row exists to modify
+        """
+        if not await self.exist(handle):
+            return "not_found"
+
+        # Parse "+Ao-v" into adds={'is_admin','is_autoop'}, removes={'is_voice'}
+        adds: set[str] = set()
+        removes: set[str] = set()
+        mode = "+"
+        for ch in flag_str:
+            if ch == "+":
+                mode = "+"
+            elif ch == "-":
+                mode = "-"
+            else:
+                col = GLOBAL_FLAGS.get(ch)
+                if col is None:
+                    return "bad_flag"
+                if mode == "+":
+                    adds.add(col)
+                else:
+                    removes.add(col)
+
+        if not adds and not removes:
+            return "ok"
+
+        # Safety: every column name must be in the allowlist
+        for col in adds | removes:
+            assert col in VALID_FLAG_COLUMNS, f"chattr: col {col!r} not in allowlist"
+
+        set_parts = (
+            [f"{col} = 1" for col in sorted(adds)] +
+            [f"{col} = 0" for col in sorted(removes)]
+        )
+        set_clause = ", ".join(set_parts)  # Only allowlisted column names — safe
+        now = int(time.time())
+
+        async with get_db(self.db_path) as db:
+            # Ensure a row exists to update; create one if needed (global only)
+            if channel is None:
+                await db.execute(
+                    """INSERT OR IGNORE INTO user_access
+                    (handle, channel, subnet_id, created_at, updated_at, created_by)
+                    VALUES (?, NULL, ?, ?, ?, ?)""",
+                    (handle, subnet_id, now, now, updated_by),
+                )
+            
+            # Build the WHERE clause — channel IS NULL requires special handling
+            if channel is None:
+                where = "handle = ? AND channel IS NULL AND deleted_at IS NULL"
+                params: list = [now, updated_by, handle]
+            else:
+                where = "handle = ? AND channel = ? AND deleted_at IS NULL"
+                params = [now, updated_by, handle, channel]
+
+            cur = await db.execute(
+                f"UPDATE user_access SET {set_clause}, updated_at = ?, updated_by = ? "
+                f"WHERE {where}",
+                params,
+            )
+            await db.commit()
+
+        return "ok" if cur.rowcount > 0 else "no_access"    

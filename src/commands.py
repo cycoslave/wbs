@@ -1285,45 +1285,147 @@ async def cmd_listusers(core, handle: str, session_id: int, arg: str, respond):
     #parts = arg.split()
     await respond(await core.user.listusers())                
 
-async def cmd_chusercomment(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
+async def cmd_chusercomment(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """Set a comment on a user record. Requires +A."""
+    if not await _require_flag(core, handle, "A", respond):
+        return
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2:
         await respond("Usage: .chusercomment <user> <comment>")
         return
-    parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
+    target, comment = parts[0], parts[1]
+    result = await core.user.set_comment(target, comment, updated_by=handle)
+    if result == "not_found":
+        await respond(f"No such user: {target}")
+    else:
+        await respond(f"Comment updated for {target}.")
+        if hasattr(core, "botnet"):
+            asyncio.create_task(core.botnet.sync_user("UPDATE", {"handle": target}))
 
-async def cmd_addaccess(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .addaccess [options] <user> <access>")
+async def cmd_addaccess(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """
+    Add flags to a user's access row.
+    Usage: .addaccess <user> +<flags> [#channel]
+
+    Examples:
+        .addaccess bob +Ap           (global admin + partyline)
+        .addaccess bob +o #wbs       (channel op on #wbs)
+    """
+    if not await _require_flag(core, handle, "A", respond):
         return
     parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
+    if len(parts) < 2:
+        await respond("Usage: .addaccess <user> +<flags> [#channel]")
+        return
 
-async def cmd_delaccess(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .delaccess [options] <user> <access>")
+    target   = parts[0]
+    flag_str = parts[1]
+    channel  = parts[2] if len(parts) >= 3 and parts[2].startswith("#") else None
+
+    # Normalise: addaccess always means "+", strip any leading sign
+    flag_str = "+" + flag_str.lstrip("+-")
+
+    result = await core.user.chattr(target, flag_str, channel=channel, updated_by=handle)
+    if result == "not_found":
+        await respond(f"No such user: {target}")
+    elif result == "bad_flag":
+        await respond(f"Unknown flag in: {flag_str}")
+    elif result == "no_access":
+        await respond(f"No access row found for {target} on {channel or 'global'}. "
+                      f"Use .+user to create the user first.")
+    else:
+        scope = f" on {channel}" if channel else " (global)"
+        await respond(f"Added {flag_str} to {target}{scope}.")
+        if hasattr(core, "botnet"):
+            asyncio.create_task(core.botnet.sync_user("UPDATE", {"handle": target}))
+
+async def cmd_delaccess(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """
+    Remove flags from a user's access row.
+    Usage: .delaccess <user> -<flags> [#channel]
+
+    Examples:
+        .delaccess bob -A            (remove global admin)
+        .delaccess bob -o #wbs       (remove channel op on #wbs)
+    """
+    if not await _require_flag(core, handle, "A", respond):
         return
     parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
+    if len(parts) < 2:
+        await respond("Usage: .delaccess <user> -<flags> [#channel]")
+        return
 
-async def cmd_lockuser(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
+    target   = parts[0]
+    flag_str = parts[1]
+    channel  = parts[2] if len(parts) >= 3 and parts[2].startswith("#") else None
+
+    # Normalise: delaccess always means "-"
+    flag_str = "-" + flag_str.lstrip("+-")
+
+    result = await core.user.chattr(target, flag_str, channel=channel, updated_by=handle)
+    if result == "not_found":
+        await respond(f"No such user: {target}")
+    elif result == "bad_flag":
+        await respond(f"Unknown flag in: {flag_str}")
+    elif result == "no_access":
+        await respond(f"No access row found for {target} on {channel or 'global'}.")
+    else:
+        scope = f" on {channel}" if channel else " (global)"
+        await respond(f"Removed {flag_str} from {target}{scope}.")
+        if hasattr(core, "botnet"):
+            asyncio.create_task(core.botnet.sync_user("UPDATE", {"handle": target}))
+
+async def cmd_lockuser(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """
+    Lock a user account, preventing login.
+    Usage: .lockuser <user>
+    Requires +A.
+    """
+    if not await _require_flag(core, handle, "A", respond):
+        return
+    parts = arg.split()
+    if not parts:
         await respond("Usage: .lockuser <user>")
         return
-    parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
+    target = parts[0]
+    # Prevent self-lock — admins should not be able to lock themselves out
+    if target.lower() == handle.lower():
+        await respond("You cannot lock your own account.")
+        return
+    result = await core.user.set_locked(target, locked=True, updated_by=handle)
+    if result == "not_found":
+        await respond(f"No such user: {target}")
+    elif result == "no_change":
+        await respond(f"{target} is already locked.")
+    else:
+        await respond(f"{target} has been locked.")
+        log.info("cmd_lockuser: %s locked by %s", target, handle)
+        if hasattr(core, "botnet"):
+            asyncio.create_task(core.botnet.sync_user("UPDATE", {"handle": target}))
 
-async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .unlockuser <user>")
+async def cmd_unlockuser(core, handle: str, session_id: int, arg: str, respond) -> None:
+    """
+    Unlock a previously locked user account.
+    Usage: .unlockuser <user>
+    Requires +A.
+    """
+    if not await _require_flag(core, handle, "A", respond):
         return
     parts = arg.split()
-    #core.irc_q.put_nowait({'cmd': 'join', 'channel': parts[0]})
-    await respond(f"→ JOIN {parts[0]}")
+    if not parts:
+        await respond("Usage: .unlockuser <user>")
+        return
+    target = parts[0]
+    result = await core.user.set_locked(target, locked=False, updated_by=handle)
+    if result == "not_found":
+        await respond(f"No such user: {target}")
+    elif result == "no_change":
+        await respond(f"{target} is not locked.")
+    else:
+        await respond(f"{target} has been unlocked.")
+        log.info("cmd_unlockuser: %s unlocked by %s", target, handle)
+        if hasattr(core, "botnet"):
+            asyncio.create_task(core.botnet.sync_user("UPDATE", {"handle": target}))
 
 async def cmd_who(core, handle, session_id, arg, respond):
     """Show partyline members and connected bots."""
