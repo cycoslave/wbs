@@ -1840,6 +1840,12 @@ async def cmd_chattr(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"No valid flags in: {flags}")
         return
 
+    invalid = set(updates) - _CHATTR_ALLOWED_COLUMNS
+    if invalid:
+        log.error("cmd_chattr: rejected unexpected columns: %s", sorted(invalid))
+        await respond("Internal error: invalid attribute mapping.")
+        return
+
     set_clause = ", ".join(f"{col} = ?" for col in updates)
     values = list(updates.values())
 
@@ -2048,12 +2054,17 @@ async def cmd_subnet(core, handle: str, session_id: int, arg: str, respond):
             await respond("Usage: .subnet set <name> <key> <value>")
             return
         name, key, value = parts[1], parts[2], parts[3]
-        allowed = {'hub_host', 'hub_port', 'name'}
-        if key not in allowed:
-            await respond(f"Allowed keys: {', '.join(allowed)}")
+        _SUBNET_KEY_MAP: dict[str, str] = {
+            'hub_host': 'hub_host',
+            'hub_port': 'hub_port',
+            'name':     'name',
+        }
+        col = _SUBNET_KEY_MAP.get(key.lower())
+        if col is None:
+            await respond(f"Allowed keys: {', '.join(_SUBNET_KEY_MAP)}")
             return
         async with get_db(core.db_path) as db:
-            await db.execute(f"UPDATE subnets SET {key} = ? WHERE name = ?", (value, name))
+            await db.execute(f"UPDATE subnets SET {col} = ? WHERE name = ?", (value, name))
             await db.commit()
         await respond(f"Subnet {name}: {key} = {value}")
     else:
@@ -2535,6 +2546,12 @@ async def cmd_botattr(core, handle: str, session_id: int, arg: str, respond):
     all_updates = {**flag_updates, **kv_updates}
     if not all_updates:
         await respond("No changes specified.")
+        return
+
+    invalid = set(all_updates) - _BOTATTR_ALLOWED_COLUMNS
+    if invalid:
+        log.error("cmd_botattr: rejected unexpected columns: %s", sorted(invalid))
+        await respond("Internal error: invalid bot attribute mapping.")
         return
 
     set_clause = ", ".join(f"{col} = ?" for col in all_updates)
