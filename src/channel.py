@@ -521,10 +521,16 @@ class ChannelManager:
                             safe['updated_at'] = remote_updated
                             safe['updated_by'] = from_bot
                             safe['deleted_at'] = final_deleted
-                            set_clause = ', '.join(f"{col} = ?" for col in safe)
+                            _CHAN_ALLOWED: frozenset[str] = frozenset(_SYNC_ALLOWED_COLUMNS)
+                            for col in safe:
+                                if col not in _CHAN_ALLOWED:
+                                    log.error("sync_channels: rejecting disallowed column %r from %s", col, from_bot)
+                                    raise ValueError(f"disallowed column: {col!r}")
+
+                            set_clause = ", ".join(f"{col} = ?" for col in safe)
                             await db.execute(
                                 f"UPDATE channels SET {set_clause} WHERE name = ?",
-                                (*safe.values(), name)
+                                (*safe.values(), name),
                             )
 
                     cur = await db.execute(
