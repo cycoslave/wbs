@@ -1391,19 +1391,19 @@ async def cmd_who(core, handle, session_id, arg, respond):
     await respond("Bots connected:")
     if core.bot_sessions:
         for idx, (bot_id, bot_session) in enumerate(core.bot_sessions.items()):
-                bot_handle = getattr(bot_session, 'handle', None) or getattr(bot_session, 'nick', None) or getattr(bot_session, 'name', None) or str(bot_id)
-                
-                # Get connection time if available
-                connect_time = getattr(bot_session, 'connected_at', None)
-                if connect_time:
-                    time_str = datetime.fromtimestamp(connect_time).strftime("%d %b %H:%M")
-                else:
-                    time_str = "Unknown"
-                
-                # Get version if available
-                version = getattr(bot_session, 'version', None) or f"WBS {__version__}"
-                
-                await respond(f"  [{idx:02d}]  ->{bot_handle:12s} ({time_str}) {version}")
+            bot_handle = getattr(bot_session, 'handle', None) or getattr(bot_session, 'nick', None) or getattr(bot_session, 'name', None) or str(bot_id)
+            
+            # Get connection time if available
+            connect_time = getattr(bot_session, 'connected_at', None)
+            if connect_time:
+                time_str = datetime.fromtimestamp(connect_time).strftime("%d %b %H:%M")
+            else:
+                time_str = "Unknown"
+            
+            # Get version if available
+            version = getattr(bot_session, 'version', None) or f"WBS {__version__}"
+            
+            await respond(f"  [{idx:02d}]  ->{bot_handle:12s} ({time_str}) {version}")
     else:
         await respond("  (none)")
 
