@@ -224,7 +224,7 @@ class GameManager:
                     (game_name, "game", target, owner)
                 )
 
-            log.info("Loaded game: %s", game_name)
+            #log.info("Loaded game: %s", game_name)
             return game
 
         except Exception as e:
