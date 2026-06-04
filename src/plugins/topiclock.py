@@ -1,169 +1,138 @@
 # src/plugins/topiclock.py
 """
-WBS Plugin: topiclock.py 
-version: 0.1.0
+WBS Plugin: topiclock.py
+version: 1.0.0
 by: cyco
-Description: Set and watch channel limit
+Description: Lock a channel's topic. Any user who changes the topic
+             receives a NOTICE and the locked topic is immediately restored.
 """
 import aiosqlite
 import time
-from typing import Dict
 
 from . import Plugin
-from ..db import get_db 
+from ..db import get_db
 
-#    is_topiclock BOOLEAN DEFAULT 0, -- TOPICLOCK
-#    topiclock TEXT DEFAULT '',
-#    topiclock_by TEXT DEFAULT '',
-#    topiclock_at INTEGER DEFAULT 0,
-#    topiclock_reason TEXT DEFAULT '',
+class topicPlugin(Plugin):
+    name    = "topiclock"
+    version = "1.0.0"
 
-class limitPlugin(Plugin):
-    name       = "topiclock"
-    version    = "0.1.0"
-    LIMITADD   = 15
-    LIMITTOL   = 2
-    LIMITDELTA = 300
     TABLE_SQL = [
         """
         CREATE TABLE IF NOT EXISTS topiclock (
-            channel    TEXT    PRIMARY KEY,
-            enabled    BOOLEAN DEFAULT 1,
-            limitadd   INTEGER DEFAULT 15,
-            limittol   INTEGER DEFAULT 2,
-            limitdelta INTEGER DEFAULT 300,
-            updated_at INTEGER DEFAULT (strftime('%s','now'))
+            channel   TEXT    PRIMARY KEY,
+            enabled   BOOLEAN NOT NULL DEFAULT 0,
+            topic     TEXT    NOT NULL DEFAULT '',
+            locked_by TEXT    NOT NULL DEFAULT '',
+            locked_at INTEGER NOT NULL DEFAULT 0
         )
         """
     ]
 
-    def __init__(self, core):
-        super().__init__(core)  # sets self.log
-        self.limit_last_change: Dict[str, float] = {}
-    
-    async def load(self):
-        """Initialize plugin and register timers"""
+    async def load(self) -> None:
         await super().load()
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
-            await db.commit() 
-        self.core.send_irc({
-            'cmd': 'REGISTER_IRC_TIMER',
-            'name': 'limit',
-            'interval': 300
-        })
-        self.log.info(f"Plugin {self.name} {self.version} loaded")
-    
-    async def unload(self):
-        """Unload plugin and unregister timers"""
-        self.core.send_irc({
-            'cmd': 'UNREGISTER_IRC_TIMER',
-            'name': 'limit'
-        })
-        async with get_db(self.core.db_path) as db:
-            await db.execute("DROP TABLE IF EXISTS limit_settings")
-            await db.commit() 
+            await db.commit()
+        self.log.info("Plugin %s %s loaded", self.name, self.version)
+
+    async def unload(self) -> None:
         await super().unload()
-        self.log.info("Limit plugin unloaded")
+        self.log.info("Plugin %s unloaded", self.name)
 
-    async def on_IRC_TIMER_LIMIT(self, event):
-        """Periodic op enforcement - FULL IRC access via event"""
-        irc_data = event['irc_data']
-        #self.log.info(f"data: {irc_data}")
-        
-        if not irc_data['connected']:
+    async def on_CHANNEL_TOPIC(self, event: dict) -> None:
+        """
+        Fires on RPL_332 — both server-sent (on join) and user-changed.
+        nick is populated only when a user changed the topic (not server).
+        """
+        chan  = event.get("channel", "")
+        nick  = event.get("nick", "")
+        topic = event.get("topic", "")
+
+        if not chan:
             return
-        
-        for chan, chan_data in irc_data['channels'].items():
-            bot_is_op = chan_data['bot_op']
-            if not bot_is_op:
-                continue
 
-            cfg = await self._load_settings(chan)
-            if not cfg["enabled"]:
-                continue
+        cfg = await self._load_settings(chan)
+        if not cfg["enabled"] or not cfg["topic"]:
+            return
 
-            now = time.time()
-            if chan not in self.limit_last_change:
-                self.limit_last_change[chan] = now - cfg["limitdelta"]
-            if self.limit_last_change[chan] + cfg["limitdelta"] > now:
-                continue
+        # Nothing to do if topic already matches
+        if topic == cfg["topic"]:
+            return
 
-            current_limit = self.core.channels[chan].limit
-            newlimit = chan_data['users'] + cfg["limitadd"]
-            if abs(current_limit - newlimit) <= cfg["limittol"]:
-                continue
+        bot_nick = getattr(getattr(self.core, "irc", None), "nick", "")
 
-            self.log.info(f"Setting limit on {chan} from {current_limit} to {newlimit}")
-            self.core.send_irc({
-                'cmd': 'mode',
-                'channel': chan,
-                'modes': f"+l {newlimit}"
-            })
-            self.limit_last_change[chan] = now
+        # A real user changed it — notify them
+        if nick and nick != bot_nick:
+            await self.send_notice(
+                nick,
+                f"[topiclock] The topic in {chan} is locked. "
+                f"Your change has been reverted. "
+                f"Contact a channel operator to change it."
+            )
+            self.log.info("topiclock: %s changed topic in %s — restoring.", nick, chan)
 
-    def _get_current_limit(self, chan_data: dict) -> int:
-        """Extract current +l limit from mode string and params"""
-        mode_str = chan_data.get('mode', '')
-        mode_params = chan_data.get('mode_params', {})
-        
-        # Check if +l is active in modes
-        if 'l' in mode_str and 'l' in mode_params:
-            try:
-                return int(mode_params['l'])
-            except (ValueError, TypeError):
-                pass
-        
-        # No limit set
-        return 0
-    
-    async def on_MODE(self, event):
-        """Track manual +l changes"""
-        chan = event['channel']
-        if 'l' in event['modes']:
-            self.limit_last_change[chan] = time.time()
+        # Restore locked topic
+        self.core.send_irc({
+            "cmd": "TOPIC",
+            "channel": chan,
+            "topic": cfg["topic"],
+        })
 
-    async def set(self, chan: str, param: str, value: str, nick: str):
-        """Called by partyline: .limitset #chan <param> <value>"""
-        valid = {
-            "enabled":    ("Enabled",     lambda v: v in ("0","1"), int),
-            "limitadd":   ("Limit add",   str.isdigit,              int),
-            "limittol":   ("Tolerance",   str.isdigit,              int),
-            "limitdelta": ("Delta (secs)","".isdigit,               int),
-        }
-        param = param.lower()
-        if param not in valid:
-            return f"Usage: .limitset <chan> <{'|'.join(valid)}> <value>"
-        label, validate, cast = valid[param]
-        if not validate(value):
-            return f"{label} must be a valid value."
-        cast_value = cast(value)
-        await self._save_setting(chan, **{param: cast_value})
-        # invalidate cooldown so new delta takes effect immediately
-        if param == "limitdelta":
-            self.limit_last_change.pop(chan, None)
-        return f"[limit] {chan} {label} set to {cast_value}."
+    async def cmd_topiclock(self, chan: str, nick: str, args: str) -> str:
+        """
+        !topiclock           — toggle lock on/off
+        !topiclock <topic>   — set and lock a new topic immediately
+        Requires op flag (enforced by caller).
+        """
+        cfg = await self._load_settings(chan)
+
+        if args:
+            new_topic = args.strip()
+            await self._save_setting(
+                chan,
+                enabled=1,
+                topic=new_topic,
+                locked_by=nick,
+                locked_at=int(time.time()),
+            )
+            self.core.send_irc({"cmd": "TOPIC", "channel": chan, "topic": new_topic})
+            return f"[topiclock] {chan} locked to: {new_topic}"
+
+        # Toggle
+        new_state = 0 if cfg["enabled"] else 1
+        await self._save_setting(
+            chan,
+            enabled=new_state,
+            locked_by=nick,
+            locked_at=int(time.time()),
+        )
+        state_str = "enabled" if new_state else "disabled"
+
+        # Re-enforce immediately when re-enabling
+        if new_state and cfg["topic"]:
+            self.core.send_irc({"cmd": "TOPIC", "channel": chan, "topic": cfg["topic"]})
+
+        return f"[topiclock] {chan} topiclock {state_str}."
 
     async def _load_settings(self, chan: str) -> dict:
-        defaults = {"enabled": 0, "maxusers": 20, "kick_threshold": 5, "reset_interval": 60}
-        
+        defaults = {"enabled": 0, "topic": "", "locked_by": "", "locked_at": 0}
         async with get_db(self.core.db_path) as db:
             try:
                 async with db.execute(
-                    "SELECT * FROM limit_settings WHERE channel = ?", (chan,)
+                    "SELECT * FROM topiclock WHERE channel = ?", (chan,)
                 ) as cursor:
                     row = await cursor.fetchone()
                     return dict(row) if row else defaults
-            except aiosqlite.OperationalError as exc:
-                self.log.warning("limit_settings missing for %s, using defaults", chan)
+            except aiosqlite.OperationalError:
+                self.log.warning("topiclock table missing for %s — using defaults", chan)
                 return defaults
 
-    async def _save_setting(self, channel: str, **kwargs):
+    async def _save_setting(self, channel: str, **kwargs) -> None:
         cols = ", ".join(f"{k}=?" for k in kwargs)
         async with get_db(self.core.db_path) as db:
             await db.execute(
-                f"INSERT INTO limit_settings(channel) VALUES(?) "
-                f"ON CONFLICT(channel) DO UPDATE SET {cols}, "
-                f"updated_at=strftime('%s','now')",
-                (channel, *kwargs.values())
+                f"INSERT INTO topiclock(channel) VALUES(?) "
+                f"ON CONFLICT(channel) DO UPDATE SET {cols}",
+                (channel, *kwargs.values()),
             )
+            await db.commit()

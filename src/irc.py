@@ -561,10 +561,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_332(self, conn, event):  # RPL_TOPIC
         chan_name = event.arguments[1]
         topic = event.arguments[2]
+        # source is the server on join, a nick!user@host on live change
+        source = str(event.source) if event.source else ""
+        nick = source.split("!")[0] if "!" in source else ""
         self._emit_event({
             'type': 'CHANNEL_TOPIC',
             'channel': chan_name,
-            'topic': topic
+            'topic': topic,
+            'nick': nick,   # empty string if server-sent (join)
         })
 
     def on_324(self, conn, event):  # RPL_CHANNELMODEIS
