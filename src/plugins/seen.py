@@ -45,11 +45,6 @@ Description:
     Schema migration
     ----------------
     Detects and upgrades the 0.2.x TEXT PRIMARY KEY schema on first load.
-
-    TODO
-    ----
-    - max_seens constants are suitable for IRC scale; expose via DB
-      plugin_settings post-MVP if operator tuning is needed.
 """
 
 from __future__ import annotations
@@ -57,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
@@ -181,7 +177,8 @@ class seenPlugin(Plugin):
         lower = text.lower()
 
         if lower.startswith("seen "):
-            reply = await self._query_seen(text[5:].strip())
+            result = await self._query_seen(text[5:].strip())
+            reply  = result or f"I don't remember seeing {text[5:].strip()}."
             await self.send_notice(nick, reply)
             return
 
@@ -298,7 +295,8 @@ class seenPlugin(Plugin):
     async def cmd_seen(self, caller: str, args: str) -> str:
         if not args.strip():
             return "Usage: .seen <nick>"
-        return await self._query_seen(args.strip())
+        result = await self._query_seen(args.strip())
+        return result or f"I don't remember seeing {args.strip()}."
 
     async def cmd_seenstats(self, caller: str, args: str) -> str:
         return await self._stats_text()
@@ -348,35 +346,94 @@ class seenPlugin(Plugin):
         """Query seen from another plugin."""
         return await self._query_seen(nick)
     
+    async def _query_seen_wildcard(self, pattern: str, channel: str) -> str:
+        """
+        Handle wildcard (!seen *) queries.
+        Returns up to 5 most-recent matches with a count header.
+        SQL LIKE: * → %, ? → _
+        """
+        sql_pattern = pattern.replace("*", "%").replace("?", "_")
+        async with get_db(self.core.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM seen WHERE nick LIKE ? COLLATE NOCASE",
+                (sql_pattern,),
+            ) as cur:
+                total = (await cur.fetchone())[0]
+
+            async with db.execute(
+                """
+                SELECT * FROM seen
+                WHERE nick LIKE ? COLLATE NOCASE
+                ORDER BY last_seen DESC
+                LIMIT 5
+                """,
+                (sql_pattern,),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+
+        if not rows:
+            return f"I found no matches for {pattern}."
+
+        names   = ", ".join(r["nick"] for r in rows)
+        # full detail on the most-recent hit only
+        detail  = self._format(rows[0])
+        return (
+            f"I found {total} match{'es' if total != 1 else ''} to your query. "
+            f"{'These are the 5 most recent ones' if total > 1 else 'The most recent one'}: "
+            f"{names}. {detail}"
+        )
+
     async def _cmd_seen(self, asker: str, channel: str, target: str) -> None:
+        """Handle !seen <target> from a public channel."""
         if not target:
             await self.send_privmsg(channel, f"{asker}: Usage: !seen <nick>")
             return
+
+        if "*" in target or "?" in target:
+            reply = await self._query_seen_wildcard(target, channel)
+            await self.send_privmsg(channel, f"{asker}, {reply}")
+            return
+
+        if self._nick_on_channel(target, channel):
+            await self.send_privmsg(
+                channel,
+                f"{asker}, if you can't see {target} here right now, "
+                "you probably need new glasses. ^_^",
+            )
+            return
+
         reply = await self._query_seen(target)
-        if self.tell_seens and "haven't seen" in reply:
+        if self.tell_seens and reply is None:
             await self._queue_notification(asker, target, channel)
-        await self.send_privmsg(channel, f"{asker}: {reply}")
+            await self.send_privmsg(channel, f"{asker}, I don't remember seeing {target}.")
+            return
+
+        await self.send_privmsg(channel, f"{asker}, {reply}")
 
     async def _cmd_seenstats(self, asker: str, channel: str) -> None:
         await self.send_privmsg(channel, f"{asker}: {await self._stats_text()}")
 
-    async def _query_seen(self, target: str) -> str:
+    async def _query_seen(self, target: str) -> Optional[str]:
+        """
+        Return a formatted seen string, or None if not found.
+        (Wildcard queries use _query_seen_wildcard instead.)
+        """
         record = await self._get_exact(target)
         if record:
-            return self._format(target, record)
+            return self._format(record)
 
         if self.fuzzy_search:
             chain = await self._follow_nick_chain(target)
             if chain:
-                old_nick, old_record = chain
-                return self._format(old_nick, old_record, via_nick=target)
+                _, record = chain
+                return self._format(record)
 
         if self.botnet_seens and self._botnet_enabled():
             remote = await self._ask_botnet(target)
             if remote:
-                return self._format(target, remote["record"], via_bot=remote["bot"])
+                return self._format(remote["record"])
 
-        return f"I haven't seen {target}."
+        return None
 
     async def _update(self, nick: str, hostmask: str, channel: str, action: str) -> None:
         if not nick:
@@ -519,19 +576,93 @@ class seenPlugin(Plugin):
         except Exception:
             return []
 
-    def _format(self, nick: str, record: dict,
-                via_nick: str = "", via_bot: str = "") -> str:
-        ts        = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(record["last_seen"]))
-        ago       = self._ago(record["last_seen"])
-        chan      = record.get("channel") or "unknown"
-        act       = record.get("action", "was seen")
-        host      = record.get("hostmask", "")
-        host_part  = f" ({host})" if host else ""
-        bot_part   = f" [via {via_bot}]" if via_bot else ""
-        chain_part = f" [was looking for {via_nick}]" if via_nick else ""
+    def _nick_on_channel(self, nick: str, channel: str) -> bool:
+        """Return True if nick is currently in the given channel."""
+        try:
+            chan_obj = self.core.channel_manager.channels.get(channel)
+            if chan_obj is None:
+                return False
+            return nick.lower() in {u.lower() for u in chan_obj.users}
+        except Exception:
+            return False
+
+    def _format(self, record: dict) -> str:
+        """
+        Format a seen record into the canonical reply string.
+
+        Examples
+        --------
+        Normal (not currently on any tracked channel):
+            saieko (loco@cyco.ca) was last seen quitting #tohands
+            5 days 3 hours 16 minutes ago (30.05.2026 15:16)
+            stating "lost in the netsplit" after spending 5 days 3 hours 16 minutes there.
+
+        Still present:
+            WBS (~WBS@host) was last seen joining #tohands 55 seconds ago
+            (04.06.2026 18:30). WBS is still there.
+        """
+        nick     = record.get("nick", "")
+        host     = record.get("hostmask", "")
+        channel  = record.get("channel") or "unknown"
+        action   = record.get("action", "was seen")
+        ts       = record.get("last_seen", 0)
+
+        host_part = f" ({host})" if host else ""
+        ago       = self._ago(ts)
+
+        # absolute timestamp in DD.MM.YYYY HH:MM format
+        dt_utc    = datetime.utcfromtimestamp(ts)
+        abs_ts    = dt_utc.strftime("%d.%m.%Y %H:%M")
+
+        # ── parse verb from the stored action string ─────────────────
+        #
+        # action examples stored by the tracker:
+        #   "joined #tohands"
+        #   "parted #tohands (bye)"
+        #   "quit (lost in the netsplit)"
+        #   "said something"
+        #   "changed nick to foo"
+        #   "is formerly known as bar"
+        #
+        action_lower = action.lower()
+
+        # joining → check if still present
+        if action_lower.startswith("joined"):
+            still_there = self._nick_on_channel(nick, channel)
+            suffix      = f". {nick} is still there." if still_there else "."
+            return (
+                f"{nick}{host_part} was last seen joining {channel} "
+                f"{ago} ago ({abs_ts}){suffix}"
+            )
+
+        # quitting → extract optional quit message
+        if action_lower.startswith("quit"):
+            # stored as: "quit (message)" or just "quit"
+            msg = ""
+            if "(" in action and action.endswith(")"):
+                msg = action[action.index("(") + 1 : -1].strip()
+            msg_part = f' stating "{msg}"' if msg else ""
+            return (
+                f"{nick}{host_part} was last seen quitting {channel} "
+                f"{ago} ago ({abs_ts}){msg_part} "
+                f"after spending {ago} there."
+            )
+
+        # parting → extract optional part message
+        if action_lower.startswith("parted"):
+            msg = ""
+            if "(" in action and action.endswith(")"):
+                msg = action[action.index("(") + 1 : -1].strip()
+            msg_part = f' stating "{msg}"' if msg else ""
+            return (
+                f"{nick}{host_part} was last seen parting {channel} "
+                f"{ago} ago ({abs_ts}){msg_part}."
+            )
+
+        # everything else (said something, nick change, kick, etc.)
         return (
-            f"{nick}{host_part} was last seen on {chan} "
-            f"{ago} ago ({ts}): {act}.{bot_part}{chain_part}"
+            f"{nick}{host_part} was last seen on {channel} "
+            f"{ago} ago ({abs_ts}): {action}."
         )
 
     @staticmethod
