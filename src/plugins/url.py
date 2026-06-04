@@ -16,16 +16,9 @@ from . import Plugin
 from .. import __version__
 
 URL_PATTERN = re.compile(r'(https?://[^\s<>"{}|\\^`\[\]]+)', re.IGNORECASE)
-
-# Hard cap on response body read
-MAX_CONTENT_BYTES = 524_288   # 512 KB
-
-# Only these content-types will be parsed
-ALLOWED_CONTENT_TYPES = {'text/html', 'application/xhtml+xml'}
-
-# TLDs blocked regardless of IP resolution
-BLOCKED_TLDS = {'.gov', '.mil'}
-
+MAX_CONTENT_BYTES = 524_288   # 512 KB cap on response body read
+ALLOWED_CONTENT_TYPES = {'text/html', 'application/xhtml+xml'}  # Only these content-types will be parsed
+BLOCKED_TLDS = {'.gov', '.mil'}  # TLDs blocked regardless of IP resolution
 # Explicit hostname/IP blocklist
 BLOCKED_HOSTS = {
     'localhost',
