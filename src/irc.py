@@ -24,6 +24,7 @@ from .channel import ChannelManager
 from . import __version__
 
 log = logging.getLogger("wbs.irc")
+_IRC_MAX_BYTES = 510
 
 class EventType:
     PUBMSG = 'PUBMSG'
@@ -726,6 +727,56 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         log.warning(f"[IRC] Erroneous nick '{self._nick_adjusted}', applying fallback")
         self.on_nicknameinuse(conn, event)
 
+    def _split_action(self, target: str, text: str) -> list[str]:
+        """ACTION wraps text in CTCP: PRIVMSG target :\x01ACTION text\x01"""
+        # \x01ACTION  = 8 bytes,  closing \x01 = 1 byte → 9 extra bytes consumed
+        prefix = f"PRIVMSG {target} :\x01ACTION "
+        suffix_len = 1  # closing \x01
+        max_text_bytes = self._IRC_MAX_BYTES - len(prefix.encode("utf-8")) - suffix_len
+        # Reuse the same chunking logic
+        return self._split_privmsg(target, text, cmd_prefix=f"ACTION_WRAP_{target}")
+
+    def _split_privmsg(self, target: str, text: str, cmd_prefix: str = "PRIVMSG") -> list[str]:
+        """
+        Split text into chunks that fit within IRC's 512-byte line limit.
+
+        The prefix consumed by the command itself is:
+            "PRIVMSG <target> :"   (or NOTICE/ACTION equivalent)
+        Whatever remains of the 510-byte budget is available for text bytes.
+
+        Text is split on UTF-8 byte boundaries so multi-byte characters are
+        never truncated mid-sequence.
+        """
+        prefix = f"{cmd_prefix} {target} :"
+        max_text_bytes = self._IRC_MAX_BYTES - len(prefix.encode("utf-8"))
+
+        if max_text_bytes <= 0:
+            log.warning("[IRC] Target name too long to fit in IRC line: %s", target)
+            return []
+
+        chunks: list[str] = []
+        encoded = text.encode("utf-8")
+
+        while encoded:
+            chunk_bytes = encoded[:max_text_bytes]
+            # Walk back until we have a valid UTF-8 sequence boundary
+            while chunk_bytes:
+                try:
+                    chunk_str = chunk_bytes.decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    chunk_bytes = chunk_bytes[:-1]
+            else:
+                # Pathological: no valid boundary found — skip this chunk
+                log.error("[IRC] Could not decode chunk for %s, skipping", target)
+                encoded = encoded[max_text_bytes:]
+                continue
+
+            chunks.append(chunk_str)
+            encoded = encoded[len(chunk_bytes):]
+
+        return chunks
+
     def execute_command(self, cmd_data: dict):
         """Execute command from cmd_queue (called by poller thread)"""
         cmd = cmd_data.get('cmd')
@@ -759,13 +810,35 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     return
                 
                 if cmd == 'msg':
-                    self.connection.privmsg(cmd_data['target'], clean_message(cmd_data['text']))
+                    text = clean_message(cmd_data['text'])
+                    for chunk in self._split_privmsg(cmd_data['target'], text, "PRIVMSG"):
+                        self.connection.privmsg(cmd_data['target'], chunk)
                 
                 elif cmd == 'notice':
-                    self.connection.notice(cmd_data['target'], clean_message(cmd_data['text']))
+                    text = clean_message(cmd_data['text'])
+                    for chunk in self._split_privmsg(cmd_data['target'], text, "PRIVMSG"):
+                        self.connection.privmsg(cmd_data['target'], chunk)
                 
                 elif cmd == 'action':
-                    self.connection.action(cmd_data['target'], clean_message(cmd_data['text']))
+                    text = clean_message(cmd_data['text'])
+                    target = cmd_data['target']
+                    # Account for 9 bytes of CTCP wrapping (\x01ACTION ...\x01)
+                    prefix = f"PRIVMSG {target} :"
+                    max_bytes = self._IRC_MAX_BYTES - len(prefix.encode("utf-8")) - 9
+                    encoded = text.encode("utf-8")
+                    while encoded:
+                        chunk_bytes = encoded[:max_bytes]
+                        while chunk_bytes:
+                            try:
+                                chunk = chunk_bytes.decode("utf-8")
+                                break
+                            except UnicodeDecodeError:
+                                chunk_bytes = chunk_bytes[:-1]
+                        else:
+                            encoded = encoded[max_bytes:]
+                            continue
+                        self.connection.action(target, chunk)
+                        encoded = encoded[len(chunk_bytes):]
                 
                 elif cmd == 'join':
                     self.connection.join(cmd_data['channel'])
