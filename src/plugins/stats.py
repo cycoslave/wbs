@@ -155,9 +155,8 @@ class statsPlugin(Plugin):
 
     async def _reply(self, channel: str, text: str) -> None:
         """Send a PRIVMSG to *channel* via the IRC layer."""
-        irc = getattr(self.core, "irc", None)
-        if irc and channel:
-            await irc.privmsg(channel, text)
+        if channel:
+            await self.send_privmsg(channel, text)
 
     async def _cmd_stats(self, channel: str, target: str, requester: str) -> None:
         """Handler for !stats [nick]"""
@@ -173,6 +172,7 @@ class statsPlugin(Plugin):
             f"msgs: {row['messages']} | "
             f"actions: {row['actions']} | "
             f"chars: {row['characters']} | "
+            f"bytes: {row['bytes_total']} | "
             f"urls: {row['url_count']} | "
             f"emoji: {row['emoji_count']} | "
             f"kicks: {row['kicks_given']} | "
@@ -213,13 +213,6 @@ class statsPlugin(Plugin):
                     except ValueError:
                         pass
                 await self._cmd_topstats(channel, n)
-        nick    = event.get("nick", "")
-        channel = event.get("channel", "")
-        text    = event.get("text", "") or event.get("message", "")
-
-        is_action = text.startswith("\x01ACTION") and text.endswith("\x01")
-        if is_action:
-            text = text[len("\x01ACTION "):-1]
 
         emojis = _count_emojis(text)
         urls   = _count_urls(text)

@@ -757,7 +757,10 @@ class Core:
     async def on_error(self, event: Dict[str, Any]):
         """IRC error occurred."""
         error_msg = event.get('data', 'Unknown error')
-        log.error(f"IRC error: {error_msg}")
+        if error_msg == "disconnect":
+            pass
+        else:
+            log.error(f"IRC error: {error_msg}")
 
     def send_irc(self, payload: dict) -> None:
         """

@@ -1077,7 +1077,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
             if not self._check_connection_health():
                 if self.connect_now():  # throttled
-                    log.info("Forced reconnect via timer")
+                    #log.info("Forced reconnect via timer")
+                    pass
 
             # Sending event to core            
             event = {
