@@ -9,12 +9,15 @@ import termios
 import logging
 import ipaddress
 import socket
+import re
 from pathlib import Path
 from typing import Optional
 
 from .db import get_db
 
 log = logging.getLogger("wbs.helper")
+_NICK_RE = re.compile(r'^[A-Za-z0-9_\-\[\]\\`^{}|]+$')
+_CHAN_RE = re.compile(r'^[#&][A-Za-z0-9_\-\.]+$')
 
 def clean_message(text: str, max_bytes: int = 255) -> str:
     """
@@ -190,3 +193,9 @@ async def _resolve_to_ip(host: str) -> Optional[str]:
         return await loop.run_in_executor(None, socket.gethostbyname, host)
     except socket.gaierror:
         return None        
+    
+def _valid_nick(nick: str) -> bool:
+    return bool(nick) and bool(_NICK_RE.match(nick)) and len(nick) <= 32
+
+def _valid_channel(chan: str) -> bool:
+    return bool(chan) and bool(_CHAN_RE.match(chan)) and len(chan) <= 50
