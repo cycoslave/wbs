@@ -231,12 +231,12 @@ class seenPlugin(Plugin):
         new_nick = event["new_nick"]
         channel  = event.get("channel", "")
         await self._update(
-            event["nick"], event.get("uhost", ""),
+            event["old_nick"], event.get("uhost", ""),
             channel, f"changed nick to {new_nick}"
         )
         await self._update(
             new_nick, event.get("uhost", ""),
-            channel, f"is formerly known as {event['nick']}"
+            channel, f"is formerly known as {event['old_nick']}"
         )
 
     async def on_KICK(self, event: dict) -> None:
