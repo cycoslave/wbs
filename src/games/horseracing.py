@@ -339,6 +339,13 @@ class HorseRacingGame(Game):
                 f"  {nick}: {' | '.join(parts)}  [{tag}]  bank: ${cash}"
             )
 
+            if cash == 0:
+                await self.say(
+                    chan,
+                    f"  \x02{nick}\x02 is broke! "
+                    f"Next !bet will give you ${cfg['starting_cash'] // 2} to get back in the race."
+                )
+
         session.data["phase"] = "finished"
         session.task = None
         await self._post_round_prompt(session)
