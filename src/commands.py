@@ -1447,7 +1447,7 @@ async def cmd_handle(core, handle: str, session_id: int, arg: str, respond):
     # Update own session
     if session_id in core.partyline.sessions:
         core.partyline.sessions[session_id]['handle'] = new_handle
-        core.user.change_handle(handle, new_handle)
+        await core.user.change_handle(handle, new_handle)
         await respond(f"Your handle is now: {new_handle}")
     else:
         await respond("Your handle was not changed.")
