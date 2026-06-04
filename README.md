@@ -6,8 +6,16 @@ An Eggdrop like bot system in Python.
 It is recommended that you use pyenv to create a virtual environment to run WBS.
 Works best with Python 3.12.7.
 
-- Run 'pip install -r requirements.lock' to install the dependencies
-
+- git clone https://github.com/cycoslave/wbs.git
+- cd wbs
+- python3 -m venv .venv
+- source .venv/bin/activate
+- pip install .
+- cp config.json.example config.json
+- edit config.json
+- ./wbs --seed (to seed the database) 
+      or
+  ./wbs --seed -f (to do it in foreground)
 
 ## Usage
 ```
