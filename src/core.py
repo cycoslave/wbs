@@ -254,40 +254,38 @@ class Core:
             self.guard.release(peer_ip)    
 
     async def on_partyline_connect(self, event: dict):
-        handle  = event["handle"]
-        peer_ip = event.get("peer_ip", "unknown")
-
-        log.info(f"Partyline newuser {handle}")
-
-        streams = self.net_listener._pending_streams.pop(handle.lower(), None)
-        if streams is None:
-            log.warning(f"No pending streams for {handle} — releasing guard slot")
-            if self.guard:
-                self.guard.release(peer_ip)
+        handle  = event['handle']
+        peer_ip = event.get('peer_ip', 'unknown')
+        conn_id = event.get('conn_id')
+        streams = self.net.listener._pending_streams.pop(conn_id, None)
+        if not streams:
+            log.error(f"No pending stream for {handle} (conn_id={conn_id})")
             return
-
         reader, writer = streams
-
-        try:
-            response_q = mp.Queue()
-            session_id = self.partyline.register_remote("telnet", handle, response_q)
-            session = Session(
-                session_id, "telnet", handle=handle,
-                reader=reader, writer=writer,
-                core_q=self.core_q, response_q=response_q,
-            )
-            session.peer_ip = peer_ip
-            self.party_sessions[session_id] = session
-        except Exception as e:
-            log.error(f"Session setup failed for {handle}: {e}")
-            if self.guard:
-                self.guard.release(peer_ip)
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-            return
+        response_q = asyncio.Queue()
+        session_id = self.partyline.next_id
+        self.partyline.next_id += 1
+        session = Session(
+            session_id=session_id,
+            session_type='telnet',
+            handle=handle,
+            core_q=self.core_q,
+            response_q=response_q,
+            reader=reader,
+            writer=writer,
+        )
+        self.party_sessions[session_id] = session
+        self.partyline.sessions[session_id] = {
+            'type': 'telnet',
+            'handle': handle,
+            'queue': response_q,
+        }
+        self.partyline.broadcast(
+            f"*** {handle} joined the partyline (telnet)",
+            exclude_session=session_id
+        )
+        log.info(f"Partyline session {session_id} created for {handle} from {peer_ip}")
+        asyncio.create_task(session.run())
 
         async def _run_with_timeout():
             try:

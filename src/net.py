@@ -11,6 +11,7 @@ import multiprocessing as mp
 import socket
 import ssl as ssl_lib
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -472,11 +473,12 @@ class NetListener:
         if self.guard:
             self.guard.record_success(peer_ip)
 
-        #log.info(f"Partyline auth OK: {handle} from {peer_ip}")
-        self._pending_streams[handle.lower()] = (reader, writer)
+        conn_id = str(uuid.uuid4())
+        self._pending_streams[conn_id] = (reader, writer)
         self.core_q.put_nowait({
             "type":    "PARTYLINE_CONNECT",
             "handle":  handle,
             "peer":    peer,
             "peer_ip": peer_ip,
+            "conn_id": conn_id,
         })
