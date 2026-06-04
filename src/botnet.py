@@ -253,6 +253,11 @@ class BotnetManager:
             link.writer.close()
             await link.writer.wait_closed()
         self.subnet.unregister_peer(botname)
+        self.topology = {
+            h: via for h, via in self.topology.items()
+            if via != botname.lower()
+        }
+        self.core.bot_sessions.pop(botname.lower(), None)
         self.core.partyline.broadcast(f"*** {botname} unlinked from botnet", True)
         log.info(f"Peer {botname} disconnected.")
 
@@ -287,8 +292,7 @@ class BotnetManager:
             log.error(f"Read error from {handle}: {e}")
         finally:
             self.subnet.unregister_peer(handle)
-            if handle.lower() in self.peers:
-                del self.peers[handle.lower()]
+            self.peers.pop(handle.lower(), None)
             if not writer.is_closing():
                 writer.close()
                 await writer.wait_closed()
@@ -298,6 +302,7 @@ class BotnetManager:
                 h: via for h, via in self.topology.items()
                 if via != handle.lower()
             }
+            self.core.bot_sessions.pop(handle.lower(), None)
             log.info(f"Peer {handle} disconnected")
 
     async def process_incoming(self, from_bot: str, line: str, reader, writer):
