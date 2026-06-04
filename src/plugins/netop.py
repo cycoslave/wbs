@@ -4,18 +4,6 @@ WBS Plugin: netop.py
 version: 0.2.0
 by: cyco
 Description: Get op from linked bots & Give ops to linked bots.
-
-Security hardening (0.2.0):
-  - from_peer validated against authenticated botnet peers on all botnet handlers
-  - target nick verified as a known linked bot before issuing +o
-  - Input sanitization on nick/channel args from botnet messages
-  - on_MODE now requires authed+connected peers (consistent with on_JOIN)
-  - Cooldown dicts pruned on timer tick (bounded memory)
-  - on_NEWCHAN rate-limited per channel
-  - on_sugop implemented and no longer a registered no-op
-  - COOLDOWN raised to 30s
-  - Rejected requests from unknown peers logged at WARNING
-  - Exception handling narrowed to ValueError/RuntimeError
 """
 import time
 from typing import Dict, Optional, Tuple
@@ -29,8 +17,8 @@ _MAX_COOLDOWN_ENTRIES = 1000
 class netopPlugin(Plugin):
     name    = "netop"
     version = "0.2.0"
-    COOLDOWN = 30       # seconds — raised from 10; op-granting actions need a longer window
-    NEWCHAN_COOLDOWN: Dict[str, float] = {}  # per-channel rate limit for on_NEWCHAN
+    COOLDOWN = 30
+    NEWCHAN_COOLDOWN: Dict[str, float] = {}
 
     def __init__(self, core):
         super().__init__(core)
