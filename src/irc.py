@@ -555,7 +555,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         try:
             payload = event.arguments[0]  # e.g. "wbs=+~wbs@1.2.3.4"
             host = payload.split('@', 1)[1].strip()
-            log.info(f"[IRC] Public IP from USERHOST: {host}")
+            #log.info(f"[IRC] Public IP from USERHOST: {host}")
             self._emit_event({'type': 'BOT_PUBLIC_IP', 'ip': host})
         except (IndexError, ValueError):
             log.warning(f"[IRC] Could not parse USERHOST: {event.arguments!r}")

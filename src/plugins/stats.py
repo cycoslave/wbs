@@ -153,8 +153,66 @@ class statsPlugin(Plugin):
             await db.execute(f"DROP TABLE IF EXISTS {old_table}")
         self.log.debug("stats: migration check complete")
 
+    async def _reply(self, channel: str, text: str) -> None:
+        """Send a PRIVMSG to *channel* via the IRC layer."""
+        irc = getattr(self.core, "irc", None)
+        if irc and channel:
+            await irc.privmsg(channel, text)
+
+    async def _cmd_stats(self, channel: str, target: str, requester: str) -> None:
+        """Handler for !stats [nick]"""
+        row = await self.get_nick_stats(target, channel)
+        if not row:
+            await self._reply(channel, f"{requester}: No stats found for {target} in {channel}.")
+            return
+        import datetime
+        last = datetime.datetime.fromtimestamp(row["last_seen"]).strftime("%Y-%m-%d %H:%M")
+        await self._reply(
+            channel,
+            f"\x02{target}\x02 [{channel}] — "
+            f"msgs: {row['messages']} | "
+            f"actions: {row['actions']} | "
+            f"chars: {row['characters']} | "
+            f"urls: {row['url_count']} | "
+            f"emoji: {row['emoji_count']} | "
+            f"kicks: {row['kicks_given']} | "
+            f"last: {last}",
+        )
+
+    async def _cmd_topstats(self, channel: str, n: int) -> None:
+        """Handler for !topstats [n]"""
+        rows = await self.get_top_nicks(channel=channel, limit=n)
+        if not rows:
+            await self._reply(channel, f"No stats recorded for {channel} yet.")
+            return
+        parts = [f"{i+1}. \x02{r['nick']}\x02 ({r['messages']} msgs)"
+                for i, r in enumerate(rows)]
+        await self._reply(channel, f"Top {n} in {channel}: " + " | ".join(parts))
+
     async def on_PUBMSG(self, event: dict) -> None:
         """Public channel message — also handles CTCP ACTION (/me)."""
+        nick    = event.get("nick", "")
+        channel = event.get("channel", "")
+        text    = event.get("text", "") or event.get("message", "")
+
+        is_action = text.startswith("\x01ACTION") and text.endswith("\x01")
+        if is_action:
+            text = text[len("\x01ACTION "):-1]
+
+        if not is_action and text.startswith("!"):
+            parts = text.split()
+            cmd   = parts[0].lower()
+            if cmd == "!stats":
+                target = parts[1] if len(parts) > 1 else nick
+                await self._cmd_stats(channel, target, nick)
+            elif cmd == "!topstats":
+                n = 5
+                if len(parts) > 1:
+                    try:
+                        n = max(1, min(int(parts[1]), 10))
+                    except ValueError:
+                        pass
+                await self._cmd_topstats(channel, n)
         nick    = event.get("nick", "")
         channel = event.get("channel", "")
         text    = event.get("text", "") or event.get("message", "")
