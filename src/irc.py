@@ -1000,14 +1000,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             self.irc_timers[name].cancel()
         task = asyncio.create_task(self._irc_timer_loop(name, interval))
         self.irc_timers[name] = task
-        log.info(f"Registered IRC timer: {name} ({interval}s)")
+        #log.info(f"Registered IRC timer: {name} ({interval}s)")
 
     async def _unregister_irc_timer(self, name: str):
         """Cancel and remove a named IRC timer."""
         if name in self.irc_timers:
             self.irc_timers[name].cancel()
             del self.irc_timers[name]
-            log.info(f"Unregistered IRC timer: {name}") 
+            #log.info(f"Unregistered IRC timer: {name}") 
 
     def connect_now(self):
         """Force reconnect if throttled cooldown passed."""
@@ -1018,7 +1018,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         self.last_connect_attempt = now
         if not self.is_connected:  # property, no ()
             self.jump_server("Timer reconnect")
-            log.info("Timer forced jump_server()")
+            #log.info("Timer forced jump_server()")
             return True
         return False
 

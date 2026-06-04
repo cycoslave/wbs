@@ -792,7 +792,7 @@ class Core:
                 self.send_irc({'cmd': 'ping', 'token': f'LAG{int(now)}'})
 
     async def register_timer(self, name: str, callback, interval: float, randomize: bool = False):
-        log.debug(f"Registered timer '{name}': {interval}s")   # ← once, at registration
+        #log.debug(f"Registered timer '{name}': {interval}s")   # ← once, at registration
         async def timer_loop():
             current_interval = interval
             while True:

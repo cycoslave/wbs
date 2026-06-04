@@ -402,6 +402,17 @@ class seenPlugin(Plugin):
             )
             return
 
+        shared_channels = self._channels_for_nick(target)
+        # Exclude the channel the query came from (already handled above)
+        other_channels = [c for c in shared_channels if c.lower() != channel.lower()]
+        if other_channels:
+            chan_list = ", ".join(other_channels[:3])  # cap at 3 to avoid spam
+            await self.send_privmsg(
+                channel,
+                f"{asker}, I can see {target} right now on {chan_list}.",
+            )
+            return
+
         reply = await self._query_seen(target)
         if self.tell_seens and reply is None:
             await self._queue_notification(asker, target, channel)
