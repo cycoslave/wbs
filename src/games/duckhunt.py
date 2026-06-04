@@ -105,7 +105,7 @@ class DuckhuntGame(Game):
         await super().start_session(session)
         await self.send_privmsg(
             session.target,
-            "DuckHunt started. Wait for a duck, then use \x02!bang\x02",
+            "\x02[DuckHunt]\x02 Game started. Wait for a duck, then use \x02!bang\x02",
         )
         session.task = asyncio.create_task(self._hunt_loop(session))
 
