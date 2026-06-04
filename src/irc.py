@@ -216,6 +216,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def __init__(self, config, core_q, irc_q):
         self.config = config
         self._supervisor_ppid = os.getppid()
+        self._irc_ready = False
         self.chan = ChannelManager(self.config['db']['path'])
         self.user = UserManager(self.config['db']['path'])
         self.server_caps = ServerCaps()
@@ -319,7 +320,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     @property 
     def is_connected(self) -> bool:
         """Connected to IRC server?"""
-        return self.connection.is_connected()
+        return self._irc_ready
 
     def on_pong(self, conn, event):
         """Server PONG reply — emit to core for lag measurement."""
@@ -331,6 +332,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
 
     def on_welcome(self, conn, event):
         """Connected and registered - join channels"""
+        self._irc_ready = True
         log.info(f"Connected as {conn.get_nickname()}")
         conn.mode(conn.get_nickname(), "+i-ws")
         numerics = {
@@ -360,6 +362,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     
     def on_disconnect(self, conn, event):
         """Connection lost"""
+        self._irc_ready = False
         log.warning("Disconnected from server")
         self.server_caps.reset()
         self._nick_adjusted = self._desired_nick
