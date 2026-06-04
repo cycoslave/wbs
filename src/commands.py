@@ -1401,8 +1401,9 @@ async def cmd_who(core, handle, session_id, arg, respond):
     
     # Display connected bots
     await respond("Bots connected:")
-    if core.bot_sessions:
-        for idx, (bot_id, bot_session) in enumerate(core.bot_sessions.items()):
+    bot_sessions = getattr(core, 'bot_sessions', {})
+    if bot_sessions:
+        for idx, (bot_id, bot_session) in enumerate(bot_sessions.items()):
             bot_handle = getattr(bot_session, 'handle', None) or getattr(bot_session, 'nick', None) or getattr(bot_session, 'name', None) or str(bot_id)
             
             # Get connection time if available
