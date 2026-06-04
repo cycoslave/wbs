@@ -954,32 +954,32 @@ class BotnetManager:
     async def share_users(self, link: BotLink):
         users = await self.user.serialize_for_peer()
         await self._safe_send(link.writer, f"SHARE USERS {json.dumps(users)}\n")
-        log.info(f"Shared {len(users)} users to {link.name}")
+        #log.info(f"Shared {len(users)} users to {link.name}")
 
     async def share_user_access(self, link: BotLink):
         access = await self.user.serialize_access_for_peer()
         await self._safe_send(link.writer, f"SHARE USERACCESS {json.dumps(access)}\n")
-        log.info(f"Shared {len(access)} user_access rows to {link.name}")
+        #log.info(f"Shared {len(access)} user_access rows to {link.name}")
 
     async def share_channels(self, link: BotLink):
         channels = await self.chan.serialize_for_peer()
         await self._safe_send(link.writer, f"SHARE CHANNELS {json.dumps(channels)}\n")
-        log.info(f"Shared {len(channels)} channels to {link.name}")
+        #log.info(f"Shared {len(channels)} channels to {link.name}")
 
     async def share_bots(self, link: BotLink, exclude_bot: str):
         bots = await self.bot.serialize_for_peer(exclude_bot)
         await self._safe_send(link.writer, f"SHARE BOTS {json.dumps(bots)}\n")
-        log.info(f"Shared {len(bots)} bots to {link.name}")
+        #log.info(f"Shared {len(bots)} bots to {link.name}")
 
     async def share_bot_access(self, link: BotLink):
         access = await self.bot.serialize_access_for_peer()
         await self._safe_send(link.writer, f"SHARE BOTACCESS {json.dumps(access)}\n")
-        log.info(f"Shared {len(access)} bot_access rows to {link.name}")
+        #log.info(f"Shared {len(access)} bot_access rows to {link.name}")
 
     async def share_subnets(self, link: BotLink):
         subnets = await self.subnet.serialize_for_peer(link.share_level, link.subnet_id)
         await self._safe_send(link.writer, f"SHARE SUBNETS {json.dumps(subnets)}\n")
-        log.info(f"Shared {len(subnets)} subnets to {link.name}")
+        #log.info(f"Shared {len(subnets)} subnets to {link.name}")
 
     async def handle_share_subnets(self, data: str, from_bot: str):
         subnets = json.loads(data)

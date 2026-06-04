@@ -140,7 +140,6 @@ class Core:
         log.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
         
-        log.info("Loading configured plugins...")
         for plugin_name in self.config.get('plugins', []):
             try:
                 await self.plugin.load_plugin(plugin_name)
@@ -158,7 +157,7 @@ class Core:
                 output_callback=self._console_output
             )
         else:
-            log.info("Background mode")
+            log.info("Going to background..")
 
         await self.botnet.start()
         

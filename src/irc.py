@@ -380,7 +380,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'host': str(event.source),
             'text': text
         }
-        log.debug(f"[IRC] Emitting PUBMSG: {event_data}")
+        #log.debug(f"[IRC] Emitting PUBMSG: {event_data}")
         self._emit_event(event_data)
     
     def on_privmsg(self, conn, event):
@@ -406,7 +406,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             chan_obj = self.channels.get(chan)
 
             if chan_obj:
-                log.info(f"Building snapshot for {chan}")
+                #log.info(f"Building snapshot for {chan}")
                 try:
                     snapshot = {
                         'users': len(chan_obj.users()),
@@ -685,7 +685,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     def on_featurelist(self, conn, event):
         """005 RPL_ISUPPORT — ingest capabilities."""
         self.server_caps.ingest(event.arguments)
-        log.info(f"[IRC] {self.server_caps}")
+        #log.info(f"[IRC] {self.server_caps}")
 
         # Enforce NICKLEN immediately if nick is too long
         nicklen = self.server_caps.nicklen
