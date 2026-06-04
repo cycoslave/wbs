@@ -1129,6 +1129,7 @@ async def cmd_passwd(core, handle: str, session_id: int, arg: str, respond):
         await respond("Password must be at least 8 characters.")
         return
     await core.user.set_password(target, password)
+    password = None 
 
     if target == handle:
         await respond("Password updated.")
@@ -1457,8 +1458,8 @@ async def cmd_chhandle(core, handle: str, session_id: int, arg: str, respond):
     old_handle, new_handle = arg.split()
     old_handle = old_handle.strip()
     new_handle = new_handle.strip()
-    if len(new_handle) > 20:
-        await respond("New handle too long.")
+    if not _HANDLE_RE.match(new_handle):
+        await respond("Invalid handle. Use only letters, digits, and IRC-safe characters (max 20).")
         return
     
     for sid, sess in core.partyline.sessions.items():
