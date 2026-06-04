@@ -51,7 +51,7 @@ class netopPlugin(Plugin):
         if not from_peer:
             return False
         peers = getattr(self.core.botnet, 'peers', {})
-        link = peers.get(from_peer)
+        link = peers.get(from_peer.lower())
         return bool(link and link.authed and link.connected)
 
     def _prune_cooldowns(self, now: float) -> None:
