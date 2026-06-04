@@ -419,9 +419,21 @@ class seenPlugin(Plugin):
 
     async def _stats_text(self) -> str:
         async with get_db(self.core.db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM seen") as cur:
+            async with db.execute("""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(
+                        LENGTH(nick) +
+                        LENGTH(hostmask) +
+                        LENGTH(channel) +
+                        LENGTH(action)
+                    ), 0)
+                FROM seen
+            """) as cur:
                 row = await cur.fetchone()
-        return f"I'm tracking {row[0] if row else 0} nick(s) in my seen database."
+        count = row[0] if row else 0
+        size  = row[1] if row else 0
+        return f"I'm currently tracking {count} nick(s) using {size} bytes."
 
     async def _queue_notification(self, asker: str, target: str, channel: str) -> None:
         async with get_db(self.core.db_path) as db:
