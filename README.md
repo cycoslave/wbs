@@ -13,9 +13,9 @@ Works best with Python 3.12.7.
 - pip install .
 - cp config.json.example config.json
 - edit config.json
-- ./wbs --seed (to seed the database) 
-      or
-  ./wbs --seed -f (to do it in foreground)
+- ./wbs -f --seed (to seed the database) 
+- make any changes you need, link bots, etc..
+- .detach (to let bot go into background mode)
 
 ## Usage
 ```
