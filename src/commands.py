@@ -866,28 +866,29 @@ async def cmd_devoice(core, handle, session_id, arg, respond):
 
 async def cmd_channels(core, handle: str, session_id: int, arg: str, respond):
     async with get_db(core.db_path) as db:
-        chans = await db.execute("""
-            SELECT name, modes, limit, is_inactive 
+        cursor = await db.execute("""
+            SELECT name, modes, "limit", is_inactive 
             FROM channels 
             WHERE is_inactive = 0 
             ORDER BY name
         """)
-        
-        if not chans:
-            await respond("No channels.")
-            return
-        
-        await respond(" ---- List of Channels ----")
-        total = 0
-        async for row in chans:
-            chan = row['name']
-            modes = row['modes'] or '+n'  # Default modes
-            limit = row['limit'] or 0
-            lim_str = f" {limit}" if limit else ""
-            await respond(f"--> {chan} ({modes}{lim_str})")
-            total += 1
-        
-        await respond(f"TOTAL CHANNELS: {total}")
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await respond("No channels.")
+        return
+
+    await respond(" ---- List of Channels ----")
+    total = 0
+    for row in rows:
+        chan = row['name']
+        modes = row['modes'] or '+n'
+        lim = row['limit'] or 0
+        lim_str = f" {lim}" if lim else ""
+        await respond(f"--> {chan} ({modes}{lim_str})")
+        total += 1
+
+    await respond(f"TOTAL CHANNELS: {total}")
 
 async def cmd_quit(core, handle, session_id, arg, respond):
     """Shutdown bot."""
