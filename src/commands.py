@@ -2680,6 +2680,16 @@ async def cmd_plugins(core, handle: str, session_id: int, arg: str, respond):
 async def cmd_games(core, handle: str, session_id: int, arg: str, respond):
     await _list_loadables(core, respond, "game", "games", "games")
 
+async def cmd_detach(core, handle, session_id, arg, respond):
+    session = core.partyline.sessions.get(session_id, {})
+    if session.get('type') != 'console':
+        await respond("Error: .detach is only valid for console sessions.")
+        return
+    await respond("Detaching. Bot continues in background. Reconnect via telnet or DCC.")
+    core.partyline.unregister_session(session_id)
+    if core.console:
+        await core.console.stop()
+
 # Command registry
 COMMANDS = {
     'help': cmd_help,
@@ -2725,6 +2735,7 @@ COMMANDS = {
     'addhub':       cmd_addhub,
     'rehash': cmd_rehash,
     'restart': cmd_restart,
+    'detach': cmd_detach,
     # user
     'whois':       cmd_whois,
     '+user': cmd_adduser,

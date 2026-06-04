@@ -273,7 +273,7 @@ class UpdateManager:
 
             wbs_root = self._find_wbs_root(extract_root, manifest.version_str)
 
-            self._install_src(wbs_root)
+            self._install_files(wbs_root)
 
             if manifest.full_upgrade:
                 await self._pip_install(wbs_root)

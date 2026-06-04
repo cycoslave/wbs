@@ -50,6 +50,7 @@ COMMAND_MIN_FLAGS: dict[str, Optional[str]] = {
     "blocklist": "A",
     "permithost": "A",
     "denyhost": "A",
+    "detach": "A",
 
     # User / access management
     "chattr": "A",
