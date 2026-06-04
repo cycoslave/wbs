@@ -1,21 +1,22 @@
 # src/games/blackjack.py
 """
 WBS Game: blackjack.py 
-version: 0.1.0
+version: 0.2.0
 by: cyco
 Description: Blackjack game for WBS.
 
-Commands (in-channel):
-  !blackjack          - Start a game. Opens 5-min registration window.
-  !bjjoin               - Join during registration or between rounds.
-  !bjstart              - Owner skips the registration countdown.
-  !bjbet <amount>       - Place bet during betting phase (45s window).
-  !bjhit                - Draw a card on your turn.
-  !bjstand              - Hold your hand on your turn.
-  !blackjack stop     - Owner or chan-op ends the game.
-  !bjset <param> <v>  - Owner configures per-channel settings.
-  !bjcash [nick]        - Check chip balance.
-  !bjtop              - Top 5 chip leaders.
+Flow:
+  Partyline: .gstart blackjack channel #chan  → makes game available (idle)
+  In-channel:
+    !bjstart              - Start a round. Opener is auto-joined.
+    !bjjoin               - Join during registration window.
+    !bjbet <amount>       - Place bet during betting phase (45s window).
+    !bjhit                - Draw a card on your turn.
+    !bjstand              - Hold your hand on your turn.
+    !blackjack stop       - Owner or chan-op ends the game.
+    !bjcash [nick]        - Check chip balance.
+    !bjtop                - Top 5 chip leaders.
+    !bjhelp               - Show command help.
 """
 import asyncio
 import random
@@ -70,9 +71,9 @@ class PlayerState:
     done:  bool      = False
 
 class BlackjackGame(Game):
-    name   = "blackjack"
-    version = "0.1.0"
-    scopes = {"channel"}
+    name    = "blackjack"
+    version = "0.2.0"
+    scopes  = {"channel"}
 
     TABLE_SQL = [
         """
@@ -97,48 +98,53 @@ class BlackjackGame(Game):
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
 
     async def load(self):
-        await super().load()  
+        await super().load()
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
-            await db.commit() 
+            await db.commit()
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[1])
-            await db.commit() 
+            await db.commit()
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
         async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_settings")
-            await db.commit() 
+            await db.commit()
         async with get_db(self.core.db_path) as db:
             await db.execute("DROP TABLE IF EXISTS blackjack_cash")
-            await db.commit() 
-        await super().unload() 
+            await db.commit()
+        await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
     async def start_session(self, session: GameSession):
+        """Called by .gstart — makes the game available but does NOT start a round."""
         chan = session.target
         session.data["cfg"]            = await self._load_settings(chan)
-        session.data["players"]        = {}   # nick -> PlayerState
+        session.data["players"]        = {}
         session.data["deck"]           = []
         session.data["dealer"]         = []
-        session.data["phase"]          = "registering"
+        session.data["phase"]          = "idle"
         session.data["current_player"] = None
         await super().start_session(session)
-        await self._open_registration(session)
+        await self.say(chan,
+            "\x02[Blackjack]\x02 Game is now available! "
+            "Type \x02!bjstart\x02 to start a round."
+        )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)
         if session:
             await self.say(session.target, "[Blackjack] Game over.")
-        await super().stop_session(key)  # cancels task + clears session snapshot
+        await super().stop_session(key)
 
     async def _registration_phase(self, session: GameSession):
         """Wait REGISTRATION_SECS, emit a warning at REGISTRATION_WARN seconds remaining."""
         try:
-            # sleep until the warning point
             await asyncio.sleep(REGISTRATION_SECS - REGISTRATION_WARN)
-            await self.say(session.target, f"[Blackjack] \x0230s left\x02 to join! Type \x02!bjjoin\x02 to get in.")
+            await self.say(session.target,
+                f"[Blackjack] \x0230s left\x02 to join! Type \x02!bjjoin\x02 to get in."
+            )
             await asyncio.sleep(REGISTRATION_WARN)
         except asyncio.CancelledError:
             return
@@ -150,8 +156,8 @@ class BlackjackGame(Game):
         cfg    = session.data["cfg"]
 
         if not players:
-            await self.say(chan, "[Blackjack] No players joined. Game cancelled.")
-            await self.stop_session(session.key)
+            await self.say(chan, "[Blackjack] No players joined. Round cancelled.")
+            session.data["phase"] = "idle"
             return
 
         session.data["phase"] = "betting"
@@ -166,12 +172,10 @@ class BlackjackGame(Game):
         except asyncio.CancelledError:
             return
 
-        # assign default bet to anyone who didn't bet
         for p in players.values():
             if p.bet == 0:
                 p.bet = min(cfg["default_bet"], p.cash)
 
-        # deal two cards each
         deck = new_deck()
         random.shuffle(deck)
         session.data["deck"]   = deck
@@ -197,8 +201,6 @@ class BlackjackGame(Game):
         for nick, p in list(players.items()):
             if p.done:
                 continue
-
-            # natural 21 on deal — auto-stand
             if hand_value(p.hand) == 21:
                 await self.say(chan, f"  {nick}: Natural 21 — auto-stand!")
                 p.done = True
@@ -315,7 +317,28 @@ class BlackjackGame(Game):
         cfg    = session.data["cfg"]
         chan   = session.target
 
-        if cmd == "!bjjoin":
+        if cmd == "!bjstart" and phase in ("idle", "finished"):
+            session.data["phase"] = "registering"
+            # FIX: auto-join the starter
+            if nick not in players:
+                cash = await self._load_cash(nick, cfg["starting_cash"])
+                if cash == 0:
+                    cash = cfg["starting_cash"] // 2
+                players[nick] = PlayerState(nick=nick, cash=cash)
+                await self.say(chan, f"[Blackjack] {nick} started the game and joined with ${cash}.")
+            await self._open_registration(session)
+            return
+
+        elif cmd == "!bjstart" and phase == "registering":
+            # Allow starter/op to force-begin immediately
+            if not self.core.nick_isop(nick, chan) and nick not in players:
+                return await self.notice(nick, "Only a chan-op can skip the registration countdown.")
+            if session.task and not session.task.done():
+                session.task.cancel()
+            await self._begin_round(session)
+            return
+
+        elif cmd == "!bjjoin":
             if phase != "registering":
                 return await self.notice(nick, "Registration is closed. Wait for the next round.")
             if nick in players:
@@ -325,10 +348,6 @@ class BlackjackGame(Game):
                 cash = cfg["starting_cash"] // 2
             players[nick] = PlayerState(nick=nick, cash=cash)
             await self.say(chan, f"[Blackjack] {nick} joined with ${cash}.")
-
-        elif cmd == "!bjstart" and phase == "finished":
-            session.data["phase"] = "registering"
-            await self._open_registration(session)
 
         elif cmd == "!bjbet" and phase == "betting":
             if nick not in players:
@@ -372,16 +391,10 @@ class BlackjackGame(Game):
             session.data["turn_done"].set()
 
         elif cmd == "!blackjack" and len(parts) > 1 and parts[1].lower() == "stop":
-            #if nick != session.owner and not self.core.nick_isop(nick, chan):
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only the game owner or a chan-op can stop the game.")
             await self.stop_session(session.key)
             return
-
-        #elif cmd == "!bjset":
-        #    if nick != session.owner and not self.core.nick_isop(nick, chan):
-        #        return await self.notice(nick, "Only the game owner or a chan-op can change settings.")
-        #    await self._handle_set(session, nick, parts[1:])
 
         elif cmd == "!bjcash":
             target = parts[1] if len(parts) > 1 else nick
@@ -447,17 +460,15 @@ class BlackjackGame(Game):
 
     async def _show_help(self, chan: str):
         self._set_cooldown(chan, "bjhelp")
-        await self.say(chan, f"[Blackjack] commands:")
-        await self.say(chan, f"    !blackjack            - Start a game. Opens 5-min registration window.")
-        await self.say(chan, f"    !bjjoin               - Join during registration or between rounds.")
-        await self.say(chan, f"    !bjstart              - Owner skips the registration countdown.")
-        await self.say(chan, f"    !bjbet <amount>       - Place bet during betting phase (45s window).")
-        await self.say(chan, f"    !bjhit                - Draw a card on your turn.")
-        await self.say(chan, f"    !bjstand              - Hold your hand on your turn.")
-        await self.say(chan, f"    !blackjack stop       - Owner or chan-op ends the game.")
-        #await self.say(chan, f"    !bjset <param> <v>    - Owner configures per-channel settings.")
-        await self.say(chan, f"    !bjcash [nick]        - Check chip balance.")
-        await self.say(chan, f"    !bjtop                - Top 5 chip leaders.")
+        await self.say(chan, "[Blackjack] commands:")
+        await self.say(chan, "    !bjstart              - Start a round. You are auto-joined.")
+        await self.say(chan, "    !bjjoin               - Join during registration window.")
+        await self.say(chan, "    !bjbet <amount>       - Place bet during betting phase (45s window).")
+        await self.say(chan, "    !bjhit                - Draw a card on your turn.")
+        await self.say(chan, "    !bjstand              - Hold your hand on your turn.")
+        await self.say(chan, "    !blackjack stop       - Owner or chan-op ends the game.")
+        await self.say(chan, "    !bjcash [nick]        - Check chip balance.")
+        await self.say(chan, "    !bjtop                - Top 5 chip leaders.")
 
     async def _load_settings(self, channel: str) -> dict:
         async with get_db(self.core.db_path) as db:
@@ -512,21 +523,20 @@ class BlackjackGame(Game):
         """Announce join window and start the registration countdown."""
         chan = session.target
         await self.say(chan,
-            f"\x02[Blackjack]\x02 New round! "
+            f"\x02[Blackjack]\x02 Registration open! "
             f"Type \x02!bjjoin\x02 to play. "
             f"Starting in {REGISTRATION_SECS}s "
-            f"(or type \x02!bjstart\x02 to begin now)."
+            f"(chan-ops: type \x02!bjstart\x02 again to begin immediately)."
         )
         session.task = asyncio.create_task(self._registration_phase(session))
 
     def _on_cooldown(self, chan: str, cmd: str) -> bool:
-        """Returns True and stays silent if cmd is still on cooldown for this channel."""
         now = time.monotonic()
         last = self._cmd_cooldowns.setdefault(chan, {}).get(cmd, 0)
         if now - last < CMD_COOLDOWN_SECS:
             return True
         self._cmd_cooldowns[chan][cmd] = now
         return False
-    
+
     def _set_cooldown(self, chan: str, cmd: str):
-        self._cmd_cooldowns.setdefault(chan, {})[cmd] = time.monotonic()    
+        self._cmd_cooldowns.setdefault(chan, {})[cmd] = time.monotonic()
