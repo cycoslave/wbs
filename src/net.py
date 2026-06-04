@@ -416,12 +416,6 @@ class NetListener:
         listen_port: default 3333.
         """
         cfg = self.config.get("settings", {})
-        if not self.config.get("db_path"):
-            raise RuntimeError(
-                "NetListener: db_path is not set in config. "
-                "Refusing to silently open/create 'wbs.db' in the current directory."
-            )
-
         host = cfg.get("listen_host") or "0.0.0.0"
         port = int(cfg.get("listen_port", 3333))
 
@@ -601,11 +595,9 @@ class NetListener:
             await writer.drain()
             return
 
-        db_path = self.config.get("db_path")
-
         authed = False
         try:
-            async with get_db(db_path) as db:
+            async with get_db(self.db_path) as db:
                 async with db.execute(
                     "SELECT password_hash, locked FROM users "
                     "WHERE handle = ? AND deleted_at IS NULL",
@@ -613,7 +605,7 @@ class NetListener:
                 ) as cursor:
                     row = await cursor.fetchone()
             if row and not row["locked"]:
-                um     = UserManager(db_path)
+                um     = UserManager(self.db_path)
                 authed = um.verify_password(password, row["password_hash"])
         except Exception as e:
             log.error("Auth DB error for %r from %s: %s", handle, peer_ip, e)
