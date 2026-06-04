@@ -796,7 +796,7 @@ class BotnetManager:
             log.warning(f"Skipping duplicate {plugin}:{name} (existing)")
             return
         self.cmds[key] = handler
-        log.info(f"Registered {plugin}:{name}")
+        #log.info(f"Registered {plugin}:{name}")
 
     async def dispatch(self, plugin: str, name: str, **kwargs):
         """Find handler, pass cmd_key + kwargs."""
