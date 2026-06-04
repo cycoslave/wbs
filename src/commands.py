@@ -1530,9 +1530,10 @@ async def cmd_backup(core, handle: str, session_id: int, arg: str, respond):
 
 async def cmd_ignores(core, handle: str, session_id: int, arg: str, respond):
     async with get_db(core.db_path) as db:
-        ignores = await db.execute("SELECT hostmask, flags, comment FROM ignores ORDER BY hostmask")
-        count = 0
-        async for row in ignores:
+        cursor = await db.execute("SELECT hostmask, flags, comment FROM ignores ORDER BY hostmask")
+        rows = await cursor.fetchall()
+        count = len(rows)
+        for row in rows:
             count += 1
             flags = row['flags'] if row['flags'] else ''
             comment = row['comment'] or ''
