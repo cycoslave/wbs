@@ -13,6 +13,7 @@ import secrets
 import string
 import socket
 import asyncio
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
@@ -30,6 +31,7 @@ _BOTATTR_ALLOWED_COLUMNS: frozenset[str] = frozenset({
     "autolink", "role", "autolink_retry_interval",
     "share_level", "password", "comment",
 })
+_HANDLE_RE = re.compile(r'^[a-zA-Z0-9_\-\[\]\\^`|{}]{1,20}$')
 
 async def cmd_help(core, handle, session_id, arg, respond):
     """Show help"""
@@ -1435,14 +1437,10 @@ async def cmd_whom(core, handle: str, session_id: int, arg: str, respond):
     await respond(f"Total users: {total}")
 
 async def cmd_handle(core, handle: str, session_id: int, arg: str, respond):
-    if not arg:
-        await respond("Usage: .handle <new-handle>")
-        return
     new_handle = arg.strip()
-    if len(new_handle) > 20:  # Sanity limit
-        await respond("Handle too long.")
+    if not _HANDLE_RE.match(new_handle):
+        await respond("Invalid handle. Use only letters, digits, and IRC-safe characters (max 20).")
         return
-    
     # Update own session
     if session_id in core.partyline.sessions:
         core.partyline.sessions[session_id]['handle'] = new_handle
