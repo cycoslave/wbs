@@ -49,6 +49,7 @@ _PKG_DIR    = Path(__file__).resolve().parent
 _ROOT_DIR   = _PKG_DIR.parent
 _TMP_DIR    = _ROOT_DIR / ".tmp" / "update"
 _BACKUP_DIR = _ROOT_DIR / ".backup"
+_ROOT_INSTALLABLE = ["main.py", "pyproject.toml", "db/schema.sql"]
 
 class IncompatiblePlatformError(RuntimeError):
     """
@@ -428,7 +429,7 @@ class UpdateManager:
             log.critical("Rollback failed: %s", exc)
             return False
 
-    def _install_src(self, wbs_root: Path) -> None:
+    def _install_files(self, wbs_root: Path) -> None:
         """
         Copy the new src/ from *wbs_root* over the current _PKG_DIR using
         an atomic rename-into-place pattern:
@@ -451,8 +452,15 @@ class UpdateManager:
         _PKG_DIR.rename(old_pkg)
         staging.rename(_PKG_DIR)
         shutil.rmtree(old_pkg, ignore_errors=True)
-
         log.info("New src/ installed successfully.")
+
+        for rel in _ROOT_INSTALLABLE:
+            src_file = wbs_root / rel
+            if src_file.exists():
+                dest = _ROOT_DIR / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest)
+                log.info("Installed %s", rel)
 
     async def _pip_install(self, wbs_root: Path) -> None:
         """
