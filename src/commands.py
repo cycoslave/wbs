@@ -865,27 +865,76 @@ async def cmd_devoice(core, handle, session_id, arg, respond):
     await _chan_mode_cmd(core, handle, arg, respond, "-v", "devoice", "Took voice from")
 
 async def cmd_channels(core, handle: str, session_id: int, arg: str, respond):
+    """
+    .channels — list all active channels with settings and optional IRC live state.
+
+    DB columns used: name, modes, is_inactive, is_autoop, is_autovoice,
+                     is_bitch, is_enforcebans, comment
+    Live IRC state (if connected): users, ops, voices from core.irc_snapshot
+    """
     async with get_db(core.db_path) as db:
         cursor = await db.execute("""
-            SELECT name, modes, "limit", is_inactive 
-            FROM channels 
-            WHERE is_inactive = 0 
-            ORDER BY name
+            SELECT
+                c.name,
+                c.modes,
+                c.is_autoop,
+                c.is_autovoice,
+                c.is_bitch,
+                c.is_enforcebans,
+                c.comment
+            FROM channels c
+            WHERE c.deleted_at IS NULL
+              AND c.is_inactive = 0
+            ORDER BY c.name
         """)
         rows = await cursor.fetchall()
 
     if not rows:
-        await respond("No channels.")
+        await respond("No channels configured.")
         return
 
     await respond(" ---- List of Channels ----")
+
+    # irc_snapshot is a dict keyed by channel name, populated by irc.py
+    # Structure: { '#chan': { 'user_list': [...], 'ops': [...], 'voices': [...] } }
+    snapshot: dict = getattr(core, "irc_snapshot", {})
+    connected: bool = getattr(core, "connected", False)
+
     total = 0
     for row in rows:
-        chan = row['name']
-        modes = row['modes'] or '+n'
-        lim = row['limit'] or 0
-        lim_str = f" {lim}" if lim else ""
-        await respond(f"--> {chan} ({modes}{lim_str})")
+        chan    = row["name"]
+        modes   = row["modes"] or ""
+        comment = row["comment"] or ""
+
+        # Channel flags summary
+        flags = []
+        if row["is_bitch"]:      flags.append("bitch")
+        if row["is_autoop"]:     flags.append("autoop")
+        if row["is_autovoice"]:  flags.append("autovoice")
+        if row["is_enforcebans"]:flags.append("enforcebans")
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+
+        # Live IRC state
+        if connected and chan in snapshot:
+            chan_snap  = snapshot[chan]
+            user_list  = chan_snap.get("user_list", [])
+            ops        = chan_snap.get("ops", [])
+            voices     = chan_snap.get("voices", [])
+            live_str   = (
+                f" | users:{len(user_list)}"
+                f" ops:{len(ops)}"
+                f" voice:{len(voices)}"
+            )
+            mode_str = modes or "+n"
+        elif connected:
+            live_str = " | (not joined)"
+            mode_str = modes or "+n"
+        else:
+            live_str = ""
+            mode_str = modes or "+n"
+
+        comment_str = f"  # {comment}" if comment else ""
+        await respond(f"--> {chan} ({mode_str}){flag_str}{live_str}{comment_str}")
         total += 1
 
     await respond(f"TOTAL CHANNELS: {total}")
