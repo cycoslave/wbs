@@ -24,7 +24,6 @@ from .channel import ChannelManager
 from . import __version__
 
 log = logging.getLogger("wbs.irc")
-_IRC_MAX_BYTES = 510
 
 class EventType:
     PUBMSG = 'PUBMSG'
@@ -107,7 +106,6 @@ class ServerCaps:
         self._raw.clear()
         self._parsed.clear()
 
-    # ── Typed accessors ───────────────────────────────────────────────────────
     @property
     def nicklen(self) -> int:
         return int(self._parsed.get('NICKLEN', 9))
@@ -213,7 +211,8 @@ class ServerCaps:
 
 class WbsIrcBot(irc.bot.SingleServerIRCBot):
     """IRC bot instance - pure dispatcher, no business logic"""
-    
+    _IRC_MAX_BYTES = 510
+
     def __init__(self, config, core_q, irc_q):
         self.config = config
         self._supervisor_ppid = os.getppid()
