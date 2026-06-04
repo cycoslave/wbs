@@ -187,7 +187,7 @@ class Core:
         etype = event.get('type', 'UNKNOWN')
         log.debug(f"Dispatching: {etype} - {event}")
         await self.plugin.dispatch(etype, event)
-        handler = self._handlers.get(etype)
+        handler = self.handlers.get(etype)
         if handler:
             await handler(event)
         else:
@@ -401,7 +401,7 @@ class Core:
                 await self._console_task
             except (asyncio.CancelledError, Exception):
                 pass
-            await self._shutdown("Console exited")
+            #await self._shutdown("Console exited")
 
     async def _shutdown(self, message: str = "Shutting down") -> None:
         """
@@ -1029,14 +1029,25 @@ class Core:
         """Normalized channel lookup. Always use this instead of self.channels.get(channel)."""
         return self.channels.get(self._normalize_chan(channel))
 
-    def _create_safe_task(self, coro, name: str = "unnamed") -> asyncio.Task:
-        """Create an asyncio task that logs exceptions instead of silently swallowing them."""
-        task = self._create_safe_task(coro, name=name)
+    def _create_safe_task(self, coro, *, name: str = "unnamed") -> asyncio.Task:
+        """Schedule a coroutine as a tracked task; logs exceptions instead of swallowing them."""
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(coro, name=name)
+
         def _on_done(t: asyncio.Task) -> None:
             if not t.cancelled() and t.exception() is not None:
-                log.error(f"Task '{name}' raised an exception", exc_info=t.exception())
+                log.error("Task '%s' raised an exception", name, exc_info=t.exception())
+
         task.add_done_callback(_on_done)
         return task
+    
+    def _task_done_callback(self, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._logger.error("Task %s raised an exception: %s", task.get_name(), exc, exc_info=True)
     
     async def _seed_and_autoload_modules(self):
         """Seed configured plugins to DB, then autoload all flagged modules. Single connection."""

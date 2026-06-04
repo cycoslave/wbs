@@ -121,6 +121,7 @@ def check_already_running(pidfile: str) -> None:
 def main():
     args = parse_args()
     _shutting_down = False
+    _pending_full_restart = False
 
     if args.mkpasswd:
         import bcrypt, getpass
