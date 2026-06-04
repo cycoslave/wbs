@@ -611,7 +611,7 @@ class seenPlugin(Plugin):
         ago       = self._ago(ts)
 
         # absolute timestamp in DD.MM.YYYY HH:MM format
-        dt_utc    = datetime.utcfromtimestamp(ts)
+        dt_utc    = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
         abs_ts    = dt_utc.strftime("%d.%m.%Y %H:%M")
 
         # ── parse verb from the stored action string ─────────────────
