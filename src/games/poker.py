@@ -1,22 +1,24 @@
+# src/games/poker.py
 """
 WBS Game: poker.py
-version: 0.1.0
+version: 0.2.0
 by: cyco
 Description: Texas Hold'em Poker game for WBS.
 
-Commands (in-channel):
-  !poker              - Start a game. Opens registration window.
-  !pkjoin             - Join during registration.
-  !pkstart            - Owner/op skips the registration countdown.
-  !pkbet <amount>     - Bet/raise during betting phase.
-  !pkcall             - Call the current bet.
-  !pkcheck            - Check (if no bet to call).
-  !pkfold             - Fold your hand.
-  !pkallin            - Go all-in.
-  !poker stop         - Owner or chan-op ends the game.
-  !pkcash [nick]      - Check chip balance.
-  !pktop              - Top 5 chip leaders.
-  !pkhelp             - Show commands.
+Flow:
+  Partyline: .gstart poker channel #chan  → makes game available (idle)
+  In-channel:
+    !pkstart            - Start a hand. Starter is auto-joined.
+    !pkjoin             - Join during registration window or between hands.
+    !pkbet <amount>     - Bet/raise during betting phase.
+    !pkcall             - Call the current bet.
+    !pkcheck            - Check (if no bet to call).
+    !pkfold             - Fold your hand.
+    !pkallin            - Go all-in.
+    !poker stop         - Owner or chan-op ends the game.
+    !pkcash [nick]      - Check chip balance.
+    !pktop              - Top 5 chip leaders.
+    !pkhelp             - Show commands.
 """
 import asyncio
 import random
@@ -125,7 +127,7 @@ class PokerPlayer:
 
 class PokerGame(Game):
     name = "poker"
-    version = "0.1.0"
+    version = "0.2.0"
     scopes = {"channel"}
 
     TABLE_SQL = [
@@ -165,21 +167,25 @@ class PokerGame(Game):
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
     async def start_session(self, session: GameSession):
+        """Called by .gstart — makes the game available but does NOT start a hand."""
         chan = session.target
         session.data["cfg"] = await self._load_settings(chan)
-        session.data["players"] = {}       # nick -> PokerPlayer (join order)
-        session.data["order"] = []         # list of nicks in seat order
+        session.data["players"] = {}
+        session.data["order"] = []
         session.data["deck"] = []
         session.data["community"] = []
         session.data["pot"] = 0
-        session.data["phase"] = "registering"
-        session.data["street"] = None      # preflop/flop/turn/river
+        session.data["phase"] = "idle"
+        session.data["street"] = None
         session.data["current_idx"] = 0
-        session.data["current_bet"] = 0    # highest bet this street
+        session.data["current_bet"] = 0
         session.data["dealer_idx"] = 0
         session.data["action_player"] = None
         await super().start_session(session)
-        await self._open_registration(session)
+        await self.say(chan,
+            "\x02[Poker]\x02 Texas Hold'em is now available! "
+            "Type \x02!pkstart\x02 to start a hand."
+        )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)
@@ -190,10 +196,10 @@ class PokerGame(Game):
     async def _open_registration(self, session: GameSession):
         chan = session.target
         await self.say(chan,
-            f"\x02[Poker]\x02 Texas Hold'em! "
+            f"\x02[Poker]\x02 Registration open! "
             f"Type \x02!pkjoin\x02 to play. "
             f"Starting in {REGISTRATION_SECS}s "
-            f"(or type \x02!pkstart\x02 to begin now)."
+            f"(chan-ops: type \x02!pkstart\x02 again to begin immediately)."
         )
         session.task = asyncio.create_task(self._registration_phase(session))
 
@@ -213,8 +219,11 @@ class PokerGame(Game):
         players = session.data["players"]
 
         if len(players) < MIN_PLAYERS:
-            await self.say(chan, f"[Poker] Need at least {MIN_PLAYERS} players. Game cancelled.")
-            await self.stop_session(session.key)
+            await self.say(chan,
+                f"[Poker] Need at least {MIN_PLAYERS} players. "
+                f"Type \x02!pkjoin\x02 then \x02!pkstart\x02."
+            )
+            session.data["phase"] = "idle"
             return
 
         cfg = session.data["cfg"]
@@ -504,9 +513,28 @@ class PokerGame(Game):
         cfg = session.data["cfg"]
         chan = session.target
 
-        if cmd == "!pkjoin":
+        if cmd == "!pkstart" and phase in ("idle", "finished"):
+            if nick not in players:
+                cash = await self._load_cash(nick, cfg["starting_cash"])
+                if cash == 0:
+                    cash = cfg["starting_cash"] // 2
+                players[nick] = PokerPlayer(nick=nick, cash=cash)
+                await self.say(chan, f"[Poker] {nick} started the game and joined with ${cash}.")
+            session.data["phase"] = "registering"
+            await self._open_registration(session)
+            return
+
+        elif cmd == "!pkstart" and phase == "registering":
+            if not self.core.nick_isop(nick, chan):
+                return await self.notice(nick, "Only a chan-op can skip the registration countdown.")
+            if session.task and not session.task.done():
+                session.task.cancel()
+            await self._begin_hand(session)
+            return
+
+        elif cmd == "!pkjoin":
             if phase not in ("registering", "finished"):
-                return await self.notice(nick, "Can only join between hands.")
+                return await self.notice(nick, "Can only join between hands. Wait for the next round.")
             if nick in players:
                 return await self.notice(nick, "You're already in the game.")
             cash = await self._load_cash(nick, cfg["starting_cash"])
@@ -514,16 +542,6 @@ class PokerGame(Game):
                 cash = cfg["starting_cash"] // 2
             players[nick] = PokerPlayer(nick=nick, cash=cash)
             await self.say(chan, f"[Poker] {nick} joined with ${cash}.")
-
-        elif cmd == "!pkstart":
-            if phase == "finished":
-                if len(players) < MIN_PLAYERS:
-                    return await self.notice(nick, f"Need at least {MIN_PLAYERS} players.")
-                await self._begin_hand(session)
-            elif phase == "registering":
-                if session.task:
-                    session.task.cancel()
-                await self._begin_hand(session)
 
         elif cmd == "!pkfold" and phase == "playing":
             if session.data.get("action_player") != nick:
@@ -701,9 +719,8 @@ class PokerGame(Game):
         self._set_cooldown(chan, "pkhelp")
         lines = [
             "[Poker] Texas Hold'em commands:",
-            "  !poker              - Start a game.",
+            "  !pkstart            - Start a hand. You are auto-joined.",
             "  !pkjoin             - Join during registration or between hands.",
-            "  !pkstart            - Skip countdown / start next hand.",
             "  !pkbet <amount>     - Bet or raise.",
             "  !pkcall             - Call the current bet.",
             "  !pkcheck            - Check (when no bet to call).",
