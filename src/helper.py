@@ -7,7 +7,10 @@ import sys
 import os
 import termios
 import logging
+import ipaddress
+import socket
 from pathlib import Path
+from typing import Optional
 
 from .db import get_db
 
@@ -173,4 +176,17 @@ async def _modify_hostmask(core, handle: str, hostmask: str, add: bool, respond)
             return
         hosts.remove(hostmask)
         await core.user.save_user(user)
-        await respond(f"Removed host: {hostmask}")      
+        await respond(f"Removed host: {hostmask}")
+
+async def _resolve_to_ip(host: str) -> Optional[str]:
+    """Return the IP string for a given hostname or IP.  None on failure."""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, socket.gethostbyname, host)
+    except socket.gaierror:
+        return None        

@@ -228,6 +228,13 @@ CREATE TABLE IF NOT EXISTS game_sessions (
     UNIQUE(game_name, scope, target)
 );
 
+CREATE TABLE IF NOT EXISTS net_auth_failures (
+    ip       TEXT    NOT NULL PRIMARY KEY,
+    count    INTEGER NOT NULL DEFAULT 0,
+    first_at REAL    NOT NULL,
+    last_at  REAL    NOT NULL
+);
+
 -- =====================================================
 -- INDEXES (Optimized for Hot Paths)
 -- =====================================================
