@@ -32,8 +32,10 @@ class Channel:
     # --- Live IRC state ---
     users: List[str] = field(default_factory=list)
     ops: List[str] = field(default_factory=list)
+    halfops: List[str] = field(default_factory=list)
     voiced: List[str] = field(default_factory=list)
     bot_op: bool = False
+    bot_halfop: bool = False
     synced: bool = False
     # Bool modes (no param)
     modes_n: bool = False
@@ -67,25 +69,29 @@ class Channel:
 
     def remove_user(self, nick: str):
         nick = nick.lower()
-        self.users = [n for n in self.users if n != nick]
+        self.users   = [n for n in self.users   if n != nick]
         self.unset_op(nick)
-        self.voiced = [n for n in self.voiced if n != nick]
+        self.unset_halfop(nick)
+        self.voiced  = [n for n in self.voiced  if n != nick]
 
     def rename_user(self, old: str, new: str):
         old, new = old.lower(), new.lower()
-        self.users  = [new if n == old else n for n in self.users]
-        self.ops    = [new if n == old else n for n in self.ops]
-        self.voiced = [new if n == old else n for n in self.voiced]
+        self.users   = [new if n == old else n for n in self.users]
+        self.ops     = [new if n == old else n for n in self.ops]
+        self.halfops = [new if n == old else n for n in self.halfops]
+        self.voiced  = [new if n == old else n for n in self.voiced]
 
     def clear_state(self):
         """Reset all live IRC state (e.g. on bot PART or disconnect)."""
         self.users.clear()
         self.ops.clear()
+        self.halfops.clear()
         self.voiced.clear()
         self.live_bans.clear()
         self.live_invites.clear()
         self.live_exempts.clear()
         self.bot_op = False
+        self.bot_halfop = False
         self.synced = False
         self.limit = 0
         self.key = ''
@@ -119,6 +125,22 @@ class Channel:
     def unset_voice(self, nick: str):
         nick = nick.lower()
         self.voiced = [n for n in self.voiced if n != nick]
+
+    def is_halfop(self, nick: str) -> bool:
+        return nick.lower() in self.halfops
+
+    def set_halfop(self, nick: str, botname: str = ''):
+        nick = nick.lower()
+        if nick not in self.halfops:
+            self.halfops.append(nick)
+        if botname and nick == botname.lower():
+            self.bot_halfop = True
+
+    def unset_halfop(self, nick: str, botname: str = ''):
+        nick = nick.lower()
+        self.halfops = [n for n in self.halfops if n != nick]
+        if botname and nick == botname.lower():
+            self.bot_halfop = False        
 
     # Live IRC state — modes
     def _parse_and_set_modes(self, modes_str: str):

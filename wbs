@@ -264,8 +264,19 @@ def main():
                         log.info(f"Core requested quit: {msg.get('message', '')}")
                         _shutdown()
                     elif cmd == 'restart':
-                        log.info("Core requested restart — respawning")
-                        # handle restart (existing logic)
+                        log.info("Supervisor: full restart requested by Core")
+                        irc = procs.get("irc")
+                        if irc and irc.is_alive():
+                            irc.terminate()
+                            irc.join(timeout=5.0)
+                            if irc.is_alive():
+                                log.warning("IRC did not terminate cleanly — sending SIGKILL")
+                                irc.kill()
+                                irc.join(timeout=2.0)
+                        old_irc_sentinel = irc.sentinel if irc else None
+                        if old_irc_sentinel and old_irc_sentinel in sentinels:
+                            del sentinels[old_irc_sentinel]
+                        _pending_full_restart = True
                     # future: 'rehash', 'alert', etc.
                 except Exception:
                     pass            
@@ -280,8 +291,19 @@ def main():
                         log.info("Core exited during shutdown — not relaunching")
                         _shutdown()
                     elif code == EXIT_OK:
-                        log.info("Core clean exit — shutting down supervisor")
+                        log.info("Core clean exit (code 42) — shutting down supervisor")
                         _shutdown()
+                    elif _pending_full_restart:
+                        _pending_full_restart = False
+                        log.info("Full restart: spawning fresh IRC process...")
+                        irc_proc = _spawn_irc(config, core_q, irc_q)
+                        procs["irc"] = irc_proc
+                        sentinels[irc_proc.sentinel] = ("irc", irc_proc)
+                        log.info("Full restart: spawning fresh Core process...")
+                        core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q, sup_q)
+                        procs["core"] = core_proc
+                        sentinels[core_proc.sentinel] = ("core", core_proc)
+                        log.info("Full restart complete — both Core and IRC respawned")
                     else:
                         log.info(f"Relaunching Core (exit code={code})...")
                         core_proc = _spawn_core(config, str(config_path), args, core_q, irc_q, sup_q)

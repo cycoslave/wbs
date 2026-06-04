@@ -173,4 +173,4 @@ async def _modify_hostmask(core, handle: str, hostmask: str, add: bool, respond)
             return
         hosts.remove(hostmask)
         await core.user.save_user(user)
-        await respond(f"Removed host: {hostmask}")        
+        await respond(f"Removed host: {hostmask}")      

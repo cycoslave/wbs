@@ -43,10 +43,10 @@ class Core:
     def __init__(self, config: dict, config_path: str, args, core_q=None, irc_q=None, sup_q=None):
         self.config      = config
         self.config_path = config_path
-        self.db_path = self.config.get('db', {}).get('path', 'db/wbs.db')
         db_path_override = getattr(args, 'db_path', None)
         if db_path_override:
-            self.config['db']['path'] = db_path_override
+            self.config.setdefault('db', {})['path'] = db_path_override
+        self.db_path = self.config.get('db', {}).get('path', 'db/wbs.db')
         self.core_q = core_q if core_q is not None else mp.Queue()
         self.irc_q  = irc_q  if irc_q  is not None else mp.Queue()
         self.sup_q  = sup_q
@@ -84,21 +84,59 @@ class Core:
         self.foreground = False
         self._lag_ping_sent: float | None = None
         self._last_lag_ms: float = 0.0
+        self._last_lag_ping: float = 0.0
         self.public_ip: Optional[str] = None
         self.botnet.guard = self.net_listener.guard
-        log.info(f"Core process started. (pid={os.getpid()})")
+        self.handlers = {
+            'DCC_CHAT_REQUEST': self.on_dcc_chat_request, 
+            'PARTYLINE_INPUT': self.on_partyline_input,
+            'PARTYLINE_CONNECT': self.on_partyline_connect,
+            'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
+            'BOT_CONNECT': self.on_bot_connect,
+            'BOT_DISCONNECT': self.on_bot_disconnect,
+            'COMMAND': self.on_command,
+            'PUBMSG': self.on_pubmsg,
+            'PRIVMSG': self.on_privmsg,
+            'ON_INVITE': self.on_invite,
+            'NEWCHAN': self.on_newchan,
+            'JOIN': self.on_join,
+            'PART': self.on_part,
+            'KICK': self.on_kick,
+            'QUIT': self.on_quit,
+            'MODE': self.on_mode,
+            'NICK': self.on_nick,
+            'READY': self.on_ready,
+            'DISCONNECT': self.on_disconnect,
+            'IRC_TIMER_FIRED': self.on_irc_timer_fired,
+            'REQUEST_BOTLINKS': self.request_botlinks,
+            'ERROR': self.on_error,
+            'CHANNEL_TOPIC': self.on_332,
+            'CHANNEL_MODES': self.on_324,
+            'CHANNEL_CREATED': self.on_329,
+            'BANLIST_ADD': self.on_367,
+            'INVITELIST_ADD': self.on_346,
+            'EXEMPTLIST_ADD': self.on_348,
+            'ERR_CHANNELISFULL': self.on_471,
+            'ERR_INVITEONLYCHAN': self.on_473,
+            'ERR_BANNEDFROMCHAN': self.on_474,
+            'BANLIST_END': self.on_null,
+            'INVITELIST_END': self.on_null,
+            'EXCEPTLIST_END': self.on_null,
+            'IRC_PONG': self.on_irc_pong,
+            'BOT_PUBLIC_IP': self.on_bot_public_ip,
+        }
 
     async def _async_init(self):
         """One-time async initialization."""
         await init_db(self.db_path) 
         await self.guard.load()
         await self.botnet.subnet.load()
-        await self._seed_modules()
-        await self._autoload_modules()     
+        await self._seed_and_autoload_modules()
 
     async def run(self, foreground=False):
         """Main async event loop"""
         self.foreground = foreground
+        log.info(f"Core process started. (pid={os.getpid()})")
         log.info(f"Initializing core with db_path={self.db_path}")
         await self._async_init()
         
@@ -111,7 +149,7 @@ class Core:
                 log.error(f"Failed auto-load {plugin_name}: {e}")
 
         if hasattr(self, 'net_listener'):
-            asyncio.create_task(self.net_listener.listen())
+            self._create_safe_task(self.net_listener.listen())
 
         if foreground:
             log.info("Foreground mode: Using console.")
@@ -149,47 +187,7 @@ class Core:
         etype = event.get('type', 'UNKNOWN')
         log.debug(f"Dispatching: {etype} - {event}")
         await self.plugin.dispatch(etype, event)
-        
-        handlers = {
-            'DCC_CHAT_REQUEST': self.on_dcc_chat_request, 
-            'PARTYLINE_INPUT': self.on_partyline_input,
-            'PARTYLINE_CONNECT': self.on_partyline_connect,
-            'PARTYLINE_DISCONNECT': self.on_partyline_disconnect,
-            'BOT_CONNECT': self.on_bot_connect,
-            'BOT_DISCONNECT': self.on_bot_disconnect,
-            #'BOT_COMMAND': self.on_bot_cmd,
-            'COMMAND': self.on_command,
-            'PUBMSG': self.on_pubmsg,
-            'PRIVMSG': self.on_privmsg,
-            'ON_INVITE': self.on_invite,
-            'NEWCHAN': self.on_newchan,
-            'JOIN': self.on_join,
-            'PART': self.on_part,
-            'KICK': self.on_kick,
-            'QUIT': self.on_quit,
-            'MODE': self.on_mode,
-            'NICK': self.on_nick,
-            'READY': self.on_ready,
-            'DISCONNECT': self.on_disconnect,
-            'IRC_TIMER_FIRED': self.on_irc_timer_fired,
-            'REQUEST_BOTLINKS': self.request_botlinks,
-            'ERROR': self.on_error,
-            'CHANNEL_TOPIC': self.on_332,
-            'CHANNEL_MODES': self.on_324,
-            'CHANNEL_CREATED': self.on_329,
-            'BANLIST_ADD': self.on_367,
-            'INVITELIST_ADD': self.on_346,
-            'EXEMPTLIST_ADD': self.on_348,
-            'ERR_CHANNELISFULL': self.on_471,
-            'ERR_INVITEONLYCHAN': self.on_473,
-            'ERR_BANNEDFROMCHAN': self.on_474,
-            'BANLIST_END': self.on_null,
-            'INVITELIST_END': self.on_null,
-            'EXCEPTLIST_END': self.on_null,
-            'IRC_PONG': self.on_irc_pong,
-            'BOT_PUBLIC_IP': self.on_bot_public_ip,
-        }
-        handler = handlers.get(etype)
+        handler = self._handlers.get(etype)
         if handler:
             await handler(event)
         else:
@@ -227,7 +225,7 @@ class Core:
 
         try:
             await self.botnet.process_incoming(bot_name, event['data'], reader, writer)
-            asyncio.create_task(
+            self._create_safe_task(
                 self.botnet.read_peer(bot_name, reader, writer),
                 name=f"read_peer:{bot_name}"
             )
@@ -253,14 +251,7 @@ class Core:
             self.partyline.broadcast(f"*** {handle} unlinked")
         peer_ip = event.get('peer_ip', 'unknown')
         if self.guard and peer_ip != 'unknown':
-            self.guard.release(peer_ip)
-
-    async def on_bot_cmd(self, event: dict):
-        """Handle incoming bot command"""
-        handle = event['handle']
-        if handle in self.botnet.peers:
-            link = self.botnet.peers.pop(handle)
-            await self.botnet.process_incoming(handle, event['data'], link.reader, link.writer)     
+            self.guard.release(peer_ip)    
 
     async def on_partyline_connect(self, event: dict):
         handle  = event["handle"]
@@ -316,7 +307,7 @@ class Core:
                 except Exception:
                     pass
 
-        asyncio.create_task(_run_with_timeout(), name=f"session:{handle}")
+        self._create_safe_task(_run_with_timeout(), name=f"session:{handle}")
 
     async def on_partyline_disconnect(self, event: dict):
         session_id = event["session_id"]
@@ -357,12 +348,12 @@ class Core:
                 port   = int(args[-2]) if len(args) >= 4 else 0
             except (ValueError, IndexError):
                 ip_int, port = 0, 0
-            asyncio.create_task(
+            self._create_safe_task(
                 self.dcc.on_passive_callback(nick, token, ip_int, port)
             )
         else:
             # New incoming DCC CHAT request
-            asyncio.create_task(
+            self._create_safe_task(
                 self.dcc.handle_request(nick, host, args)
             )
 
@@ -388,7 +379,7 @@ class Core:
 
     async def _main_loop_with_console(self):
         """Foreground: console + child events."""
-        self._console_task = asyncio.create_task(
+        self._console_task = self._create_safe_task(
             Console(self.partyline, self.console_session_id, "console").run()
         )
         last_periodic = time.time()
@@ -410,34 +401,30 @@ class Core:
                 await self._console_task
             except (asyncio.CancelledError, Exception):
                 pass
-            sys.exit(0)
+            await self._shutdown("Console exited")
 
-    async def _shutdown(self, message):
+    async def _shutdown(self, message: str = "Shutting down") -> None:
+        """
+        Graceful shutdown. Sends IRC QUIT, notifies supervisor, exits with
+        CLEAN_EXIT_CODE (42) so the supervisor knows not to respawn Core.
+        """
+        if not self.running:
+            return
         self.running = False
         self.quit_event.set()
-        if self.sup_q is not None:
-            try:
-                self.sup_q.put_nowait({'cmd': 'quit', 'message': message})
-            except Exception:
-                pass
-            if self.quit_event.is_set():
-                return
-        log.info(f"Shutdown: {message}")
+        log.info(f"[Core] Shutdown: {message}")
         try:
             self.send_irc({'cmd': 'quit', 'message': message})
         except Exception:
             pass
         await asyncio.sleep(1.5)
-        for child in self.children:
-            if child.is_alive():
-                child.terminate()
-                child.join(timeout=2.0)
-                if child.is_alive():
-                    child.kill()
-                    child.join(timeout=1.0)
-        log.info("All children terminated. Exiting.")
+        if self.sup_q is not None:
+            try:
+                self.sup_q.put_nowait({'cmd': 'quit', 'message': message})
+            except Exception:
+                pass
         restore_terminal()
-        os._exit(42)
+        os._exit(CLEAN_EXIT_CODE)
 
     async def on_command(self, event):
         """
@@ -531,7 +518,7 @@ class Core:
         modes   = event.get('modes', '')
         args    = event.get('args', [])
 
-        chan = self.channels.get(channel)
+        chan = self.get_chan(channel)
         if not chan:
             return
 
@@ -555,12 +542,10 @@ class Core:
                         elif not adding and target_nick in chan.ops:
                             chan.ops.remove(target_nick)
                     elif char == 'h':
-                        if target_nick.lower() == self.botname.lower():
-                            chan.bot_halfop = adding
-                        if adding and target_nick not in chan.halfops:
-                            chan.halfops.append(target_nick)
-                        elif not adding and target_nick in chan.halfops:
-                            chan.halfops.remove(target_nick)
+                        if adding:
+                            chan.set_halfop(target_nick, self.botname)
+                        else:
+                            chan.unset_halfop(target_nick, self.botname)
                     elif char == 'v':
                         if adding and target_nick not in chan.voiced:
                             chan.voiced.append(target_nick)
@@ -591,98 +576,60 @@ class Core:
         host = event.get('host', '')
         channel = event.get('channel', '')
         chan_data = event.get('irc_data', '')
-        #await self.seen.update_seen(nick, host, channel, 'JOIN')
-        # Update channel user list
-        if channel not in self.channels:
-            chan = Channel(name=channel)
+        norm = self._normalize_chan(channel)
+        if norm not in self.channels:
+            chan = Channel(name=norm)
             chan._chan_mgr = self.chan
-            self.channels[channel] = chan
-        
+            self.channels[norm] = chan
         self.channels[channel].update_irc_state(chan_data)
 
     async def on_join(self, event: Dict[str, Any]):
-        """User joined channel: update seen DB."""
-        nick = event.get('nick', '')
-        host = event.get('host', '')
+        nick    = event.get('nick', '')
         channel = event.get('channel', '')
-        #await self.seen.update_seen(nick, host, channel, 'JOIN')
-        # Update channel user list
-        chan = self.channels.get(channel)
-        if chan and nick not in chan.users:
-            chan.users.append(nick)
+        chan = self.get_chan(channel)
+        if chan:
+            chan.add_user(nick)
 
     async def on_part(self, event: Dict[str, Any]):
-        """User left channel: update seen DB."""
-        nick = event.get('nick', '')
-        host = event.get('host', '')
+        nick    = event.get('nick', '')
         channel = event.get('channel', '')
-        #await self.seen.update_seen(nick, host, channel, 'PART')
         if nick == self.botname:
             if channel in self.channels:
                 del self.channels[channel]
-                log.info(f"Bot parted {channel}, removed from channels database")
+                log.info(f"Bot parted {channel}")
             return
-        # Update channel user list
-        chan = self.channels.get(channel)
-        if chan and nick in chan.users:
-            chan.users.remove(nick)
-            # Remove from ops/voiced if present
-            if nick in chan.ops:
-                chan.ops.remove(nick)
-            if nick in chan.voiced:
-                chan.voiced.remove(nick)
+        chan = self.get_chan(channel)
+        if chan:
+            chan.remove_user(nick)
 
     async def on_kick(self, event: Dict[str, Any]):
-        """User kicked from channel."""
         kicked_nick = event.get('kicked', '')
-        channel = event.get('channel', '')
-        #await self.seen.update_seen(kicked_nick, '', channel, 'KICK')
-        # If bot was kicked, remove channel entirely
-        #if kicked_nick == self.botname:
-        #    if channel in self.channels:
-        #        del self.channels[channel]
-        #    return
-        # Update channel user list
-        chan = self.channels.get(channel)
-        if chan and kicked_nick in chan.users:
-            chan.users.remove(kicked_nick)
-            # Remove from ops/voiced if present
-            if kicked_nick in chan.ops:
-                chan.ops.remove(kicked_nick)
-            if kicked_nick in chan.voiced:
-                chan.voiced.remove(kicked_nick)
+        channel     = event.get('channel', '')
+        if kicked_nick == self.botname:
+            if channel in self.channels:
+                del self.channels[channel]
+                log.info(f"Bot was kicked from {channel}")
+            return
+        chan = self.get_chan(channel)
+        if chan:
+            chan.remove_user(kicked_nick)
 
     async def on_quit(self, event: Dict[str, Any]):
-        """User quit IRC."""
         nick = event.get('nick', '')
-        #await self.seen.update_seen(nick, '', '', 'QUIT')
         if nick == self.botname:
             self.channels.clear()
             return
         for chan in self.channels.values():
-            if nick in chan.users:
-                chan.users.remove(nick)
-            if nick in chan.ops:
-                chan.ops.remove(nick)
-            if nick in chan.voiced:
-                chan.voiced.remove(nick)
+            chan.remove_user(nick)
 
     async def on_nick(self, event: Dict[str, Any]):
-        """User changed nick."""
         old_nick = event.get('old_nick', '')
         new_nick = event.get('new_nick', '')
-        #await self.seen.update_seen(old_nick, '', '', 'NICK')
-        # Update nick in all channels
+        if old_nick == self.botname:
+            self.botname = new_nick
+            log.info(f"Bot nick changed: {old_nick} → {new_nick}")
         for chan in self.channels.values():
-            if old_nick in chan.users:
-                chan.users.remove(old_nick)
-                chan.users.append(new_nick)
-            if old_nick in chan.ops:
-                chan.ops.remove(old_nick)
-                chan.ops.append(new_nick)
-            if old_nick in chan.voiced:
-                chan.voiced.remove(old_nick)
-                chan.voiced.append(new_nick)
+            chan.rename_user(old_nick, new_nick)
 
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
@@ -693,7 +640,7 @@ class Core:
         log.info("IRC READY - joining channels..")
         subnet_id = self.config.get('botnet', {}).get('subnet_id', None)
         channels = await self.chan.getchans(subnet_id=subnet_id)
-        asyncio.create_task(self._join_channels(channels))
+        self._create_safe_task(self._join_channels(channels))
         await self._autoload_games()
 
     async def _join_channels(self, channels: list):
@@ -710,103 +657,92 @@ class Core:
 
     async def on_332(self, event):  # CHANNEL_TOPIC
         """Update topic from RPL_TOPIC"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan.topic = event['topic']
             log.debug(f"Topic updated for {event['channel']}")
 
     async def on_324(self, event):  # CHANNEL_MODES
         """Parse/set modes from RPL_CHANNELMODEIS"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan._parse_and_set_modes(event['modes_str'])
             log.info(f"{event['channel']} modes: n={chan.modes_n} t={chan.modes_t} l={chan.limit}")
 
     async def on_329(self, event):  # CHANNEL_CREATED
         """Set creation timestamp"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan.created = event['created']
             log.debug(f"{event['channel']} created: {event['created']}")
 
     async def on_367(self, event):  # BANLIST_ADD
         """Add ban to list"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan.bans.append(event['ban'])
             log.debug(f"Ban added to {event['channel']}: {event['ban']}")
 
     async def on_346(self, event):  # INVITELIST_ADD
         """Add invite to list"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan.invites.append(event['invite'])
 
     async def on_348(self, event):  # EXEMPTLIST_ADD
         """Add exempt to list"""
-        chan = self.channels.get(event['channel'])
+        channel = event['channel']
+        chan = self.get_chan(channel)
+        self.get_chan(channel)
         if chan:
             chan.exempts.append(event['exempt'])       
 
+    async def _request_botnet_action(self, cmd: str, channel: str) -> None:
+        """Broadcast a single-channel request to all connected botnet peers."""
+        if self.botnet and self.botnet.peers:
+            await self.botnet.broadcast({
+                'cmd':     cmd,
+                'channel': channel,
+                'target':  self.botname,
+            })
+            log.info(f"Broadcasted {cmd} for {channel} to botnet peers")  
+
     async def on_471(self, event: Dict[str, Any]):
-        """
-        ERR_CHANNELISFULL (+l limit reached).
-        Request a linked bot with ops in the channel to raise the limit.
-        Rejoin is handled by the periodic IRC timer — no retry logic here.
-        """
         channel = event.get('channel', '')
         log.warning(f"Cannot join {channel}: channel is full (+l).")
         self.partyline.broadcast(
             f"*** Cannot join {channel}: channel full (+l) — "
             f"requesting a linked bot to raise the limit"
         )
-        if self.botnet and self.botnet.peers:
-            await self.botnet.broadcast({
-                'cmd':     'REQUEST_LIMIT_RAISE',
-                'channel': channel,
-                'target':  self.botname,
-            })
-            log.info(f"Broadcasted REQUEST_LIMIT_RAISE for {channel} to botnet peers")
+        await self._request_botnet_action('REQUEST_LIMIT_RAISE', channel)
 
     async def on_473(self, event: Dict[str, Any]):
-        """
-        ERR_INVITEONLYCHAN (+i set).
-        Request a linked bot with ops in the channel to invite the bot.
-        Rejoin is handled by the periodic IRC timer — no retry logic here.
-        """
         channel = event.get('channel', '')
         log.warning(f"Cannot join {channel}: invite only (+i).")
         self.partyline.broadcast(
             f"*** Cannot join {channel}: invite only (+i) — "
             f"requesting a linked bot to send an invite"
         )
-        if self.botnet and self.botnet.peers:
-            await self.botnet.broadcast({
-                'cmd':     'REQUEST_INVITE',
-                'channel': channel,
-                'target':  self.botname,
-            })
-            log.info(f"Broadcasted REQUEST_INVITE for {channel} to botnet peers")
+        await self._request_botnet_action('REQUEST_INVITE', channel)
 
     async def on_474(self, event: Dict[str, Any]):
-        """
-        ERR_BANNEDFROMCHAN — bot is banned.
-        Request a linked bot with ops in the channel to remove the ban.
-        Rejoin is handled by the periodic IRC timer — no retry logic here.
-        """
         channel = event.get('channel', '')
         log.warning(f"Cannot join {channel}: I am banned.")
         self.partyline.broadcast(
             f"*** Cannot join {channel}: bot is banned — "
             f"requesting a linked bot to remove the ban"
         )
-        if self.botnet and self.botnet.peers:
-            await self.botnet.broadcast({
-                'cmd':     'REQUEST_UNBAN',
-                'channel': channel,
-                'target':  self.botname,
-            })
-            log.info(f"Broadcasted REQUEST_UNBAN for {channel} to botnet peers")                                        
+        await self._request_botnet_action('REQUEST_UNBAN', channel)                                     
 
     async def request_botlinks(self, event: dict):
         """Merge botnet.peers + user flags"""
@@ -817,9 +753,9 @@ class Core:
             linked_bots[link.name] = link.nick
         self.send_irc({'cmd': 'UPDATE_BOTLINK', 'botlinks': linked_bots})
 
-    async def on_null(self, event: Dict[str, Any]):
-        """Just do nothing."""
-        pass              
+    async def on_null(self, event: Dict[str, Any]) -> None:
+        """Intentional no-op handler for list/end numeric replies (BANLIST_END, INVITELIST_END, EXCEPTLIST_END)."""
+        pass
 
     async def on_error(self, event: Dict[str, Any]):
         """IRC error occurred."""
@@ -842,17 +778,18 @@ class Core:
     async def _periodic_tasks(self):
         """Periodic tasks."""
         if hasattr(self, 'botnet') and self.botnet:
-            await self.botnet.poll_queues() if hasattr(self.botnet, 'poll_queues') else None
+            if hasattr(self.botnet, 'poll_queues'):
+                await self.botnet.poll_queues()
 
         current_ppid = os.getppid()
         if current_ppid != self._supervisor_ppid or current_ppid == 1:
             log.warning(f"Supervisor gone (ppid {self._supervisor_ppid} → {current_ppid}) — self-terminating")
             restore_terminal()
-            sys.exit(0)
+            await self._shutdown("Supervisor gone")
 
         if self.connected and self._lag_ping_sent is None:
             now = time.time()
-            if not hasattr(self, '_last_lag_ping') or (now - self._last_lag_ping) >= 30.0:
+            if (now - self._last_lag_ping) >= 30.0:
                 self._lag_ping_sent = time.time() * 1000
                 self._last_lag_ping = now
                 self.send_irc({'cmd': 'ping', 'token': f'LAG{int(now)}'})
@@ -869,7 +806,7 @@ class Core:
                 if randomize:
                     current_interval = max(1.0, interval + random.randint(-30, 30))
                 await asyncio.sleep(current_interval)
-        self.timers[name] = asyncio.create_task(timer_loop())
+        self.timers[name] = self._create_safe_task(timer_loop())
     
     def unregister_timer(self, name: str):
         if name in self.timers:
@@ -989,21 +926,31 @@ class Core:
             async with db.execute(
                 "SELECT DISTINCT game_name FROM game_sessions WHERE state='running'"
             ) as cursor:
-                rows = await cursor.fetchall()
+                game_rows = await cursor.fetchall()
 
-        for row in rows:
-            game_name = row["game_name"]
+            # Fetch all sessions in the same connection, not one-per-game
+            game_names = [row["game_name"] for row in game_rows]
+            if not game_names:
+                return
+
+            placeholders = ",".join("?" * len(game_names))
+            async with db.execute(
+                f"SELECT game_name, scope, target, owner, data FROM game_sessions "
+                f"WHERE game_name IN ({placeholders}) AND state='running'",
+                game_names
+            ) as cursor:
+                session_rows = await cursor.fetchall()
+
+        # Group sessions by game
+        from collections import defaultdict
+        sessions_by_game = defaultdict(list)
+        for s in session_rows:
+            sessions_by_game[s["game_name"]].append(s)
+
+        for game_name in game_names:
             try:
                 await self.game.load_game(game_name)
-                async with get_db(self.db_path) as db:
-                    async with db.execute(
-                        "SELECT scope, target, owner, data FROM game_sessions "
-                        "WHERE game_name=? AND state='running'",
-                        (game_name,)
-                    ) as cursor:
-                        sessions = await cursor.fetchall()
-
-                for s in sessions:
+                for s in sessions_by_game[game_name]:
                     await self.game.start_game(
                         game_name, s["scope"], s["target"], owner=s["owner"]
                     )
@@ -1027,31 +974,25 @@ class Core:
 
     async def do_restart(self) -> None:
         """
-        Full restart: send IRC QUIT, tear down children, re-exec.
+        Full restart: gracefully quit IRC, then ask the supervisor to kill and
+        respawn both Core and IRC with a fresh interpreter (new module imports).
+        Core exits cleanly; supervisor sentinel loop detects the exit and acts.
         """
-        log.info("[Core] Restarting...")
+        log.info("[Core] Restart requested — notifying supervisor")
         self.partyline.broadcast("*** Restarting...")
-
         try:
-            self.send_irc({
-                'cmd': 'quit',
-                'message': 'Restarting'
-            })
+            self.send_irc({'cmd': 'quit', 'message': 'Restarting...'})
         except Exception as e:
             log.warning(f"[Core] Could not send IRC QUIT: {e}")
-
         await asyncio.sleep(2.0)
-
-        # Terminate child processes
-        for child in self.children:
-            if child.is_alive():
-                child.terminate()
-                child.join(timeout=3.0)
-                if child.is_alive():
-                    child.kill()
-
+        if self.sup_q is not None:
+            try:
+                self.sup_q.put_nowait({'cmd': 'restart', 'message': 'Operator requested restart'})
+            except Exception as e:
+                log.warning(f"[Core] Could not notify supervisor of restart: {e}")
         await self._pre_exec_cleanup()
-        os.execv(sys.executable, sys.argv)
+        restore_terminal()
+        os._exit(0)
 
     async def _pre_exec_cleanup(self) -> None:
         """Flush state before re-exec or exit."""
@@ -1083,6 +1024,44 @@ class Core:
             last_periodic = now
 
         return last_periodic
+
+    def get_chan(self, channel: str) -> Optional['Channel']:
+        """Normalized channel lookup. Always use this instead of self.channels.get(channel)."""
+        return self.channels.get(self._normalize_chan(channel))
+
+    def _create_safe_task(self, coro, name: str = "unnamed") -> asyncio.Task:
+        """Create an asyncio task that logs exceptions instead of silently swallowing them."""
+        task = self._create_safe_task(coro, name=name)
+        def _on_done(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception() is not None:
+                log.error(f"Task '{name}' raised an exception", exc_info=t.exception())
+        task.add_done_callback(_on_done)
+        return task
+    
+    async def _seed_and_autoload_modules(self):
+        """Seed configured plugins to DB, then autoload all flagged modules. Single connection."""
+        async with get_db(self.db_path) as db:
+            # Seed phase
+            for plugin_name in self.config.get('plugins', []):
+                await db.execute(
+                    "INSERT INTO loaded_modules(name, type, scope, autoload) VALUES(?, 'plugin', NULL, 1) "
+                    "ON CONFLICT(name, type) DO NOTHING",
+                    (plugin_name,)
+                )
+            # Autoload phase
+            async with db.execute(
+                "SELECT name, type, scope, owner FROM loaded_modules WHERE autoload=1"
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        for row in rows:
+            try:
+                if row["type"] == "plugin":
+                    await self.plugin.load_plugin(row["name"])
+                elif row["type"] == "game":
+                    await self.game.load_game(row["name"])
+            except Exception as e:
+                log.error("Autoload failed for %s %s: %s", row["type"], row["name"], e)    
 
 def core_process_launcher(config, config_path, args, core_q, irc_q, sup_q):
     """Entry point for Core as a supervised child process."""
