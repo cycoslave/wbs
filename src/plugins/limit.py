@@ -1,7 +1,7 @@
 # src/plugins/limit.py
 """
-WBS Plugin: limit.py 
-version: 0.1.1
+WBS Plugin: limit.py
+version: 0.2.0
 by: cyco
 Description: Set and watch channel limit
 """
@@ -10,11 +10,14 @@ import time
 from typing import Dict
 
 from . import Plugin
-from ..db import get_db 
+from ..db import get_db
+
+ALLOWED_SETTING_COLS = frozenset({"enabled", "limitadd", "limittol", "limitdelta"})
+MAX_CHANNEL_LIMIT = 999999
 
 class limitPlugin(Plugin):
     name       = "limit"
-    version    = "0.1.1"
+    version    = "0.2.0"
     LIMITADD   = 15
     LIMITTOL   = 2
     LIMITDELTA = 300
@@ -32,45 +35,44 @@ class limitPlugin(Plugin):
     ]
 
     def __init__(self, core):
-        super().__init__(core)  # sets self.log
+        super().__init__(core)
         self.limit_last_change: Dict[str, float] = {}
-    
+
     async def load(self):
-        """Initialize plugin and register timers"""
+        """Initialize plugin and register timers."""
         await super().load()
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
-            await db.commit() 
+            await db.commit()
         self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
             'name': 'limit',
             'interval': 300
         })
         self.log.info(f"Plugin {self.name} {self.version} loaded")
-    
+
     async def unload(self):
-        """Unload plugin and unregister timers"""
+        """Unload plugin and unregister timers only.
+
+        Settings are intentionally preserved across reloads.
+        Schema removal must be handled via an explicit migration, not here.
+        """
         self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'limit'
         })
-        async with get_db(self.core.db_path) as db:
-            await db.execute("DROP TABLE IF EXISTS limit_settings")
-            await db.commit() 
         await super().unload()
         self.log.info("Limit plugin unloaded")
 
     async def on_IRC_TIMER_LIMIT(self, event):
-        """Periodic op enforcement - FULL IRC access via event"""
+        """Periodic channel limit enforcement."""
         irc_data = event['irc_data']
-        #self.log.info(f"data: {irc_data}")
-        
+
         if not irc_data['connected']:
             return
-        
+
         for chan, chan_data in irc_data['channels'].items():
-            bot_is_op = chan_data['bot_op']
-            if not bot_is_op:
+            if not chan_data['bot_op']:
                 continue
 
             cfg = await self._load_settings(chan)
@@ -84,7 +86,8 @@ class limitPlugin(Plugin):
                 continue
 
             current_limit = self.core.channels[chan].limit
-            newlimit = chan_data['users'] + cfg["limitadd"]
+            newlimit = min(chan_data['users'] + cfg["limitadd"], MAX_CHANNEL_LIMIT)
+
             if abs(current_limit - newlimit) <= cfg["limittol"]:
                 continue
 
@@ -96,34 +99,24 @@ class limitPlugin(Plugin):
             })
             self.limit_last_change[chan] = now
 
-    def _get_current_limit(self, chan_data: dict) -> int:
-        """Extract current +l limit from mode string and params"""
-        mode_str = chan_data.get('mode', '')
-        mode_params = chan_data.get('mode_params', {})
-        
-        # Check if +l is active in modes
-        if 'l' in mode_str and 'l' in mode_params:
-            try:
-                return int(mode_params['l'])
-            except (ValueError, TypeError):
-                pass
-        
-        # No limit set
-        return 0
-    
     async def on_MODE(self, event):
-        """Track manual +l changes"""
+        """Track manual +l changes to respect the cooldown window."""
         chan = event['channel']
         if 'l' in event['modes']:
             self.limit_last_change[chan] = time.time()
 
     async def set(self, chan: str, param: str, value: str, nick: str):
-        """Called by partyline: .limitset #chan <param> <value>"""
+        """Called by partyline: .limitset #chan <param> <value>
+
+        NOTE: Permission enforcement (flag check on nick) must be performed
+        upstream by the partyline/commands layer before this method is called.
+        This method does not validate caller identity.
+        """
         valid = {
-            "enabled":    ("Enabled",     lambda v: v in ("0","1"), int),
-            "limitadd":   ("Limit add",   str.isdigit,              int),
-            "limittol":   ("Tolerance",   str.isdigit,              int),
-            "limitdelta": ("Delta (secs)","".isdigit,               int),
+            "enabled":    ("Enabled",      lambda v: v in ("0", "1"), int),
+            "limitadd":   ("Limit add",    str.isdigit,               int),
+            "limittol":   ("Tolerance",    str.isdigit,               int),
+            "limitdelta": ("Delta (secs)", str.isdigit,               int),
         }
         param = param.lower()
         if param not in valid:
@@ -133,13 +126,18 @@ class limitPlugin(Plugin):
             return f"{label} must be a valid value."
         cast_value = cast(value)
         await self._save_setting(chan, **{param: cast_value})
-        # invalidate cooldown so new delta takes effect immediately
         if param == "limitdelta":
             self.limit_last_change.pop(chan, None)
         return f"[limit] {chan} {label} set to {cast_value}."
 
     async def _load_settings(self, chan: str) -> dict:
-        defaults = {"enabled": 0, "maxusers": 20, "kick_threshold": 5, "reset_interval": 60}
+        """Load channel settings from DB, falling back to class-level defaults."""
+        defaults = {
+            "enabled":    1,
+            "limitadd":   self.LIMITADD,
+            "limittol":   self.LIMITTOL,
+            "limitdelta": self.LIMITDELTA,
+        }
         async with get_db(self.core.db_path) as db:
             try:
                 async with db.execute(
@@ -147,11 +145,20 @@ class limitPlugin(Plugin):
                 ) as cursor:
                     row = await cursor.fetchone()
                     return dict(row) if row else defaults
-            except aiosqlite.OperationalError as exc:
-                self.log.warning("limit_settings missing for %s, using defaults", chan)
+            except aiosqlite.OperationalError:
+                self.log.warning("limit_settings table missing for %s, using defaults", chan)
                 return defaults
 
     async def _save_setting(self, channel: str, **kwargs):
+        """Persist one or more settings for a channel.
+
+        Raises ValueError if any key is not in ALLOWED_SETTING_COLS to prevent
+        SQL column-name injection via unvalidated kwargs keys.
+        """
+        invalid_keys = kwargs.keys() - ALLOWED_SETTING_COLS
+        if invalid_keys:
+            raise ValueError(f"Invalid setting column(s): {invalid_keys}")
+
         cols = ", ".join(f"{k}=?" for k in kwargs)
         async with get_db(self.core.db_path) as db:
             await db.execute(
@@ -160,3 +167,4 @@ class limitPlugin(Plugin):
                 f"updated_at=strftime('%s','now')",
                 (channel, *kwargs.values())
             )
+            await db.commit()
