@@ -10,22 +10,22 @@ Flow:
   Partyline: .gstart roulette channel #chan  → makes table available (idle)
   In-channel:
     !roulette               - Open a betting round.
-    !bet <type> <amount>    - Place a bet during the window.
+    !roulettebet <type> <amount>    - Place a bet during the window.
     !roulettecash [nick]    - Check chip balance.
     !roulettetop            - Top 5 by chip count.
     !roulettehelp           - Show bet types and commands.
-    !roulette stop          - Chan-op ends the game.
+    !roulettestop          - Chan-op ends the game.
 
 Bet types:
-    Straight  : !bet 17 100          Single number 0-36        pays 35:1
-    Red/Black : !bet red 50          Colour                     pays 1:1
-    Odd/Even  : !bet odd 50                                     pays 1:1
-    High/Low  : !bet high 50         19-36 / 1-18               pays 1:1
-    Dozen     : !bet dozen1 50       1-12 / dozen2 13-24 / dozen3 25-36  pays 2:1
-    Column    : !bet col1 50         cols 1/2/3 (every 3rd num) pays 2:1
-    Split     : !bet split 14-17 50  Two adjacent numbers       pays 17:1
-    Street    : !bet street 13 50    3-num row (13,14,15)       pays 11:1
-    Corner    : !bet corner 1 50     4-num square (1,2,4,5)     pays 8:1
+    Straight  : !roulettebet 17 100          Single number 0-36        pays 35:1
+    Red/Black : !roulettebet red 50          Colour                     pays 1:1
+    Odd/Even  : !roulettebet odd 50                                     pays 1:1
+    High/Low  : !roulettebet high 50         19-36 / 1-18               pays 1:1
+    Dozen     : !roulettebet dozen1 50       1-12 / dozen2 13-24 / dozen3 25-36  pays 2:1
+    Column    : !roulettebet col1 50         cols 1/2/3 (every 3rd num) pays 2:1
+    Split     : !roulettebet split 14-17 50  Two adjacent numbers       pays 17:1
+    Street    : !roulettebet street 13 50    3-num row (13,14,15)       pays 11:1
+    Corner    : !roulettebet corner 1 50     4-num square (1,2,4,5)     pays 8:1
 """
 import asyncio
 import random
@@ -142,21 +142,21 @@ def _resolve(bet: Bet, winner: int) -> Tuple[int, str]:
 
 def _parse_bet(parts: List[str], cfg: dict) -> Tuple[Optional[Bet], Optional[str]]:
     """
-    Parse   !bet <type_and_params...> <amount>
+    Parse   !roulettebet <type_and_params...> <amount>
     Returns (Bet, None) on success or (None, error_string) on failure.
 
     Grammar:
-        !bet <number 0-36> <amount>
-        !bet red|black|odd|even|high|low <amount>
-        !bet dozen1|dozen2|dozen3 <amount>
-        !bet col1|col2|col3 <amount>
-        !bet split <n1>-<n2> <amount>
-        !bet street <base> <amount>
-        !bet corner <n> <amount>
+        !roulettebet <number 0-36> <amount>
+        !roulettebet red|black|odd|even|high|low <amount>
+        !roulettebet dozen1|dozen2|dozen3 <amount>
+        !roulettebet col1|col2|col3 <amount>
+        !roulettebet split <n1>-<n2> <amount>
+        !roulettebet street <base> <amount>
+        !roulettebet corner <n> <amount>
     """
-    # parts already stripped of "!bet"
+    # parts already stripped of "!roulettebet"
     if len(parts) < 2:
-        return None, "Usage: !bet <type> [params] <amount>  — try !roulettehelp"
+        return None, "Usage: !roulettebet <type> [params] <amount>  — try !roulettehelp"
 
     # Amount is always the last token
     try:
@@ -187,18 +187,18 @@ def _parse_bet(parts: List[str], cfg: dict) -> Tuple[Optional[Bet], Optional[str
 
     if kind_token == "split":
         if not params_tokens:
-            return None, "Split bet: !bet split <n1>-<n2> <amount>"
+            return None, "Split bet: !roulettebet split <n1>-<n2> <amount>"
         try:
             a, b = map(int, params_tokens[0].split("-"))
             if not (0 <= a <= 36 and 0 <= b <= 36 and a != b):
                 raise ValueError
         except ValueError:
-            return None, "Split: !bet split <n1>-<n2> <amount>  e.g. !bet split 14-17 50"
+            return None, "Split: !roulettebet split <n1>-<n2> <amount>  e.g. !roulettebet split 14-17 50"
         return Bet(nick="", kind="split", amount=amount, params=(a, b)), None
 
     if kind_token == "street":
         if not params_tokens:
-            return None, "Street bet: !bet street <base> <amount>  (base = 1,4,7,...34)"
+            return None, "Street bet: !roulettebet street <base> <amount>  (base = 1,4,7,...34)"
         try:
             base = int(params_tokens[0])
             if base < 1 or base > 34 or (base - 1) % 3 != 0:
@@ -209,7 +209,7 @@ def _parse_bet(parts: List[str], cfg: dict) -> Tuple[Optional[Bet], Optional[str
 
     if kind_token == "corner":
         if not params_tokens:
-            return None, "Corner bet: !bet corner <top-left-num> <amount>"
+            return None, "Corner bet: !roulettebet corner <top-left-num> <amount>"
         try:
             n = int(params_tokens[0])
             # top-left must not be in columns 3 (3,6,9,...) and not row 12
@@ -292,7 +292,7 @@ class RouletteGame(Game):
             if session.data["bets"]:
                 await self.say(session.target,
                     f"[Roulette] \x02{BETTING_WARN_SECS}s left!\x02 "
-                    "Last chance — \x02!bet <type> <amount>\x02"
+                    "Last chance — \x02!roulettebet <type> <amount>\x02"
                 )
             await asyncio.sleep(BETTING_WARN_SECS)
         except asyncio.CancelledError:
@@ -383,23 +383,20 @@ class RouletteGame(Game):
         cfg  = session.data["cfg"]
         chan = session.target
 
-        # ── !roulette [stop] ──────────────────────────────────────────────────
-        if cmd == "!roulette":
-            sub = parts[1].lower() if len(parts) > 1 else ""
-
-            if sub == "stop":
+        if cmd == "!roulettestop":
                 if not self.core.nick_isop(nick, chan):
                     return await self.notice(nick, "Only a chan-op can close the table.")
                 await self.stop_session(session.key)
                 return
 
+        if cmd == "!roulette":
             # Open a new betting round
             if phase in ("idle", "finished"):
                 session.data["bets"]  = {}
                 session.data["phase"] = "betting"
                 await self.say(chan,
                     f"\x02[Roulette]\x02 Betting is open for \x02{BETTING_SECS}s\x02! "
-                    f"Type \x02!bet <type> <amount>\x02 to place a bet. "
+                    f"Type \x02!roulettebet <type> <amount>\x02 to place a bet. "
                     f"(min: ${cfg['min_bet']}, max: ${cfg['max_bet']})  "
                     f"Try \x02!roulettehelp\x02 for bet types."
                 )
@@ -407,13 +404,12 @@ class RouletteGame(Game):
                 return
 
             if phase == "betting":
-                return await self.notice(nick, "Betting is already open! Place your bet with !bet")
+                return await self.notice(nick, "Betting is already open! Place your bet with !roulettebet")
 
             if phase == "spinning":
                 return await self.notice(nick, "Wheel is spinning — wait for results.")
 
-        # ── !bet <type> [params] <amount> ─────────────────────────────────────
-        elif cmd == "!bet":
+        elif cmd == "!roulettebet":
             if phase != "betting":
                 return await self.notice(nick,
                     "No round is open. Type \x02!roulette\x02 to start one."
@@ -455,18 +451,15 @@ class RouletteGame(Game):
                 f"(total staked: ${total_staked})"
             )
 
-        # ── !roulettecash [nick] ──────────────────────────────────────────────
         elif cmd == "!roulettecash":
             target = parts[1] if len(parts) > 1 else nick
             cash   = await self._load_cash(target, cfg["starting_cash"])
             await self.say(chan, f"[Roulette] {target} has \x02${cash}\x02 in chips.")
 
-        # ── !roulettetop ──────────────────────────────────────────────────────
         elif cmd == "!roulettetop":
             if not self._on_cooldown(chan, "roulettetop"):
                 await self._show_top(chan)
 
-        # ── !roulettehelp ─────────────────────────────────────────────────────
         elif cmd == "!roulettehelp":
             if not self._on_cooldown(chan, "roulettehelp"):
                 await self._show_help(chan, cfg)
@@ -489,20 +482,20 @@ class RouletteGame(Game):
         self._set_cooldown(chan, "roulettehelp")
         await self.say(chan, "\x02[Roulette]\x02 commands:")
         await self.say(chan, "    !roulette            - Open a betting round.")
-        await self.say(chan, f"   !bet <type> <amount> - Place a bet (min ${cfg['min_bet']}, max ${cfg['max_bet']}, up to 5/round).")
+        await self.say(chan, f"   !roulettebet <type> <amount> - Place a bet (min ${cfg['min_bet']}, max ${cfg['max_bet']}, up to 5/round).")
         await self.say(chan, "    !roulettecash [nick] - Check chip balance.")
         await self.say(chan, "    !roulettetop         - Top 5 chip leaders.")
         await self.say(chan, "    !roulette stop       - (op) Close the table.")
         await self.say(chan, "\x02Bet types:\x02")
-        await self.say(chan, "    !bet 17 100          Straight  35:1")
-        await self.say(chan, "    !bet red 50          Red/Black  1:1")
-        await self.say(chan, "    !bet odd 50          Odd/Even   1:1")
-        await self.say(chan, "    !bet high 50         High(19-36)/Low(1-18)  1:1")
-        await self.say(chan, "    !bet dozen1 50       Dozens (1-12/13-24/25-36)  2:1")
-        await self.say(chan, "    !bet col1 50         Columns (col1/col2/col3)   2:1")
-        await self.say(chan, "    !bet split 14-17 50  Split two numbers  17:1")
-        await self.say(chan, "    !bet street 13 50    Street (row of 3)  11:1")
-        await self.say(chan, "    !bet corner 1 50     Corner (4 nums)     8:1")
+        await self.say(chan, "    !roulettebet 17 100          Straight  35:1")
+        await self.say(chan, "    !roulettebet red 50          Red/Black  1:1")
+        await self.say(chan, "    !roulettebet odd 50          Odd/Even   1:1")
+        await self.say(chan, "    !roulettebet high 50         High(19-36)/Low(1-18)  1:1")
+        await self.say(chan, "    !roulettebet dozen1 50       Dozens (1-12/13-24/25-36)  2:1")
+        await self.say(chan, "    !roulettebet col1 50         Columns (col1/col2/col3)   2:1")
+        await self.say(chan, "    !roulettebet split 14-17 50  Split two numbers  17:1")
+        await self.say(chan, "    !roulettebet street 13 50    Street (row of 3)  11:1")
+        await self.say(chan, "    !roulettebet corner 1 50     Corner (4 nums)     8:1")
         await self.say(chan, "    Zero (0) wins only straight bets on 0. All others lose.")
 
     async def _load_settings(self, channel: str) -> dict:
