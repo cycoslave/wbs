@@ -164,7 +164,7 @@ class HorseRacingGame(Game):
         await self.say(
             chan,
             "\x02[Horse Racing]\x02 Track is open! "
-            "Type \x02!race\x02 to open the next race."
+            "Type \x02!horserace\x02 to open the next race."
         )
 
     async def stop_session(self, key: str):
@@ -369,8 +369,8 @@ class HorseRacingGame(Game):
         cfg   = session.data["cfg"]
         bets: List[Bet] = session.data["bets"]
 
-        # !race — open a new round
-        if cmd == "!race":
+        # !horserace — open a new round
+        if cmd == "!horserace":
             sub = parts[1].lower() if len(parts) > 1 else ""
 
             if sub == "stop":
@@ -405,8 +405,8 @@ class HorseRacingGame(Game):
                 )
             return
 
-        # !bet <horse> <amount>
-        elif cmd == "!bet":
+        # !horsebet <horse> <amount>
+        elif cmd == "!horsebet":
             if phase != "betting":
                 return await self.notice(nick, "Betting is not open right now.")
 
@@ -588,11 +588,11 @@ class HorseRacingGame(Game):
         self._set_cooldown(chan, "racehelp")
         await self.say(chan, "[Horse Racing] commands:")
         await self.say(chan, f"    !horserace                - Open the next race (betting: {BET_SECS}s).")
-        await self.say(chan, "    !horses              - Re-list the current field with odds.")
+        await self.say(chan, "    !horses                   - Re-list the current field with odds.")
         await self.say(chan, f"    !horsebet <#> <amount>    - Bet on a horse (min: ${cfg['min_bet']}).")
-        await self.say(chan, "    !horsestats [nick]    - Show career stats.")
-        await self.say(chan, "    !horsetop             - Top 5 earners.")
-        await self.say(chan, "    !horsestop           - Close the track (chan-op only).")
+        await self.say(chan, "    !horsestats [nick]        - Show career stats.")
+        await self.say(chan, "    !horsetop                 - Top 5 earners.")
+        await self.say(chan, "    !horsestop                - Close the track (chan-op only).")
 
     async def say(self, target: str, msg: str):
         await self.send_privmsg(target, msg)
