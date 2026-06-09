@@ -304,7 +304,7 @@ class RussianRouletteGame(Game):
             await self.say(chan, f"[Russian Roulette] {nick} joins the round.")
             return
 
-        elif cmd == "!pull":
+        elif cmd == "!rrpull":
             if phase != "playing":
                 return await self.notice(nick, "No active turn right now.")
             if session.data.get("current_player") != nick:
