@@ -9,12 +9,12 @@ Description: IRC Roulette. Fixed betting window, then the wheel spins.
 Flow:
   Partyline: .gstart roulette channel #chan  → makes table available (idle)
   In-channel:
-    !roulette               - Open a betting round.
+    !roulette                       - Open a betting round.
     !roulettebet <type> <amount>    - Place a bet during the window.
-    !roulettecash [nick]    - Check chip balance.
-    !roulettetop            - Top 5 by chip count.
-    !roulettehelp           - Show bet types and commands.
-    !roulettestop          - Chan-op ends the game.
+    !roulettecash [nick]            - Check chip balance.
+    !roulettetop                    - Top 5 by chip count.
+    !roulettehelp                   - Show bet types and commands.
+    !roulettestop                   - Chan-op ends the game.
 
 Bet types:
     Straight  : !roulettebet 17 100          Single number 0-36        pays 35:1
@@ -481,11 +481,11 @@ class RouletteGame(Game):
     async def _show_help(self, chan: str, cfg: dict):
         self._set_cooldown(chan, "roulettehelp")
         await self.say(chan, "\x02[Roulette]\x02 commands:")
-        await self.say(chan, "    !roulette            - Open a betting round.")
+        await self.say(chan, "    !roulette                   - Open a betting round.")
         await self.say(chan, f"   !roulettebet <type> <amount> - Place a bet (min ${cfg['min_bet']}, max ${cfg['max_bet']}, up to 5/round).")
-        await self.say(chan, "    !roulettecash [nick] - Check chip balance.")
-        await self.say(chan, "    !roulettetop         - Top 5 chip leaders.")
-        await self.say(chan, "    !roulette stop       - (op) Close the table.")
+        await self.say(chan, "    !roulettecash [nick]        - Check chip balance.")
+        await self.say(chan, "    !roulettetop                - Top 5 chip leaders.")
+        await self.say(chan, "    !roulettestop               - (op) Close the table.")
         await self.say(chan, "\x02Bet types:\x02")
         await self.say(chan, "    !roulettebet 17 100          Straight  35:1")
         await self.say(chan, "    !roulettebet red 50          Red/Black  1:1")
