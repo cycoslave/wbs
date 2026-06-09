@@ -15,7 +15,7 @@ Flow:
     !slotcash [nick]    - Check chip balance.
     !slottop            - Top 5 by chip count.
     !slothelp           - Show commands.
-    !slots stop         - Chan-op ends the game.
+    !slotstop           - Chan-op ends the game.
 """
 import asyncio
 import time
@@ -232,7 +232,7 @@ class SlotsGame(Game):
                 await self._show_help(chan, cfg)
 
         # ── !slots stop ───────────────────────────────────────────────────────
-        elif cmd == "!slots" and len(parts) > 1 and parts[1].lower() == "stop":
+        elif cmd == "!slotstop":
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only a chan-op can stop the machine.")
             await self.stop_session(session.key)
@@ -254,11 +254,11 @@ class SlotsGame(Game):
     async def _show_help(self, chan: str, cfg: dict):
         self._set_cooldown(chan, "slothelp")
         await self.say(chan, "[Slots] commands:")
-        await self.say(chan, f"    !slot [bet]         - Spin! (default: ${cfg['default_bet']}, min: ${cfg['min_bet']}, max: ${cfg['max_bet']})")
+        await self.say(chan, f"    !slot [bet]          - Spin! (default: ${cfg['default_bet']}, min: ${cfg['min_bet']}, max: ${cfg['max_bet']})")
         await self.say(chan,  "    !slotcash [nick]    - Check chip balance.")
         await self.say(chan,  "    !slottop            - Top 5 chip leaders.")
         await self.say(chan,  "    !slothelp           - This help text.")
-        await self.say(chan,  "    !slots stop         - (op) Shut down the machine.")
+        await self.say(chan,  "    !slotstop           - (op) Shut down the machine.")
         await self.say(chan,  "[Slots] Pay table: 🍒×3=2× | 🍋×3=2.5× | 🍊×3=3× | 🍇×3=4× | 🔔×3=6× | ⭐×3=10× | 💎×3=25× | 7️⃣×3=50× JACKPOT")
         await self.say(chan,  "        Fruit mix (🍒🍋🍊🍇 all different) = 1.5×  |  Two 🍒/🍋 = push")
 
