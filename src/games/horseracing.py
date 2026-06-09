@@ -11,13 +11,13 @@ Description: Horse Racing for WBS.
 Flow:
   Partyline: .gstart horseracing channel #chan    → makes game available (idle)
   In-channel:
-    !race                  - Open betting for next race.
-    !bet <horse> <amount>  - Place a bet on a horse by number or name.
-    !horses                - Re-list the current field with odds.
-    !racestats [nick]      - Show nick's lifetime earnings and wins.
-    !racetop               - Top 5 earners.
-    !racehelp              - Show commands.
-    !race stop             - Chan-op ends the game session.
+    !horse                      - Open betting for next race.
+    !horsebet <horse> <amount>  - Place a bet on a horse by number or name.
+    !horses                     - Re-list the current field with odds.
+    !horsestats [nick]          - Show nick's lifetime earnings and wins.
+    !horsetop                   - Top 5 earners.
+    !horsehelp                  - Show commands.
+    !horsestop                  - Chan-op ends the game session.
 """
 
 import asyncio
@@ -204,7 +204,7 @@ class HorseRacingGame(Game):
         await self.say(
             chan,
             f"You have \x02{BET_SECS}s\x02 to bet! "
-            f"Usage: \x02!bet <#> <amount>\x02  (min: ${cfg['min_bet']})"
+            f"Usage: \x02!horsebet <#> <amount>\x02  (min: ${cfg['min_bet']})"
         )
 
         # Countdown with a single warning
@@ -213,7 +213,7 @@ class HorseRacingGame(Game):
             await self.say(
                 chan,
                 f"[Horse Racing] \x02{BET_WARN_SECS}s left!\x02 "
-                "Last chance — !bet <#> <amount>"
+                "Last chance — !horsebet <#> <amount>"
             )
             await asyncio.sleep(BET_WARN_SECS)
         except asyncio.CancelledError:
@@ -343,7 +343,7 @@ class HorseRacingGame(Game):
                 await self.say(
                     chan,
                     f"  \x02{nick}\x02 is broke! "
-                    f"Next !bet will give you ${cfg['starting_cash'] // 2} to get back in the race."
+                    f"Next !horsebet will give you ${cfg['starting_cash'] // 2} to get back in the race."
                 )
 
         session.data["phase"] = "finished"
@@ -355,7 +355,7 @@ class HorseRacingGame(Game):
         await self.say(
             session.target,
             "[Horse Racing] Race complete. "
-            "\x02!race\x02 to run another  |  \x02!race stop\x02 to close the track."
+            "\x02!horserace\x02 to run another  |  \x02!horsestop\x02 to close the track."
         )
 
     async def on_PUBMSG(self, session: GameSession, nick: str, text: str, event=None):
@@ -386,7 +386,7 @@ class HorseRacingGame(Game):
                 return
 
             if phase == "betting":
-                return await self.notice(nick, "Betting is already open — !bet <#> <amount>")
+                return await self.notice(nick, "Betting is already open — !horsebet <#> <amount>")
             if phase == "racing":
                 return await self.notice(nick, "Race in progress! Wait for the results.")
             return
@@ -413,7 +413,7 @@ class HorseRacingGame(Game):
             horses: List[Horse] = session.data["horses"]
 
             if len(parts) < 3:
-                return await self.notice(nick, "Usage: !bet <horse #> <amount>")
+                return await self.notice(nick, "Usage: !horsebet <horse #> <amount>")
 
             # Accept horse number or partial name match
             horse_arg = parts[1].lstrip("#")
@@ -461,20 +461,20 @@ class HorseRacingGame(Game):
             )
             return
 
-        # !racestats [nick]
-        elif cmd == "!racestats":
+        # !horsestats [nick]
+        elif cmd == "!horsestats":
             target = parts[1] if len(parts) > 1 else nick
             await self._show_stats(chan, target)
             return
 
-        # !racetop
-        elif cmd == "!racetop":
+        # !horsetop
+        elif cmd == "!horsetop":
             if not self._on_cooldown(chan, "racetop"):
                 await self._show_top(chan)
             return
 
-        # !racehelp
-        elif cmd == "!racehelp":
+        # !horsehelp
+        elif cmd == "!horsehelp":
             if not self._on_cooldown(chan, "racehelp"):
                 await self._show_help(chan, cfg)
             return
@@ -587,12 +587,12 @@ class HorseRacingGame(Game):
     async def _show_help(self, chan: str, cfg: dict):
         self._set_cooldown(chan, "racehelp")
         await self.say(chan, "[Horse Racing] commands:")
-        await self.say(chan, f"    !race                - Open the next race (betting: {BET_SECS}s).")
+        await self.say(chan, f"    !horserace                - Open the next race (betting: {BET_SECS}s).")
         await self.say(chan, "    !horses              - Re-list the current field with odds.")
-        await self.say(chan, f"    !bet <#> <amount>    - Bet on a horse (min: ${cfg['min_bet']}).")
-        await self.say(chan, "    !racestats [nick]    - Show career stats.")
-        await self.say(chan, "    !racetop             - Top 5 earners.")
-        await self.say(chan, "    !race stop           - Close the track (chan-op only).")
+        await self.say(chan, f"    !horsebet <#> <amount>    - Bet on a horse (min: ${cfg['min_bet']}).")
+        await self.say(chan, "    !horsestats [nick]    - Show career stats.")
+        await self.say(chan, "    !horsetop             - Top 5 earners.")
+        await self.say(chan, "    !horsestop           - Close the track (chan-op only).")
 
     async def say(self, target: str, msg: str):
         await self.send_privmsg(target, msg)
