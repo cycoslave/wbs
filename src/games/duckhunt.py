@@ -427,7 +427,7 @@ class DuckhuntGame(Game):
             }
         return {
             "min_delay": 180, "max_delay": 7200,
-            "duck_timeout": 60, "reload_time": RELOAD_SECS,
+            "duck_timeout": 7200, "reload_time": RELOAD_SECS,
         }
 
     async def _save_setting(self, channel: str, **kwargs):
