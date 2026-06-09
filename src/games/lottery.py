@@ -119,7 +119,7 @@ class LotteryGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         cfg  = await self._load_settings(chan)
         session.data["cfg"]        = cfg
@@ -128,13 +128,14 @@ class LotteryGame(Game):
         jackpot   = cfg["jackpot"]
         draw_hour = cfg["draw_hour"]
         secs      = _seconds_until_hour(draw_hour)
-        await self.say(chan,
-            f"\x02[Lottery]\x02 Daily lottery active! "
-            f"Pick a number 1-{PICK_MAX} with \x02!lotto <number>\x02. "
-            f"Draw at \x02{draw_hour:02d}:00 UTC\x02 "
-            f"(in {_fmt_countdown(secs)}). "
-            f"Current jackpot: \x02${jackpot}\x02."
-        )
+        if not restore:
+            await self.say(chan,
+                f"\x02[Lottery]\x02 Daily lottery active! "
+                f"Pick a number 1-{PICK_MAX} with \x02!lotto <number>\x02. "
+                f"Draw at \x02{draw_hour:02d}:00 UTC\x02 "
+                f"(in {_fmt_countdown(secs)}). "
+                f"Current jackpot: \x02${jackpot}\x02."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

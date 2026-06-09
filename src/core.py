@@ -928,7 +928,6 @@ class Core:
             ) as cursor:
                 game_rows = await cursor.fetchall()
 
-            # Fetch all sessions in the same connection, not one-per-game
             game_names = [row["game_name"] for row in game_rows]
             if not game_names:
                 return
@@ -941,7 +940,6 @@ class Core:
             ) as cursor:
                 session_rows = await cursor.fetchall()
 
-        # Group sessions by game
         from collections import defaultdict
         sessions_by_game = defaultdict(list)
         for s in session_rows:
@@ -952,9 +950,14 @@ class Core:
                 await self.game.load_game(game_name)
                 for s in sessions_by_game[game_name]:
                     await self.game.start_game(
-                        game_name, s["scope"], s["target"], owner=s["owner"]
+                        game_name, s["scope"], s["target"],
+                        owner=s["owner"],
+                        restore=True,
                     )
-                    log.info("Restored game session: %s on %s:%s", game_name, s["scope"], s["target"])
+                    log.info(
+                        "Restored game session: %s on %s:%s",
+                        game_name, s["scope"], s["target"]
+                    )
             except Exception as e:
                 log.error("Failed to restore game %s: %s", game_name, e)
 

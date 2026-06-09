@@ -102,19 +102,20 @@ class WerewolfGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
-        session.data["players"]      = {}   # nick -> WPlayer
-        session.data["phase"]        = "registering"
-        session.data["day"]          = 0
-        session.data["votes"]        = {}   # voter -> target
-        session.data["night_kill"]   = None
-        session.data["night_save"]   = None
-        session.data["night_see"]    = None
-        session.data["wolves"]       = []
-        session.data["actions_done"] = set()
-        session.data["vote_event"]   = asyncio.Event()
-        await super().start_session(session)
-        await self._open_registration(session)
+    async def start_session(self, session: GameSession, restore: bool = False):
+        if not restore:
+            session.data["players"]      = {}   # nick -> WPlayer
+            session.data["phase"]        = "registering"
+            session.data["day"]          = 0
+            session.data["votes"]        = {}   # voter -> target
+            session.data["night_kill"]   = None
+            session.data["night_save"]   = None
+            session.data["night_see"]    = None
+            session.data["wolves"]       = []
+            session.data["actions_done"] = set()
+            session.data["vote_event"]   = asyncio.Event()
+            await super().start_session(session)
+            await self._open_registration(session)
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

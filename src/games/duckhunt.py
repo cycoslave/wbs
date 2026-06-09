@@ -84,7 +84,7 @@ class DuckhuntGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         cfg  = await self._load_settings(chan)
         session.data["min_delay"]          = cfg["min_delay"]
@@ -103,10 +103,11 @@ class DuckhuntGame(Game):
         session.data["probe_task"]         = None
 
         await super().start_session(session)
-        await self.send_privmsg(
-            session.target,
-            "\x02[DuckHunt]\x02 Game started. Wait for a duck, then use \x02!bang\x02",
-        )
+        if not restore:
+            await self.send_privmsg(
+                session.target,
+                "\x02[DuckHunt]\x02 Game started. Wait for a duck, then use \x02!bang\x02",
+            )
         session.task = asyncio.create_task(self._hunt_loop(session))
 
     async def stop_session(self, key: str):

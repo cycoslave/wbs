@@ -71,10 +71,10 @@ class Game:
                 (self.name)
             )
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         session.state = "running"
+        session.data['_restore'] = restore
         await self.session_save(session)
-        #session.task = asyncio.create_task(self.game_loop(session))
 
     async def stop_session(self, key: str):
         session = self.sessions.pop(key, None)
@@ -250,6 +250,7 @@ class GameManager:
         scope: str,
         target: str,
         owner: Optional[str] = None,
+        restore: bool = False,
         **kwargs: Any,
     ) -> GameSession:
         game = await self.load_game(game_name)
@@ -258,7 +259,7 @@ class GameManager:
             raise ValueError(f"{game_name} does not support scope {scope}")
 
         session = await game.create_session(scope, target, owner=owner, **kwargs)
-        await game.start_session(session)
+        await game.start_session(session, restore=restore)
         return session
 
     async def stop_game(self, game_name: str, scope: str, target: str):

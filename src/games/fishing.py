@@ -122,17 +122,18 @@ class FishingGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         cfg  = await self._load_settings(chan)
         session.data["cfg"]   = cfg
         session.data["lines"] = {}   # nick.lower() -> ActiveLine
         session.data["lock"]  = asyncio.Lock()
         await super().start_session(session)
-        await self.say(chan,
-            "\x02[Fishing]\x02 The lake is open! "
-            "Type \x02!fishcast\x02 to drop your line."
-        )
+        if not restore:
+            await self.say(chan,
+                "\x02[Fishing]\x02 The lake is open! "
+                "Type \x02!fishcast\x02 to drop your line."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

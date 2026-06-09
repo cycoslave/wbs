@@ -154,18 +154,19 @@ class HorseRacingGame(Game):
         await super().unload()
         self.log.info("Game %s %s unloaded", self.name, self.version)
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         session.data["cfg"]     = await self._load_settings(chan)
         session.data["phase"]   = "idle"
         session.data["horses"]  = []   # List[Horse]
         session.data["bets"]    = []   # List[Bet]
         await super().start_session(session)
-        await self.say(
-            chan,
-            "\x02[Horse Racing]\x02 Track is open! "
-            "Type \x02!horserace\x02 to open the next race."
-        )
+        if not restore:
+            await self.say(
+                chan,
+                "\x02[Horse Racing]\x02 Track is open! "
+                "Type \x02!horserace\x02 to open the next race."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

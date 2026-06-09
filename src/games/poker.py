@@ -166,7 +166,7 @@ class PokerGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         """Called by .gstart — makes the game available but does NOT start a hand."""
         chan = session.target
         session.data["cfg"] = await self._load_settings(chan)
@@ -182,10 +182,11 @@ class PokerGame(Game):
         session.data["dealer_idx"] = 0
         session.data["action_player"] = None
         await super().start_session(session)
-        await self.say(chan,
-            "\x02[Poker]\x02 Texas Hold'em is now available! "
-            "Type \x02!pkstart\x02 to start a hand."
-        )
+        if not restore:
+            await self.say(chan,
+                "\x02[Poker]\x02 Texas Hold'em is now available! "
+                "Type \x02!pkstart\x02 to start a hand."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

@@ -117,7 +117,7 @@ class BlackjackGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         """Called by .gstart — makes the game available but does NOT start a round."""
         chan = session.target
         session.data["cfg"]            = await self._load_settings(chan)
@@ -127,10 +127,11 @@ class BlackjackGame(Game):
         session.data["phase"]          = "idle"
         session.data["current_player"] = None
         await super().start_session(session)
-        await self.say(chan,
-            "\x02[Blackjack]\x02 Game is now available! "
-            "Type \x02!bjstart\x02 to start a round."
-        )
+        if not restore:
+            await self.say(chan,
+                "\x02[Blackjack]\x02 Game is now available! "
+                "Type \x02!bjstart\x02 to start a round."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

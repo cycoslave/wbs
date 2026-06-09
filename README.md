@@ -54,7 +54,6 @@ options:
 - schema.sql — hostmasks / bans / invites as JSON Strings
 Storing structured data as JSON blobs (TEXT DEFAULT '[]') in SQLite is functional but unindexed. The index on users.hostmasks (idx_users_hostmasks) won't help with LIKE-style searches. For RC2 this is acceptable, but for production at scale, normalize hostmasks to a proper junction table.
 - add .net lag
-- remove games announcement when rejoining channel.
 
 ## Bugs
 - IRC related commands should check if connected first

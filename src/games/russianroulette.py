@@ -80,7 +80,7 @@ class RussianRouletteGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         session.data["cfg"] = await self._load_settings(chan)
         session.data["phase"] = "idle"
@@ -92,11 +92,12 @@ class RussianRouletteGame(Game):
         session.data["current_player"] = None
         session.data["turn_done"] = None
         await super().start_session(session)
-        await self.say(
-            chan,
-            "\x02[Russian Roulette]\x02 Game is available. "
-            "Type \x02!rrstart\x02 to open a round."
-        )
+        if not restore:
+            await self.say(
+                chan,
+                "\x02[Russian Roulette]\x02 Game is available. "
+                "Type \x02!rrstart\x02 to open a round."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

@@ -264,17 +264,18 @@ class RouletteGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         """Called by .gstart — table is available, waiting for !roulette to open a round."""
         chan = session.target
         session.data["cfg"]   = await self._load_settings(chan)
         session.data["phase"] = "idle"
         session.data["bets"]  = {}   # nick.lower() -> List[Bet]
         await super().start_session(session)
-        await self.say(chan,
-            "\x02[Roulette]\x02 Table is open! "
-            "Type \x02!roulette\x02 to start a betting round."
-        )
+        if not restore:
+            await self.say(chan,
+                "\x02[Roulette]\x02 Table is open! "
+                "Type \x02!roulette\x02 to start a betting round."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)

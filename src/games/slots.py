@@ -136,17 +136,18 @@ class SlotsGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
-    async def start_session(self, session: GameSession):
+    async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         session.data["cfg"] = await self._load_settings(chan)
         await super().start_session(session)
         cfg = session.data["cfg"]
-        await self.say(chan,
-            f"\x02[Slots]\x02 Machine is live! "
-            f"Type \x02!slot\x02 to spin "
-            f"(default bet: ${cfg['default_bet']}, "
-            f"min: ${cfg['min_bet']}, max: ${cfg['max_bet']})."
-        )
+        if not restore:
+            await self.say(chan,
+                f"\x02[Slots]\x02 Machine is live! "
+                f"Type \x02!slot\x02 to spin "
+                f"(default bet: ${cfg['default_bet']}, "
+                f"min: ${cfg['min_bet']}, max: ${cfg['max_bet']})."
+            )
 
     async def stop_session(self, key: str):
         session = self.sessions.get(key)
