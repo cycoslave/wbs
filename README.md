@@ -140,5 +140,3 @@ Error executing .mass
 console> .chaninfo #tohands
 Channel: #tohands
   Comment: None
-
-- game duckhunt, timers needs to be re-ajusted.
