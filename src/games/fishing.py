@@ -10,8 +10,8 @@ Description: IRC fishing game. Cast your line, wait for a bite, reel it in.
 Flow:
   Partyline: .gstart fishing channel #chan  → makes game available (idle)
   In-channel:
-    !cast               - Cast your line. One line per player at a time.
-    !reel               - Reel in when you get a bite! Be quick.
+    !fishcast           - Cast your line. One line per player at a time.
+    !fishreel           - Reel in when you get a bite! Be quick.
     !fishstats [nick]   - Personal stats or another player's.
     !fishtop            - Top 5 anglers by score.
     !fishhelp           - Show commands.
@@ -131,7 +131,7 @@ class FishingGame(Game):
         await super().start_session(session)
         await self.say(chan,
             "\x02[Fishing]\x02 The lake is open! "
-            "Type \x02!cast\x02 to drop your line."
+            "Type \x02!fishcast\x02 to drop your line."
         )
 
     async def stop_session(self, key: str):
@@ -232,7 +232,7 @@ class FishingGame(Game):
             line = session.data["lines"].get(nkey)
 
             if line is None:
-                await self.notice(nick, "You don't have a line in the water. Type \x02!cast\x02 first.")
+                await self.notice(nick, "You don't have a line in the water. Type \x02!fishcast\x02 first.")
                 return
 
             if not line.has_bite:
@@ -284,10 +284,10 @@ class FishingGame(Game):
         args = parts[1:]
         chan = session.target
 
-        if cmd == "!cast":
+        if cmd == "!fishcast":
             await self._do_cast(session, nick)
 
-        elif cmd == "!reel":
+        elif cmd == "!fishreel":
             await self._do_reel(session, nick)
 
         elif cmd == "!fishstats":
@@ -298,7 +298,7 @@ class FishingGame(Game):
             if not self._on_cooldown(chan, "fishtop"):
                 await self._show_top(chan)
 
-        elif cmd == "!fishing" and args and args[0].lower() == "stop":
+        elif cmd == "!fishstop":
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only a chan-op can stop the game.")
             await self.stop_session(session.key)
