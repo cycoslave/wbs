@@ -12,10 +12,10 @@ Flow:
   In-channel:
     !lotto <1-49>           - Pick your number (once per calendar day UTC).
     !lotto                  - Show your current pick + time until draw.
-    !jackpot                - Show current jackpot amount.
+    !lottojackpot                - Show current jackpot amount.
     !lottotop               - Top 5 all-time winners by total winnings.
     !lottohelp              - Show commands.
-    !lottery stop           - Chan-op ends the lottery.
+    !lottostop           - Chan-op ends the lottery.
 
 Draw mechanics:
     - Winning number drawn: random 1-49.
@@ -288,8 +288,8 @@ class LotteryGame(Game):
                 f"Draw in {_fmt_countdown(secs)}. Jackpot: \x02${cfg['jackpot']}\x02. Good luck! 🍀"
             )
 
-        # ── !jackpot ──────────────────────────────────────────────────────────
-        elif cmd == "!jackpot":
+        # ── !lottojackpot ──────────────────────────────────────────────────────────
+        elif cmd == "!lottojackpot":
             secs = _seconds_until_hour(cfg["draw_hour"])
             today = _today_str()
             async with get_db(self.core.db_path) as db:
@@ -317,8 +317,8 @@ class LotteryGame(Game):
             if not self._on_cooldown(chan, "lottohelp"):
                 await self._show_help(chan, cfg)
 
-        # ── !lottery stop ─────────────────────────────────────────────────────
-        elif cmd == "!lottery" and len(parts) > 1 and parts[1].lower() == "stop":
+        # ── !lottostop ─────────────────────────────────────────────────────
+        elif cmd == "!lottostop":
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only a chan-op can stop the lottery.")
             await self.stop_session(session.key)
@@ -414,12 +414,12 @@ class LotteryGame(Game):
     async def _show_help(self, chan: str, cfg: dict):
         self._set_cooldown(chan, "lottohelp")
         await self.say(chan, "\x02[Lottery]\x02 commands:")
-        await self.say(chan, f"    !lotto <1-{PICK_MAX}>       - Pick your number (once per day).")
-        await self.say(chan,  "    !lotto              - Show your current pick + countdown.")
-        await self.say(chan,  "    !jackpot            - Show jackpot, ticket count, and draw time.")
-        await self.say(chan,  "    !lottotop           - All-time top winners.")
-        await self.say(chan,  "    !lottohelp          - This help text.")
-        await self.say(chan,  "    !lottery stop       - (op) Deactivate lottery.")
+        await self.say(chan, f"    !lotto <1-{PICK_MAX}>   - Pick your number (once per day).")
+        await self.say(chan,  "    !lotto                 - Show your current pick + countdown.")
+        await self.say(chan,  "    !lottojackpot          - Show jackpot, ticket count, and draw time.")
+        await self.say(chan,  "    !lottotop              - All-time top winners.")
+        await self.say(chan,  "    !lottohelp             - This help text.")
+        await self.say(chan,  "    !lottostop             - (op) Deactivate lottery.")
         await self.say(chan,
             f"    Draw: daily at {cfg['draw_hour']:02d}:00 UTC. "
             f"Jackpot starts at ${JACKPOT_SEED}, rolls over by ${ROLLOVER_ADD}/day with no winner."
