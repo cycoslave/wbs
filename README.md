@@ -56,27 +56,6 @@ Storing structured data as JSON blobs (TEXT DEFAULT '[]') in SQLite is functiona
 - add .net lag
 
 ## Bugs
-- IRC related commands should check if connected first
-2026-06-08 09:33:06,088 WARNING Socket probe failed
-2026-06-08 09:33:06,243 ERROR Not connected, dropping command: ping
-2026-06-08 09:33:06,753 WARNING Disconnected from server
-2026-06-08 09:33:06,963 ERROR _check_channels error: Not connected.
-Traceback (most recent call last):
-  File "/home/loco/Code/eggdrop/wbs/src/irc.py", line 956, in _check_channels
-    self.connection.join(chan)
-  File "/home/loco/.pyenv/versions/3.12.7/lib/python3.12/site-packages/irc/client.py", line 567, in join
-    self.send_items('JOIN', channel, key)
-  File "/home/loco/.pyenv/versions/3.12.7/lib/python3.12/site-packages/irc/client.py", line 659, in send_items
-    self.send_raw(' '.join(filter(None, items)))
-  File "/home/loco/.pyenv/versions/3.12.7/lib/python3.12/site-packages/irc/client.py", line 667, in send_raw
-    raise ServerNotConnectedError("Not connected.")
-irc.client.ServerNotConnectedError: Not connected.
-
-- .net error
-console> .net say #tohands test
-→ SAY #tohands: test
-2026-06-08 18:23:46,707 ERROR Command failed {'cmd': 'msg', 'target': '#tohands', 'text': 'test'}: 'WbsIrcBot' object has no attribute '_IRC_MAX_BYTES'
-
 - if +A, then +o should be assumed
 console> .net op cyco #tohands
 Access denied (need +o).
@@ -123,10 +102,6 @@ console> .tasks
 No tasks registered.
 console> .timers
 No active IRC timers.
-
-- we should be able to see all the sessions active in channels
-console> .gsessions
-No active game sessions
 
 - issues with .mass
 console> .mass

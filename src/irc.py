@@ -996,7 +996,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     async def _check_channels(self):
         """Rejoin active channels if missing, with flood protection/backoff."""
         try:
-            if not self.is_connected:
+            if not self.is_connected or not self.connection.is_connected():
                 return
             active_chans = await self.chan.getchans() or []
             now = datetime.now()
@@ -1031,6 +1031,10 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     log.warning(f"Join backoff triggered for {chan}; pausing until {cooldown_until}")
                     continue
 
+                if not self.connection.is_connected():
+                    log.debug("[IRC] Lost connection during _check_channels, aborting")
+                    return
+
                 self.connection.join(chan)
                 attempts.append(now)
                 log.info(f"Trying to join: {chan} (attempts in last 5m: {len(attempts)})")
@@ -1039,12 +1043,14 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             self.maintenance_state['join_attempts'] = join_attempts
             self.maintenance_state['join_cooldown_until'] = join_cooldown_until
 
+        except irc.client.ServerNotConnectedError:
+            log.warning("[IRC] _check_channels: not connected, skipping")
         except Exception as e:
             log.error(f"_check_channels error: {e}", exc_info=True)
 
     async def _check_nick(self):
         """Periodically try to reclaim the desired nick if on a fallback."""
-        if not self.is_connected:
+        if not self.is_connected or not self.connection.is_connected():
             return
 
         current = self.connection.get_nickname()
@@ -1117,6 +1123,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
     async def _join_if_tracked(self, conn, channel: str) -> None:
         """Async helper: rejoin channel if it exists in DB."""
         try:
+            if not self.connection.is_connected():
+                return
             if await self.chan.exist(channel):
                 conn.join(channel)
         except Exception as e:
