@@ -134,8 +134,3 @@ Usage: .mass <op|deop> <#channel>
 console> .mass op #tohands
 2026-06-09 23:55:17,998 ERROR Command 'mass' error: 'Core' object has no attribute 'irc_snapshot'
 Error executing .mass
-
-- chaninfo needs to show more infomation about the channel (live and stored data)
-console> .chaninfo #tohands
-Channel: #tohands
-  Comment: None

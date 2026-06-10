@@ -1144,7 +1144,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                             'user_list': list(chan_obj.users()),
                             'bot_op': self.is_bot_op(chan_name),
                             'ops': list(chan_obj.opers()),
-                            'halfops': [n for n, m in chan_obj.users.items() if '%' in getattr(m, 'modes', '')],
+                            'halfops': list(chan_obj.halfops()),
                             'voiced': list(chan_obj.voiced()),
                             'mode': ''.join(f"{k}{v}" if v else k for k, v in chan_obj.modes.items()),
                             'mode_params': getattr(chan_obj, 'mode_params', {}),

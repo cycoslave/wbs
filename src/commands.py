@@ -1080,12 +1080,15 @@ async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
         await respond(f"→ Channel {channel} not found or already deleted.")
 
 async def cmd_chaninfo(core, handle: str, session_id: int, arg: str, respond):
+    """Show stored DB config + live IRC state for a channel."""
     if not arg:
-        return "Usage: .chaninfo <#channel>"
-    chan_name = arg.lower()
-    #live_chan = core.chan.get_live(chan_name)
-    live_chan = None
-    await respond(await core.chan.showchan(chan_name, live=live_chan))
+        await respond("Usage: .chaninfo <#channel>")
+        return
+    chan_name = arg.strip().lower()
+    live_chan = core.get_chan(chan_name)
+    result = await core.chan.showchan(chan_name, live=live_chan)
+    for line in result.splitlines():
+        await respond(line)
 
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     """
