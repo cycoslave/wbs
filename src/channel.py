@@ -169,10 +169,13 @@ class Channel:
             self.key = None
 
     def update_irc_state(self, irc_data: dict):
-        self.users   = irc_data.get('user_list', [])
-        self.bot_op  = irc_data.get('bot_op', False)
-        self.ops     = irc_data.get('ops', [])
-        self.voiced  = irc_data.get('voiced', [])
+        self.users    = [u.lower() for u in irc_data.get('user_list', [])]
+        self.ops      = [u.lower() for u in irc_data.get('ops', [])]
+        self.halfops  = [u.lower() for u in irc_data.get('halfops', [])]
+        self.voiced   = [u.lower() for u in irc_data.get('voiced', [])]
+        self.bot_op   = irc_data.get('bot_op', False)
+        self.bot_halfop = irc_data.get('bot_halfop', False)
+        self.synced   = irc_data.get('synced', False)
 
     # DB — lazy load
     async def _load_db_config(self):
@@ -449,19 +452,117 @@ class ChannelManager:
                 result.append(f"  {row['name']}{status} [{scope}] - {row['comment']}")
             return "\n".join(result)
 
-    async def showchan(self, channel: str) -> str:
+    async def showchan(self, channel: str, live: Optional["Channel"] = None) -> str:
+        """
+        Show full channel info: stored DB config + optional live IRC state.
+        Pass a Channel object as `live` to include live IRC data.
+        """
+        import datetime
+
         async with get_db(self.db_path) as db:
             async with db.execute(
                 "SELECT * FROM channels WHERE name = ?", (channel.lower(),)
             ) as cur:
                 row = await cur.fetchone()
+
+            subnet_rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (channel.lower(),),
+            )
+
         if not row:
             return f"Channel '{channel}' not found."
 
-        result = [f"Channel: {row['name']}"]
-        result.append(f"  Comment: {row['comment'] or 'None'}")
-        return "\n".join(result)
+        subnet_ids = [r["subnet_id"] for r in subnet_rows]
+        scope = f"subnets {subnet_ids}" if subnet_ids else "all subnets (global)"
 
+        def ts(epoch: int) -> str:
+            if not epoch:
+                return "never"
+            return datetime.datetime.utcfromtimestamp(epoch).strftime("%Y-%m-%d %H:%M UTC")
+
+        def flag(val) -> str:
+            return "yes" if val else "no"
+
+        result = [f"Channel: {row['name']}"]
+
+        # --- Status ---
+        status = "active"
+        if row["deleted_at"]:
+            status = f"deleted ({ts(row['deleted_at'])})"
+        elif row["is_inactive"]:
+            status = "inactive"
+        result.append(f"  Status:    {status}")
+        result.append(f"  Scope:     {scope}")
+        result.append(f"  Comment:   {row['comment'] or 'None'}")
+        result.append(f"  Created:   {ts(row['created_at'])} by {row['created_by'] or 'unknown'}")
+        result.append(f"  Updated:   {ts(row['updated_at'])} by {row['updated_by'] or 'unknown'}")
+
+        # --- DB Channel Flags ---
+        result.append("  --- Settings ---")
+        result.append(f"  Bitch:           {flag(row['is_bitch'])}")
+        result.append(f"  Autoop:          {flag(row['is_autoop'])}")
+        result.append(f"  Autovoice:       {flag(row['is_autovoice'])}")
+        result.append(f"  Revenge:         {flag(row['is_revenge'])}")
+        result.append(f"  RevengeBots:     {flag(row['is_revengebots'])}")
+        result.append(f"  ProtectFriends:  {flag(row['is_protectfriends'])}")
+        result.append(f"  ProtectOps:      {flag(row['is_protectops'])}")
+        result.append(f"  DontKickOps:     {flag(row['is_dontkickops'])}")
+        result.append(f"  EnforceBans:     {flag(row['is_enforcebans'])}")
+        result.append(f"  DynamicBans:     {flag(row['is_dynamicbans'])}")
+        result.append(f"  DynamicExempts:  {flag(row['is_dynamicexempts'])}")
+        result.append(f"  DynamicInvites:  {flag(row['is_dynamicinvites'])}")
+
+        # --- Stored modes/lists ---
+        result.append("  --- Stored Config ---")
+        result.append(f"  Modes:    {row['modes'] or 'none'}")
+
+        bans    = json.loads(row["bans"])    if isinstance(row["bans"], str)    else (row["bans"] or [])
+        invites = json.loads(row["invites"]) if isinstance(row["invites"], str) else (row["invites"] or [])
+        exempts = json.loads(row["exempts"]) if isinstance(row["exempts"], str) else (row["exempts"] or [])
+
+        result.append(f"  Bans:     {len(bans)} stored")
+        result.append(f"  Invites:  {len(invites)} stored")
+        result.append(f"  Exempts:  {len(exempts)} stored")
+
+        # --- Flood settings ---
+        result.append("  --- Flood Limits ---")
+        result.append(
+            f"  Pub:   {row['flood_pub']}/{row['flood_pub_time']}s  "
+            f"CTCP: {row['flood_ctcp']}/{row['flood_ctcp_time']}s  "
+            f"Join: {row['flood_join']}/{row['flood_join_time']}s"
+        )
+        result.append(
+            f"  Kick:  {row['flood_kick']}/{row['flood_kick_time']}s  "
+            f"Deop: {row['flood_deop']}/{row['flood_deop_time']}s  "
+            f"Nick: {row['flood_nick']}/{row['flood_nick_time']}s"
+        )
+
+        # --- Live IRC state (only if Channel object passed in) ---
+        if live:
+            result.append("  --- Live IRC State ---")
+            bot_status = []
+            if live.bot_op:      bot_status.append("op")
+            if live.bot_halfop:  bot_status.append("halfop")
+            result.append(f"  Bot status:  {', '.join(bot_status) if bot_status else 'none'}")
+            result.append(f"  Synced:      {flag(live.synced)}")
+            result.append(f"  Users:       {len(live.users)}")
+            result.append(f"  Ops:         {len(live.ops)}")
+            result.append(f"  Voiced:      {len(live.voiced)}")
+
+            live_modes = []
+            for m in "ntpsim":
+                if getattr(live, f"modes_{m}", False):
+                    live_modes.append(m)
+            if live.limit:  live_modes.append(f"l:{live.limit}")
+            if live.key:    live_modes.append(f"k:*")
+            result.append(f"  Modes:       +{''.join(live_modes) if live_modes else '(none)'}")
+            result.append(f"  Topic:       {live.topic or '(none)'}")
+            result.append(f"  Live bans:   {len(live.live_bans)}")
+            result.append(f"  Live invites:{len(live.live_invites)}")
+            result.append(f"  Live exempts:{len(live.live_exempts)}")
+
+        return "\n".join(result)
 
     async def exist(self, channel: str) -> bool:
         """Return True if a channel exists and is not deleted."""

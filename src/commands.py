@@ -1079,12 +1079,13 @@ async def cmd_delchan(core, handle: str, session_id: int, arg: str, respond):
     else:
         await respond(f"→ Channel {channel} not found or already deleted.")
 
-async def cmd_showchan(core, handle: str, session_id: int, arg: str, respond):
+async def cmd_chaninfo(core, handle: str, session_id: int, arg: str, respond):
     if not arg:
-        await respond("Usage: .showchan <user>")
-        return
-    parts = arg.split()
-    await respond(await core.chan.showchan(parts[0]))
+        return "Usage: .chaninfo <#channel>"
+    chan_name = arg.lower()
+    #live_chan = core.chan.get_live(chan_name)
+    live_chan = None
+    await respond(await core.chan.showchan(chan_name, live=live_chan))
 
 async def cmd_adduser(core, handle: str, session_id: int, arg: str, respond):
     """
@@ -2757,7 +2758,7 @@ COMMANDS = {
     'join': cmd_addchan,
     '-chan': cmd_delchan,
     'part': cmd_delchan,
-    'chaninfo': cmd_showchan,
+    'chaninfo': cmd_chaninfo,
     'channels': cmd_channels,
     # bot
     '+bot': cmd_addbot,

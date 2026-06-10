@@ -338,6 +338,7 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
         numerics = {
             '302': self.on_userhost, # RPL_USERHOST
             '332': self.on_332,    # RPL_TOPIC
+            '333': self.on_333,    # RPL_TOPICWHOTIME
             '324': self.on_324,    # RPL_CHANNELMODEIS
             '329': self.on_329,    # RPL_CHANNELCREATETIME
             '367': self.on_367,    # RPL_BANLIST
@@ -346,6 +347,8 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             '368': self.on_368,    # RPL_ENDOFBANLIST etc.
             '347': self.on_347,    # RPL_ENDOFINVITELIST
             '349': self.on_349,    # RPL_ENDOFEXCEPTLIST
+            '352': self.on_352,    # RPL_WHOREPLY
+            '315': self.on_315,    # RPL_ENDOFWHO
             '471': self.on_471,    # ERR_CHANNELISFULL
             '473': self.on_473,    # ERR_INVITEONLYCHAN
             '474': self.on_474,    # ERR_BANNEDFROMCHAN
@@ -573,6 +576,21 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'nick': nick,   # empty string if server-sent (join)
         })
 
+    def on_333(self, conn, event):
+        """RPL_TOPICWHOTIME — who set the topic and when."""
+        try:
+            channel   = event.arguments[1]
+            setter    = event.arguments[2]   # nick!user@host
+            timestamp = int(event.arguments[3])
+        except (IndexError, ValueError):
+            return
+        self._emit_event({
+            'type': 'CHANNEL_TOPIC_META',
+            'channel': channel,
+            'setter': setter,
+            'timestamp': timestamp,
+        })
+
     def on_324(self, conn, event):  # RPL_CHANNELMODEIS
         chan_name = event.arguments[1]
         modes_str = ' '.join(event.arguments[2:])
@@ -636,6 +654,54 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
             'channel': chan_name
         })
 
+    def on_352(self, conn, event):
+        """
+        RPL_WHOREPLY — one line per user in response to WHO #channel.
+        Format: 352 botnick channel user host server nick flags :hopcount realname
+        event.arguments = [botnick, channel, user, host, server, nick, flags, ':hopcount realname']
+        """
+        try:
+            args      = event.arguments
+            channel   = args[1]
+            user      = args[2]   # ident
+            host      = args[3]
+            nick      = args[5]
+            flags     = args[6]   # e.g. 'H@', 'G+', 'H%', 'H'
+        except IndexError:
+            log.warning("[IRC] Malformed 352: %r", event.arguments)
+            return
+
+        # flags: H=here G=gone(away), then mode prefixes: @=op %=halfop +=voice *=ircop
+        is_op     = '@' in flags
+        is_halfop = '%' in flags
+        is_voice  = '+' in flags
+
+        self._emit_event({
+            'type': 'WHO_REPLY',
+            'channel': channel,
+            'nick': nick,
+            'user': user,
+            'host': host,
+            'flags': flags,
+            'is_op': is_op,
+            'is_halfop': is_halfop,
+            'is_voice': is_voice,
+        })
+
+    def on_315(self, conn, event):
+        """
+        RPL_ENDOFWHO — signals WHO response is complete for this channel.
+        event.arguments = [botnick, channel, 'End of /WHO list']
+        """
+        try:
+            channel = event.arguments[1]
+        except IndexError:
+            return
+        self._emit_event({
+            'type': 'WHO_END',
+            'channel': channel,
+        })
+
     def on_471(self, conn, event):  # ERR_CHANNELISFULL
         chan_name = event.arguments[1]
         self._emit_event({
@@ -684,6 +750,15 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                 'nick': nick
             })
         
+    def on_topic(self, conn, event):
+        """Live topic change during session."""
+        self._emit_event({
+            'type': 'TOPIC',
+            'channel': event.target,
+            'topic': event.arguments[0] if event.arguments else '',
+            'nick': event.source.nick,
+        })
+
     def on_featurelist(self, conn, event):
         """005 RPL_ISUPPORT — ingest capabilities."""
         self.server_caps.ingest(event.arguments)
@@ -875,6 +950,9 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                     self.whois_trackers[req_id] = {'nick': nick}
                     self.connection.whois(nick)
 
+                elif cmd == 'who':
+                    self.connection.send_raw(f"WHO {cmd_data['channel']}")
+
                 elif cmd == 'ping':
                     token = cmd_data.get('token', str(int(time.time())))
                     self.connection.ping(token)
@@ -1064,11 +1142,12 @@ class WbsIrcBot(irc.bot.SingleServerIRCBot):
                         snapshot['channels'][chan_name] = {
                             'users': len(chan_obj.users()),
                             'user_list': list(chan_obj.users()),
-                            'bot_op': self.is_bot_op(chan_name),  # Use your existing helper method
+                            'bot_op': self.is_bot_op(chan_name),
                             'ops': list(chan_obj.opers()),
+                            'halfops': [n for n, m in chan_obj.users.items() if '%' in getattr(m, 'modes', '')],
                             'voiced': list(chan_obj.voiced()),
                             'mode': ''.join(f"{k}{v}" if v else k for k, v in chan_obj.modes.items()),
-                            'mode_params': getattr(chan_obj, 'mode_params', {})
+                            'mode_params': getattr(chan_obj, 'mode_params', {}),
                         }
                         log.debug(f"Successfully added {chan_name} to snapshot")
                         

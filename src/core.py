@@ -74,7 +74,7 @@ class Core:
         self.connected = False
         self.connected_on = None
         self.botname = self.config['bot']['nick']
-        self.channels = {} # chan_name -> Channel object
+        self.channels: Dict[str, Channel] = {}
         self.dcc_sessions = {}
         self.party_sessions = {}
         self.bot_sessions = {} 
@@ -105,11 +105,15 @@ class Core:
             'QUIT': self.on_quit,
             'MODE': self.on_mode,
             'NICK': self.on_nick,
+            'WHO_REPLY': self.on_who_reply,
+            'WHO_END': self.on_who_end,
             'READY': self.on_ready,
             'DISCONNECT': self.on_disconnect,
             'IRC_TIMER_FIRED': self.on_irc_timer_fired,
             'REQUEST_BOTLINKS': self.request_botlinks,
             'ERROR': self.on_error,
+            'TOPIC': self.on_topic,
+            'CHANNEL_TOPIC_META': self.on_333,
             'CHANNEL_TOPIC': self.on_332,
             'CHANNEL_MODES': self.on_324,
             'CHANNEL_CREATED': self.on_329,
@@ -532,22 +536,20 @@ class Core:
                     target_nick = args[arg_index]
                     arg_index += 1
                     if char == 'o':
-                        if target_nick.lower() == self.botname.lower():
-                            chan.bot_op = adding
-                        if adding and target_nick not in chan.ops:
-                            chan.ops.append(target_nick)
-                        elif not adding and target_nick in chan.ops:
-                            chan.ops.remove(target_nick)
+                        if adding:
+                            chan.set_op(target_nick, self.botname)
+                        else:
+                            chan.unset_op(target_nick, self.botname)
                     elif char == 'h':
                         if adding:
                             chan.set_halfop(target_nick, self.botname)
                         else:
                             chan.unset_halfop(target_nick, self.botname)
                     elif char == 'v':
-                        if adding and target_nick not in chan.voiced:
-                            chan.voiced.append(target_nick)
-                        elif not adding and target_nick in chan.voiced:
-                            chan.voiced.remove(target_nick)
+                        if adding:
+                            chan.set_voice(target_nick)
+                        else:
+                            chan.unset_voice(target_nick)
             elif char == 'l':
                 if adding and arg_index < len(args):
                     try:
@@ -578,7 +580,7 @@ class Core:
             chan = Channel(name=norm)
             chan._chan_mgr = self.chan
             self.channels[norm] = chan
-        self.channels[channel].update_irc_state(chan_data)
+        self.channels[norm].update_irc_state(chan_data)
 
     async def on_join(self, event: Dict[str, Any]):
         nick    = event.get('nick', '')
@@ -586,6 +588,14 @@ class Core:
         chan = self.get_chan(channel)
         if chan:
             chan.add_user(nick)
+        if nick.lower() == self.botname.lower():
+            self.send_irc({'cmd': 'who', 'channel': channel})   # request a full WHO sync
+            self.send_irc({'cmd': 'mode', 'channel': channel})  # request RPL_324
+
+    async def on_topic(self, event: Dict[str, Any]):
+        chan = self.get_chan(event.get('channel', ''))
+        if chan:
+            chan.topic = event.get('topic', '')
 
     async def on_part(self, event: Dict[str, Any]):
         nick    = event.get('nick', '')
@@ -628,6 +638,53 @@ class Core:
         for chan in self.channels.values():
             chan.rename_user(old_nick, new_nick)
 
+    async def on_topic(self, event: Dict[str, Any]):
+        channel = event.get('channel', '')
+        chan = self.get_chan(channel)
+        if chan:
+            chan.topic = event.get('topic', '')
+            log.debug(f"Topic changed on {channel}: {chan.topic}")
+
+    async def on_who_reply(self, event: Dict[str, Any]):
+        """
+        Handle a single WHO_REPLY — set op/halfop/voice on the Channel object.
+        These arrive after the bot joins and sends WHO #channel.
+        """
+        channel  = event.get('channel', '')
+        nick     = event.get('nick', '')
+        chan = self.get_chan(channel)
+        if not chan or not nick:
+            return
+
+        chan.add_user(nick)   # idempotent — safe if already present
+
+        if event.get('is_op'):
+            chan.set_op(nick, self.botname)
+        else:
+            chan.unset_op(nick, self.botname)
+
+        if event.get('is_halfop'):
+            chan.set_halfop(nick, self.botname)
+        else:
+            chan.unset_halfop(nick, self.botname)
+
+        if event.get('is_voice'):
+            chan.set_voice(nick)
+        else:
+            chan.unset_voice(nick)
+
+    async def on_who_end(self, event: Dict[str, Any]):
+        """
+        WHO response complete — mark channel as synced.
+        """
+        channel = event.get('channel', '')
+        chan = self.get_chan(channel)
+        if chan:
+            chan.synced = True
+            log.info(f"Channel {channel} WHO sync complete: "
+                    f"{len(chan.users)} users, {len(chan.ops)} ops, "
+                    f"{len(chan.halfops)} halfops, {len(chan.voiced)} voiced")
+
     async def on_ready(self, event: Dict[str, Any]):
         """IRC connection established: join channels."""
         self.connected = True
@@ -651,6 +708,10 @@ class Core:
     async def on_disconnect(self, event: Dict[str, Any]):
         """IRC connection dropped."""
         self.connected = False
+        for chan in self.channels.values():
+            chan.clear_state()   # mark all as unsynced; keeps Channel objects for rejoin
+        log.info("IRC disconnected — channel live state cleared")
+
 
     async def on_332(self, event):  # CHANNEL_TOPIC
         """Update topic from RPL_TOPIC"""
@@ -660,6 +721,12 @@ class Core:
         if chan:
             chan.topic = event['topic']
             log.debug(f"Topic updated for {event['channel']}")
+
+    async def on_333(self, event: Dict[str, Any]):
+        chan = self.get_chan(event.get('channel', ''))
+        if chan:
+            chan.topic_set_by = event.get('setter', '')
+            chan.topic_set_at = event.get('timestamp', 0)
 
     async def on_324(self, event):  # CHANNEL_MODES
         """Parse/set modes from RPL_CHANNELMODEIS"""
