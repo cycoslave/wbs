@@ -14,8 +14,9 @@ from contextlib import asynccontextmanager
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 log = logging.getLogger("wbs.db")
 ALLOWED_TABLES = {'subnets', 'users', 'user_access', 'bots', 'bot_access', 'bot_subnets', 'servers', 'channels', 'channel_subnets', 'runtime', 'ignores', 
-                  'loaded_modules', 'game_sessions', 'blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings' , 
-                  'poker_cash', 'werewolf_stats', 'chanlock', 'limit_settings', 'seen', 'stats_global', 'stats_channel', 'stats_history', 'topiclock'}
+                  'loaded_modules', 'game_sessions', 'blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings', 
+                  'poker_cash', 'werewolf_stats', 'chanlock', 'limit_settings', 'seen', 'stats_global', 'stats_channel', 'stats_history', 'topiclock',
+                  'lotto_settings', 'lotto_jackpot', 'lotto_tickets', 'lotto_cash', 'lotto_winners'}
 
 def get_schema_sql() -> str:
     """Load schema.sql (synchronous — call via asyncio.to_thread if needed)."""
