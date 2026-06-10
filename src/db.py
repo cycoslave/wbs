@@ -13,10 +13,10 @@ from contextlib import asynccontextmanager
 
 SCHEMA_PATH = Path(__file__).parent.parent / "db" / "schema.sql"
 log = logging.getLogger("wbs.db")
-ALLOWED_TABLES = {'subnets', 'users', 'user_access', 'bots', 'bot_access', 'bot_subnets', 'servers', 'channels', 'channel_subnets', 'runtime', 'ignores', 
-                  'loaded_modules', 'game_sessions', 'blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings', 
-                  'poker_cash', 'werewolf_stats', 'chanlock', 'limit_settings', 'seen', 'stats_global', 'stats_channel', 'stats_history', 'topiclock',
-                  'lotto_settings', 'lotto_jackpot', 'lotto_tickets', 'lotto_cash', 'lotto_winners'}
+ALLOWED_TABLES = {'subnets', 'users', 'user_access', 'bots', 'bot_access', 'bot_subnets', 'servers', 'channels', 'channel_subnets', 'ignores', 
+                  'loaded_modules', 'game_sessions', 'seen', 'seen_notify', 'chanlock', 'limit_settings', 'topiclock', 'stats_nick', 'stats_nick_channel',
+                  'stats_victims', 'blackjack_settings', 'blackjack_cash', 'duckhunt_settings', 'duckhunt_scores', 'poker_settings', 'poker_cash', 
+                  'werewolf_stats', 'lotto_settings', 'lotto_jackpot', 'lotto_tickets', 'lotto_cash', 'lotto_winners', 'fishing_settings', 'fishing_scores'}
 
 def get_schema_sql() -> str:
     """Load schema.sql (synchronous — call via asyncio.to_thread if needed)."""
