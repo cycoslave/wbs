@@ -1,0 +1,950 @@
+# src/channel.py
+"""
+Handles IRC channel management for WBS.
+"""
+import logging
+import json
+import time
+from irc import modes
+from typing import Optional, List, Dict
+from dataclasses import dataclass, field, asdict
+
+from .db import get_db
+from .idrules import valid_channel, CHANNEL_RULE_TEXT
+
+log = logging.getLogger("wbs.channel")
+
+# Channel user prefixes (IRC-1).  Defaults cover @ + % ~ &; the server's
+# 005 PREFIX token overrides them.  Nicks can never start with these chars,
+# so stripping all of them from a NAMES entry is safe.
+DEFAULT_PREFIX_CHARS = {'~': 'q', '&': 'a', '@': 'o', '%': 'h', '+': 'v'}
+# Prefix modes that count as channel operator (can op/deop/kick).
+OP_LEVEL_MODES = 'qao'
+# All member prefix modes tracked per nick: ~ & @ % +.
+USER_PREFIX_MODES = 'qaohv'
+
+
+def parse_mode_changes(modes: str, args, prefix_modes: str = 'qaohv',
+                       chanmodes: Optional[dict] = None) -> list:
+    """
+    Split a channel MODE string into [(sign, mode, arg_or_None), ...].
+
+    Argument rules follow 005 ISUPPORT: prefix modes (PREFIX) and type A
+    (lists) and B (key) always take an argument, type C (limit) only when
+    set, type D never.  `chanmodes` is {'A': 'beI', 'B': 'k', 'C': 'l', ...}.
+    """
+    chanmodes = chanmodes or {'A': 'beI', 'B': 'k', 'C': 'l', 'D': 'imnpst'}
+    always = set(prefix_modes) | set(chanmodes.get('A', '')) | set(chanmodes.get('B', ''))
+    on_set = set(chanmodes.get('C', ''))
+    args = list(args or [])
+    out = []
+    sign = '+'
+    idx = 0
+    for ch in modes or '':
+        if ch in '+-':
+            sign = ch
+            continue
+        arg = None
+        if ch in always or (ch in on_set and sign == '+'):
+            if idx < len(args):
+                arg = args[idx]
+                idx += 1
+        out.append((sign, ch, arg))
+    return out
+
+
+_SYNC_ALLOWED_COLUMNS = frozenset({
+    'comment',
+    'is_inactive', 'is_bitch', 'is_autoop', 'is_autovoice',
+    'is_revenge', 'is_revengebots', 'is_protectfriends', 'is_protectops',
+    'is_dontkickops', 'is_enforcebans', 'is_dynamicbans',
+    'is_dynamicexempts', 'is_dynamicinvites',
+    'modes', 'bans', 'invites', 'exempts',
+    'flood_pub', 'flood_pub_time', 'flood_ctcp', 'flood_ctcp_time',
+    'flood_join', 'flood_join_time', 'flood_kick', 'flood_kick_time',
+    'flood_deop', 'flood_deop_time', 'flood_nick', 'flood_nick_time',
+})
+
+@dataclass
+class Channel:
+    """Live IRC channel state + lazy-loaded DB config"""
+    name: str
+
+    # --- Live IRC state ---
+    users: List[str] = field(default_factory=list)
+    ops: List[str] = field(default_factory=list)
+    halfops: List[str] = field(default_factory=list)
+    voiced: List[str] = field(default_factory=list)
+    bot_op: bool = False
+    bot_halfop: bool = False
+    # joined: the bot is in the channel now; synced: NAMES/WHO completed.
+    joined: bool = False
+    synced: bool = False
+    # Bool modes (no param)
+    modes_n: bool = False
+    modes_t: bool = False
+    modes_p: bool = False
+    modes_s: bool = False
+    modes_i: bool = False
+    modes_m: bool = False
+    # Param modes
+    limit: Optional[int] = 0
+    key: Optional[str] = ''
+    live_bans: List[str] = field(default_factory=list)
+    live_invites: List[str] = field(default_factory=list)
+    live_exempts: List[str] = field(default_factory=list)
+    topic: Optional[str] = ''
+    created: Optional[int] = 0
+    # Per-nick prefix modes (IRC-1): nick -> e.g. 'o', 'qo', 'v'.  The
+    # ops/halfops/voiced lists above are derived from it.
+    prefixes: Dict[str, str] = field(default_factory=dict)
+    # nick -> user@host, from WHO replies and JOIN lines.
+    hosts: Dict[str, str] = field(default_factory=dict)
+
+    # Private — initialized in __post_init__
+    _chan_mgr: Optional[object] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        self._db_loaded: bool = False
+        self._db_config: Optional[dict] = None
+        self.name = self.name.lower()
+
+    # Live IRC state — membership
+    def add_user(self, nick: str, host: str = ''):
+        nick = nick.lower()
+        if nick not in self.users:
+            self.users.append(nick)
+        if host:
+            self.hosts[nick] = host
+
+    def remove_user(self, nick: str):
+        nick = nick.lower()
+        self.users   = [n for n in self.users   if n != nick]
+        self.unset_op(nick)
+        self.unset_halfop(nick)
+        self.voiced  = [n for n in self.voiced  if n != nick]
+        self.prefixes.pop(nick, None)
+        self.hosts.pop(nick, None)
+
+    def rename_user(self, old: str, new: str):
+        old, new = old.lower(), new.lower()
+        self.users   = [new if n == old else n for n in self.users]
+        self.ops     = [new if n == old else n for n in self.ops]
+        self.halfops = [new if n == old else n for n in self.halfops]
+        self.voiced  = [new if n == old else n for n in self.voiced]
+        if old in self.prefixes:
+            self.prefixes[new] = self.prefixes.pop(old)
+        if old in self.hosts:
+            self.hosts[new] = self.hosts.pop(old)
+
+    def clear_state(self):
+        """Reset all live IRC state (e.g. on bot PART or disconnect)."""
+        self.users.clear()
+        self.ops.clear()
+        self.halfops.clear()
+        self.voiced.clear()
+        self.prefixes.clear()
+        self.hosts.clear()
+        self.live_bans.clear()
+        self.live_invites.clear()
+        self.live_exempts.clear()
+        self.bot_op = False
+        self.bot_halfop = False
+        self.synced = False
+        self.joined = False
+        for m in 'ntpsim':
+            setattr(self, f'modes_{m}', False)
+        self.limit = 0
+        self.key = ''
+        self.topic = ''
+
+    # Live IRC state — prefix modes (IRC-1)
+    def set_user_modes(self, nick: str, user_modes: str, botname: str = ''):
+        """Replace a member's prefix modes (from NAMES/WHO), e.g. 'o', 'qo', ''."""
+        nick = nick.lower()
+        self.add_user(nick)
+        self.prefixes[nick] = ''
+        for m in user_modes:
+            self.add_user_mode(nick, m, botname)
+        if not self.prefixes.get(nick):
+            self.prefixes.pop(nick, None)
+        # Lists derived from the (possibly empty) mode set.
+        self._refresh_user(nick, botname)
+
+    def add_user_mode(self, nick: str, mode: str, botname: str = ''):
+        nick = nick.lower()
+        cur = self.prefixes.get(nick, '')
+        if mode not in cur:
+            self.prefixes[nick] = cur + mode
+        self._refresh_user(nick, botname)
+
+    def del_user_mode(self, nick: str, mode: str, botname: str = ''):
+        nick = nick.lower()
+        cur = self.prefixes.get(nick, '').replace(mode, '')
+        if cur:
+            self.prefixes[nick] = cur
+        else:
+            self.prefixes.pop(nick, None)
+        self._refresh_user(nick, botname)
+
+    def _refresh_user(self, nick: str, botname: str = ''):
+        """Rebuild ops/halfops/voiced membership for one nick from prefixes.
+        ~ (q) and & (a) are op-level, as on every IRCd that has them."""
+        modes = self.prefixes.get(nick, '')
+        is_op = any(m in OP_LEVEL_MODES for m in modes)
+
+        def put(lst, present):
+            if present and nick not in lst:
+                lst.append(nick)
+            elif not present and nick in lst:
+                lst.remove(nick)
+        put(self.ops, is_op)
+        put(self.halfops, 'h' in modes)
+        put(self.voiced, 'v' in modes)
+        if botname and nick == botname.lower():
+            self.bot_op = is_op
+            self.bot_halfop = 'h' in modes
+
+    # Live IRC state — op/voice
+    def is_op(self, nick: str) -> bool:
+        return nick.lower() in self.ops
+
+    def set_op(self, nick: str, botname: str = ''):
+        self.add_user_mode(nick, 'o', botname)
+
+    def unset_op(self, nick: str, botname: str = ''):
+        self.del_user_mode(nick, 'o', botname)
+
+    def is_voiced(self, nick: str) -> bool:
+        return nick.lower() in self.voiced
+
+    def set_voice(self, nick: str):
+        self.add_user_mode(nick, 'v')
+
+    def unset_voice(self, nick: str):
+        self.del_user_mode(nick, 'v')
+
+    def is_halfop(self, nick: str) -> bool:
+        return nick.lower() in self.halfops
+
+    def set_halfop(self, nick: str, botname: str = ''):
+        self.add_user_mode(nick, 'h', botname)
+
+    def unset_halfop(self, nick: str, botname: str = ''):
+        self.del_user_mode(nick, 'h', botname)
+
+    # Live IRC state — modes
+    def _parse_and_set_modes(self, modes_str: str):
+        """Parse RPL_324 or MODE msg and apply to live state."""
+        parsed = modes.parse_channel_modes(modes_str)
+        for sign, mode, param in parsed:
+            if sign == '+':
+                self._set_mode(mode, param)
+            else:
+                self._clear_mode(mode, param)
+
+    def _set_mode(self, mode: str, param: Optional[str] = None):
+        if mode in 'ntpsim':
+            setattr(self, f'modes_{mode}', True)
+        elif mode == 'l':
+            self.limit = int(param) if param else None
+        elif mode == 'k':
+            self.key = param
+
+    def _clear_mode(self, mode: str, param: Optional[str] = None):
+        if mode in 'ntpsim':
+            setattr(self, f'modes_{mode}', False)
+        elif mode == 'l':
+            self.limit = None
+        elif mode == 'k':
+            self.key = None
+
+    def update_irc_state(self, irc_data: dict):
+        self.users    = [u.lower() for u in irc_data.get('user_list', [])]
+        self.ops      = [u.lower() for u in irc_data.get('ops', [])]
+        self.halfops  = [u.lower() for u in irc_data.get('halfops', [])]
+        self.voiced   = [u.lower() for u in irc_data.get('voiced', [])]
+        self.bot_op   = irc_data.get('bot_op', False)
+        self.bot_halfop = irc_data.get('bot_halfop', False)
+        self.synced   = irc_data.get('synced', False)
+
+    # DB — lazy load
+    async def _load_db_config(self):
+        if not self._db_loaded and self._chan_mgr:
+            self._db_config = await self._chan_mgr.get_raw(self.name)
+            self._db_loaded = True
+
+    def invalidate_cache(self):
+        """Force next DB access to reload from database."""
+        self._db_loaded = False
+        self._db_config = None
+
+    async def get_modes(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('modes', '') if self._db_config else ''
+
+    async def get_bans(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            bans = self._db_config.get('bans', '[]')
+            return json.loads(bans) if isinstance(bans, str) else bans
+        return []
+
+    async def get_invites(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            invites = self._db_config.get('invites', '[]')
+            return json.loads(invites) if isinstance(invites, str) else invites
+        return []
+
+    async def get_exempts(self) -> List[str]:
+        await self._load_db_config()
+        if self._db_config:
+            exempts = self._db_config.get('exempts', '[]')
+            return json.loads(exempts) if isinstance(exempts, str) else exempts
+        return []
+
+    # Flood protection
+    async def get_flood_pub(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_pub', 15) if self._db_config else 15
+
+    async def get_flood_pub_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_pub_time', 60) if self._db_config else 60
+
+    async def get_flood_ctcp(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_ctcp', 3) if self._db_config else 3
+
+    async def get_flood_ctcp_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_ctcp_time', 60) if self._db_config else 60
+
+    async def get_flood_join(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_join', 5) if self._db_config else 5
+
+    async def get_flood_join_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_join_time', 60) if self._db_config else 60
+
+    async def get_flood_kick(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_kick', 3) if self._db_config else 3
+
+    async def get_flood_kick_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_kick_time', 10) if self._db_config else 10
+
+    async def get_flood_deop(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_deop', 3) if self._db_config else 3
+
+    async def get_flood_deop_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_deop_time', 10) if self._db_config else 10
+
+    async def get_flood_nick(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_nick', 5) if self._db_config else 5
+
+    async def get_flood_nick_time(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('flood_nick_time', 60) if self._db_config else 60
+
+    # Channel flags
+    async def is_bitch(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_bitch', False)) if self._db_config else False
+
+    async def is_autoop(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_autoop', False)) if self._db_config else False
+
+    async def is_autovoice(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_autovoice', False)) if self._db_config else False
+
+    async def is_revenge(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_revenge', False)) if self._db_config else False
+
+    async def is_revengebots(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_revengebots', False)) if self._db_config else False
+
+    async def is_protectfriends(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_protectfriends', False)) if self._db_config else False
+
+    async def is_protectops(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_protectops', False)) if self._db_config else False
+
+    async def is_dontkickops(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_dontkickops', False)) if self._db_config else False
+
+    async def is_inactive(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_inactive', False)) if self._db_config else False
+
+    async def is_enforcebans(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_enforcebans', False)) if self._db_config else False
+
+    async def is_dynamicbans(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_dynamicbans', False)) if self._db_config else False
+
+    async def is_dynamicexempts(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_dynamicexempts', False)) if self._db_config else False
+
+    async def is_dynamicinvites(self) -> bool:
+        await self._load_db_config()
+        return bool(self._db_config.get('is_dynamicinvites', False)) if self._db_config else False
+
+    # Metadata
+    async def get_comment(self) -> str:
+        await self._load_db_config()
+        return self._db_config.get('comment', '') if self._db_config else ''
+
+    async def get_created_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('created_at', 0) if self._db_config else 0
+
+    async def get_updated_at(self) -> int:
+        await self._load_db_config()
+        return self._db_config.get('updated_at', 0) if self._db_config else 0
+
+    async def get_created_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('created_by') if self._db_config else None
+
+    async def get_updated_by(self) -> Optional[str]:
+        await self._load_db_config()
+        return self._db_config.get('updated_by') if self._db_config else None
+
+class ChannelManager:
+
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+    async def addchan(self, channel: str, subnet_id: int = None, created_by: str = None) -> bool:
+        """
+        Add a channel. If subnet_id is None the channel is global (joins on all subnets).
+        Handles resurrection of soft-deleted channels.
+
+        The name must be a valid IRC channel name and is unique ignoring
+        case (IRC-5); both raise ValueError with a message for the caller.
+        """
+        if not valid_channel(channel):
+            raise ValueError(f"{CHANNEL_RULE_TEXT} Got: {channel[:60]!r}")
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT name, deleted_at FROM channels WHERE name = ? COLLATE NOCASE",
+                (channel,)
+            ) as cur:
+                row = await cur.fetchone()
+
+            now = int(time.time())
+
+            if row:
+                if row[1] is None:
+                    same = "" if row[0] == channel else f" (as {row[0]})"
+                    raise ValueError(f"Channel {channel} already exists{same}")
+                # Resurrect soft-deleted channel (keeps its stored spelling)
+                channel = row[0]
+                await db.execute(
+                    "UPDATE channels SET deleted_at = NULL, updated_at = ?, updated_by = ? WHERE name = ?",
+                    (now, created_by, channel)
+                )
+            else:
+                # No subnet_id column on channels — global/subnet scope
+                # is handled exclusively via channel_subnets
+                await db.execute(
+                    "INSERT INTO channels (name, created_by, updated_at) VALUES (?, ?, ?)",
+                    (channel, created_by, now)
+                )
+
+            if subnet_id is not None:
+                # Schema uses created_by — not added_by
+                await db.execute(
+                    """INSERT OR IGNORE INTO channel_subnets
+                    (channel_name, subnet_id, created_by)
+                    VALUES (?, ?, ?)""",
+                    (channel, subnet_id, created_by)
+                )
+
+            await db.commit()
+            return True
+
+    async def delchan(self, channel: str, deleted_by: str = None) -> bool:
+        """Soft-delete a channel (sets deleted_at, keeps row for sync)."""
+        async with get_db(self.db_path) as db:
+            now = int(time.time())
+            cur = await db.execute(
+                "UPDATE channels SET deleted_at = ?, updated_at = ?, updated_by = ? "
+                "WHERE name = ? AND deleted_at IS NULL",
+                (now, now, deleted_by, channel)
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def getchans(self, subnet_id: int = None) -> list:
+        """
+        Return active (non-deleted) channel names.
+        If subnet_id is given, only return channels belonging to that subnet
+        OR channels with no subnet binding (global channels).
+        """
+        async with get_db(self.db_path) as db:
+            if subnet_id is not None:
+                rows = await db.execute_fetchall(
+                    """
+                    SELECT c.name FROM channels c
+                    WHERE c.deleted_at IS NULL
+                      AND c.is_inactive = 0
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM channel_subnets cs
+                          WHERE cs.channel_name = c.name AND cs.subnet_id = ?
+                        )
+                        OR NOT EXISTS (
+                          SELECT 1 FROM channel_subnets cs2
+                          WHERE cs2.channel_name = c.name
+                        )
+                      )
+                    ORDER BY c.name
+                    """,
+                    (subnet_id,)
+                )
+            else:
+                rows = await db.execute_fetchall(
+                    "SELECT name FROM channels WHERE deleted_at IS NULL AND is_inactive = 0 ORDER BY name"
+                )
+            return [r["name"] for r in rows]
+
+    async def listchans(self) -> str:
+        """List all channels including soft-deleted (for admin view)."""
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                """
+                SELECT c.name, c.comment, c.is_inactive, c.deleted_at,
+                       GROUP_CONCAT(cs.subnet_id) AS subnet_ids
+                FROM channels c
+                LEFT JOIN channel_subnets cs ON cs.channel_name = c.name
+                GROUP BY c.name
+                ORDER BY c.name
+                """
+            )
+            result = ["Channels:"]
+            for row in rows:
+                if row["deleted_at"]:
+                    status = " (deleted)"
+                elif row["is_inactive"]:
+                    status = " (inactive)"
+                else:
+                    status = ""
+                scope = f"subnets [{row['subnet_ids']}]" if row["subnet_ids"] else "all subnets"
+                result.append(f"  {row['name']}{status} [{scope}] - {row['comment']}")
+            return "\n".join(result)
+
+    async def showchan(self, channel: str, live: Optional["Channel"] = None) -> str:
+        """
+        Show full channel info: stored DB config + optional live IRC state.
+        Pass a Channel object as `live` to include live IRC data.
+        """
+        import datetime
+
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT * FROM channels WHERE name = ?", (channel.lower(),)
+            ) as cur:
+                row = await cur.fetchone()
+
+            subnet_rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (channel.lower(),),
+            )
+
+        if not row:
+            return f"Channel '{channel}' not found."
+
+        subnet_ids = [r["subnet_id"] for r in subnet_rows]
+        scope = f"subnets {subnet_ids}" if subnet_ids else "all subnets (global)"
+
+        def ts(epoch: int) -> str:
+            if not epoch:
+                return "never"
+            return datetime.datetime.utcfromtimestamp(epoch).strftime("%Y-%m-%d %H:%M UTC")
+
+        def flag(val) -> str:
+            return "yes" if val else "no"
+
+        result = [f"Channel: {row['name']}"]
+
+        # --- Status ---
+        status = "active"
+        if row["deleted_at"]:
+            status = f"deleted ({ts(row['deleted_at'])})"
+        elif row["is_inactive"]:
+            status = "inactive"
+        result.append(f"  Status:    {status}")
+        result.append(f"  Scope:     {scope}")
+        result.append(f"  Comment:   {row['comment'] or 'None'}")
+        result.append(f"  Created:   {ts(row['created_at'])} by {row['created_by'] or 'unknown'}")
+        result.append(f"  Updated:   {ts(row['updated_at'])} by {row['updated_by'] or 'unknown'}")
+
+        # --- DB Channel Flags ---
+        result.append("  --- Settings ---")
+        result.append(f"  Bitch:           {flag(row['is_bitch'])}")
+        result.append(f"  Autoop:          {flag(row['is_autoop'])}")
+        result.append(f"  Autovoice:       {flag(row['is_autovoice'])}")
+        result.append(f"  Revenge:         {flag(row['is_revenge'])}")
+        result.append(f"  RevengeBots:     {flag(row['is_revengebots'])}")
+        result.append(f"  ProtectFriends:  {flag(row['is_protectfriends'])}")
+        result.append(f"  ProtectOps:      {flag(row['is_protectops'])}")
+        result.append(f"  DontKickOps:     {flag(row['is_dontkickops'])}")
+        result.append(f"  EnforceBans:     {flag(row['is_enforcebans'])}")
+        result.append(f"  DynamicBans:     {flag(row['is_dynamicbans'])}")
+        result.append(f"  DynamicExempts:  {flag(row['is_dynamicexempts'])}")
+        result.append(f"  DynamicInvites:  {flag(row['is_dynamicinvites'])}")
+
+        # --- Stored modes/lists ---
+        result.append("  --- Stored Config ---")
+        result.append(f"  Modes:    {row['modes'] or 'none'}")
+
+        bans    = json.loads(row["bans"])    if isinstance(row["bans"], str)    else (row["bans"] or [])
+        invites = json.loads(row["invites"]) if isinstance(row["invites"], str) else (row["invites"] or [])
+        exempts = json.loads(row["exempts"]) if isinstance(row["exempts"], str) else (row["exempts"] or [])
+
+        result.append(f"  Bans:     {len(bans)} stored")
+        result.append(f"  Invites:  {len(invites)} stored")
+        result.append(f"  Exempts:  {len(exempts)} stored")
+
+        # --- Flood settings ---
+        result.append("  --- Flood Limits ---")
+        result.append(
+            f"  Pub:   {row['flood_pub']}/{row['flood_pub_time']}s  "
+            f"CTCP: {row['flood_ctcp']}/{row['flood_ctcp_time']}s  "
+            f"Join: {row['flood_join']}/{row['flood_join_time']}s"
+        )
+        result.append(
+            f"  Kick:  {row['flood_kick']}/{row['flood_kick_time']}s  "
+            f"Deop: {row['flood_deop']}/{row['flood_deop_time']}s  "
+            f"Nick: {row['flood_nick']}/{row['flood_nick_time']}s"
+        )
+
+        # --- Live IRC state (only if Channel object passed in) ---
+        if live:
+            result.append("  --- Live IRC State ---")
+            bot_status = []
+            if live.bot_op:      bot_status.append("op")
+            if live.bot_halfop:  bot_status.append("halfop")
+            result.append(f"  Bot status:  {', '.join(bot_status) if bot_status else 'none'}")
+            result.append(f"  Synced:      {flag(live.synced)}")
+            result.append(f"  Users:       {len(live.users)}")
+            result.append(f"  Ops:         {len(live.ops)}")
+            result.append(f"  Voiced:      {len(live.voiced)}")
+
+            live_modes = []
+            for m in "ntpsim":
+                if getattr(live, f"modes_{m}", False):
+                    live_modes.append(m)
+            if live.limit:  live_modes.append(f"l:{live.limit}")
+            if live.key:    live_modes.append(f"k:*")
+            result.append(f"  Modes:       +{''.join(live_modes) if live_modes else '(none)'}")
+            result.append(f"  Topic:       {live.topic or '(none)'}")
+            result.append(f"  Live bans:   {len(live.live_bans)}")
+            result.append(f"  Live invites:{len(live.live_invites)}")
+            result.append(f"  Live exempts:{len(live.live_exempts)}")
+
+        return "\n".join(result)
+
+    async def exist(self, channel: str) -> bool:
+        """Return True if a channel exists and is not deleted."""
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT 1 FROM channels WHERE name = ? AND deleted_at IS NULL",
+                (channel.lower(),)
+            ) as cur:
+                row = await cur.fetchone()
+        return row is not None
+
+    def channel_to_dict(self, channel: Channel) -> dict:
+        """Convert Channel to dict for DB INSERT/UPDATE."""
+        data = asdict(channel)
+        # Convert lists back to JSON strings for DB
+        data['live_bans']    = json.dumps(data.pop('live_bans', []))
+        data['live_invites'] = json.dumps(data.pop('live_invites', []))
+        data['live_exempts'] = json.dumps(data.pop('live_exempts', []))
+        return data
+
+    async def get_channel(self, name: str) -> Optional[dict]:
+        async with get_db(self.db_path) as db:
+            async with db.execute("SELECT * FROM channels WHERE name = ?", (name,)) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return None
+
+            data = dict(row)
+            subnet_rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (name,)
+            )
+            data["subnet_ids"] = [r["subnet_id"] for r in subnet_rows]
+            return data
+
+    async def get_all_channels(self) -> list[Channel]:
+        """Get all channels."""
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall("SELECT * FROM channels ORDER BY name")
+        return [Channel(**dict(row)) for row in rows]
+
+    async def merge_from_peer(self, channels: list[dict], from_bot: str) -> None:
+        """
+        Merge channel records from a botnet peer.
+        Last-write-wins on updated_at. channel_subnets merged idempotently.
+        """
+        async with get_db(self.db_path) as db:
+            for ch in channels:
+                name = ch['name']
+                if not valid_channel(name):
+                    log.warning("merge_from_peer: skipping invalid channel name %r from %s",
+                                name, from_bot)
+                    continue
+                remote_updated = ch.get('updated_at') or 0
+                remote_deleted = ch.get('deleted_at')
+
+                cur = await db.execute(
+                    "SELECT updated_at, deleted_at FROM channels WHERE name = ?", (name,)
+                )
+                existing = await cur.fetchone()
+
+                if existing:
+                    local_updated = existing[0] or 0
+                    local_deleted = existing[1]
+                    if remote_updated <= local_updated:
+                        pass  # Skip channel row but still sync subnets below
+                    else:
+                        final_deleted = remote_deleted
+                        if remote_deleted is None and local_deleted and local_deleted > remote_updated:
+                            final_deleted = local_deleted
+
+                        safe: dict = {}
+                        for k in _SYNC_ALLOWED_COLUMNS:
+                            if k not in ch:
+                                continue
+                            val = ch[k]
+                            if k in ("bans", "invites", "exempts") and not isinstance(val, str):
+                                val = json.dumps(val)
+                            safe[k] = val
+
+                        if safe:
+                            for col in safe:
+                                if col not in _SYNC_ALLOWED_COLUMNS:
+                                    log.error("sync_channels: rejecting disallowed column %r from %s", col, from_bot)
+                                    raise ValueError(f"disallowed column: {col!r}")
+
+                            safe['updated_at'] = remote_updated
+                            safe['updated_by'] = from_bot
+                            safe['deleted_at'] = final_deleted
+
+                            set_clause = ", ".join(f"{col} = ?" for col in safe)
+                            await db.execute(
+                                f"UPDATE channels SET {set_clause} WHERE name = ?",
+                                (*safe.values(), name),
+                            )
+
+                    cur = await db.execute(
+                        "SELECT 1 FROM channels WHERE name = ?", (name,)
+                    )
+                    if await cur.fetchone():
+                        for sid in ch.get('subnet_ids', []):
+                            sub_check = await db.execute(
+                                "SELECT 1 FROM subnets WHERE id = ?", (sid,)
+                            )
+                            if await sub_check.fetchone():
+                                await db.execute(
+                                    """INSERT OR IGNORE INTO channel_subnets
+                                    (channel_name, subnet_id, created_by)
+                                    VALUES (?, ?, ?)""",
+                                    (name, sid, from_bot)
+                                )
+                            else:
+                                log.debug(
+                                    "merge_from_peer: skipping unknown subnet_id %s for channel %s from %s",
+                                    sid, name, from_bot
+                                )
+
+                else:
+                    bans    = ch.get('bans', '[]')
+                    invites = ch.get('invites', '[]')
+                    exempts = ch.get('exempts', '[]')
+                    if not isinstance(bans, str):    bans    = json.dumps(bans)
+                    if not isinstance(invites, str): invites = json.dumps(invites)
+                    if not isinstance(exempts, str): exempts = json.dumps(exempts)
+
+                    await db.execute(
+                        """INSERT INTO channels
+                            (name, comment, modes, bans, invites, exempts,
+                            is_bitch, is_autoop, is_autovoice, is_revenge, is_revengebots,
+                            is_protectfriends, is_protectops, is_dontkickops, is_inactive,
+                            is_enforcebans, is_dynamicbans, is_dynamicexempts, is_dynamicinvites,
+                            flood_pub, flood_pub_time, flood_ctcp, flood_ctcp_time,
+                            flood_join, flood_join_time, flood_kick, flood_kick_time,
+                            flood_deop, flood_deop_time, flood_nick, flood_nick_time,
+                            created_at, updated_at, created_by, deleted_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            name, ch.get('comment', ''), ch.get('modes', ''),
+                            bans, invites, exempts,
+                            ch.get('is_bitch', 0), ch.get('is_autoop', 0), ch.get('is_autovoice', 0),
+                            ch.get('is_revenge', 0), ch.get('is_revengebots', 0),
+                            ch.get('is_protectfriends', 0), ch.get('is_protectops', 0),
+                            ch.get('is_dontkickops', 0), ch.get('is_inactive', 0),
+                            ch.get('is_enforcebans', 0), ch.get('is_dynamicbans', 0),
+                            ch.get('is_dynamicexempts', 0), ch.get('is_dynamicinvites', 0),
+                            ch.get('flood_pub', 15), ch.get('flood_pub_time', 60),
+                            ch.get('flood_ctcp', 3), ch.get('flood_ctcp_time', 60),
+                            ch.get('flood_join', 5), ch.get('flood_join_time', 60),
+                            ch.get('flood_kick', 3), ch.get('flood_kick_time', 10),
+                            ch.get('flood_deop', 3), ch.get('flood_deop_time', 10),
+                            ch.get('flood_nick', 5), ch.get('flood_nick_time', 60),
+                            ch.get('created_at', 0), remote_updated, from_bot, remote_deleted
+                        )
+                    )
+
+                    cur = await db.execute(
+                        "SELECT 1 FROM channels WHERE name = ?", (name,)
+                    )
+                    if await cur.fetchone():
+                        for sid in ch.get('subnet_ids', []):
+                            sub_check = await db.execute(
+                                "SELECT 1 FROM subnets WHERE id = ?", (sid,)
+                            )
+                            if await sub_check.fetchone():
+                                await db.execute(
+                                    """INSERT OR IGNORE INTO channel_subnets
+                                    (channel_name, subnet_id, created_by)
+                                    VALUES (?, ?, ?)""",
+                                    (name, sid, from_bot)
+                                )
+                            else:
+                                log.debug(
+                                    "merge_from_peer: skipping unknown subnet_id %s for channel %s from %s",
+                                    sid, name, from_bot
+                                )
+
+            await db.commit()
+        log.info(f"ChannelManager.merge_from_peer: merged {len(channels)} channels from {from_bot}")
+
+    async def serialize_for_peer(self) -> list[dict]:
+        """Return all channels with their subnet_ids for botnet share."""
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute("SELECT * FROM channels")
+            rows = await cursor.fetchall()
+            channels = []
+            for row in rows:
+                ch = dict(row)
+                # Attach subnet_ids so receiver can merge channel_subnets
+                sub_cur = await db.execute(
+                    "SELECT subnet_id FROM channel_subnets WHERE channel_name = ?",
+                    (ch['name'],)
+                )
+                ch['subnet_ids'] = [r[0] for r in await sub_cur.fetchall()]
+                channels.append(ch)
+        return channels
+    
+    async def get_subnet_ids(self, channel: str) -> list[int]:
+        """Return all subnet_ids bound to this channel. Empty = global."""
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM channel_subnets WHERE channel_name = ? ORDER BY subnet_id",
+                (channel.lower(),),
+            )
+        return [row["subnet_id"] for row in rows]
+
+    async def is_global(self, channel: str) -> bool:
+        """A channel with no subnet bindings is active on all subnets."""
+        return len(await self.get_subnet_ids(channel)) == 0
+
+    async def bind_to_subnet(self, channel: str, subnet_id: int, created_by: Optional[str] = None) -> bool:
+        """Bind a channel to a specific subnet."""
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                """INSERT OR IGNORE INTO channel_subnets
+                (channel_name, subnet_id, created_by)
+                VALUES (?, ?, ?)""",
+                (channel.lower(), subnet_id, created_by),
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def unbind_from_subnet(self, channel: str, subnet_id: int) -> bool:
+        """Remove a specific subnet binding."""
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM channel_subnets WHERE channel_name = ? AND subnet_id = ?",
+                (channel.lower(), subnet_id),
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def make_global(self, channel: str) -> bool:
+        """Remove all subnet bindings — channel becomes active on all subnets."""
+        async with get_db(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM channel_subnets WHERE channel_name = ?",
+                (channel.lower(),),
+            )
+            await db.commit()
+        return cursor.rowcount > 0
+
+    async def get_channels_for_subnet(self, subnet_id: int) -> list[str]:
+        """Return active channels that belong to a subnet (or are global)."""
+        async with get_db(self.db_path) as db:
+            rows = await db.execute_fetchall(
+                """
+                SELECT name FROM channels
+                WHERE is_inactive = 0
+                AND deleted_at IS NULL
+                AND (
+                    EXISTS (
+                    SELECT 1 FROM channel_subnets cs
+                    WHERE cs.channel_name = channels.name AND cs.subnet_id = ?
+                    )
+                    OR NOT EXISTS (
+                    SELECT 1 FROM channel_subnets cs2
+                    WHERE cs2.channel_name = channels.name
+                    )
+                )
+                ORDER BY name
+                """,
+                (subnet_id,),
+            )
+        return [row["name"] for row in rows]    
+    
+    async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
+        """
+        Soft-delete a channel received via botnet UPDATE CHANNEL DEL (after
+        ReplicationPolicy approval).  A delete older than the local record's
+        last update loses; nothing is hard-deleted.
+        """
+        name = (payload.get("name") or "").strip()
+        if not name:
+            log.warning("delete_from_peer: missing name in payload from %s", from_bot)
+            return
+        remote_ts = payload.get("deleted_at") or payload.get("updated_at")
+        ts = remote_ts or int(time.time())
+        async with get_db(self.db_path) as db:
+            cur = await db.execute(
+                "UPDATE channels SET deleted_at = ?, deleted_by = ?, updated_at = ?, updated_by = ? "
+                "WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL "
+                "AND (? IS NULL OR updated_at IS NULL OR updated_at <= ?)",
+                (ts, from_bot, ts, from_bot, name, remote_ts, remote_ts))
+        log.info("ChannelManager.delete_from_peer: %s channel '%s' from %s",
+                 "deleted" if cur.rowcount else "kept", name, from_bot)

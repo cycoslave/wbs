@@ -1,0 +1,198 @@
+# src/plugins/limit.py
+"""
+WBS Plugin: limit.py
+version: 0.2.0
+by: cyco
+Description: Set and watch channel limit
+"""
+import aiosqlite
+import time
+from typing import Dict
+
+from . import Plugin
+from ..db import get_db
+from ..helper import _valid_channel
+
+ALLOWED_SETTING_COLS = frozenset({"enabled", "limitadd", "limittol", "limitdelta"})
+MAX_CHANNEL_LIMIT = 999999
+
+class limitPlugin(Plugin):
+    name       = "limit"
+    version    = "0.2.0"
+    LIMITADD   = 15
+    LIMITTOL   = 2
+    LIMITDELTA = 300
+    TABLE_SQL = [
+        """
+        CREATE TABLE IF NOT EXISTS limit_settings (
+            channel    TEXT    PRIMARY KEY,
+            enabled    BOOLEAN DEFAULT 1,
+            limitadd   INTEGER DEFAULT 15,
+            limittol   INTEGER DEFAULT 2,
+            limitdelta INTEGER DEFAULT 300,
+            updated_at INTEGER DEFAULT (strftime('%s','now'))
+        )
+        """
+    ]
+
+    def __init__(self, core):
+        super().__init__(core)
+        self.limit_last_change: Dict[str, float] = {}
+
+    async def load(self):
+        """Initialize plugin and register timers."""
+        await super().load()
+        async with get_db(self.core.db_path) as db:
+            await db.execute(self.TABLE_SQL[0])
+            await db.commit()
+        self.register_command(      # PLG-6
+            "limitset", self._pl_limitset, "A",
+            "limitset <#chan> [<enabled|limitadd|limittol|limitdelta> <value>] - "
+            "show or change the channel-limit settings")
+        self.core.send_irc({
+            'cmd': 'REGISTER_IRC_TIMER',
+            'name': 'limit',
+            'interval': 300
+        })
+        self.log.info(f"Plugin {self.name} {self.version} loaded")
+
+    async def unload(self):
+        """Unload plugin and unregister timers only.
+
+        Settings (limit_settings) are preserved across unload/load and
+        reloads: the base unload() keeps every plugin table.  Only
+        `.plugin purge limit` deletes them.
+        """
+        self.core.send_irc({
+            'cmd': 'UNREGISTER_IRC_TIMER',
+            'name': 'limit'
+        })
+        await super().unload()
+        self.log.info("Limit plugin unloaded")
+
+    async def on_IRC_TIMER_LIMIT(self, event):
+        """Periodic channel limit enforcement."""
+        irc_data = event['irc_data']
+
+        if not irc_data['connected']:
+            return
+
+        for chan, chan_data in irc_data['channels'].items():
+            if not chan_data['bot_op']:
+                continue
+
+            cfg = await self._load_settings(chan)
+            if not cfg["enabled"]:
+                continue
+
+            now = time.time()
+            if chan not in self.limit_last_change:
+                self.limit_last_change[chan] = now - cfg["limitdelta"]
+            if self.limit_last_change[chan] + cfg["limitdelta"] > now:
+                continue
+
+            current_limit = self.core.channels[chan].limit
+            newlimit = min(chan_data['users'] + cfg["limitadd"], MAX_CHANNEL_LIMIT)
+
+            if abs(current_limit - newlimit) <= cfg["limittol"]:
+                continue
+
+            self.log.info(f"Setting limit on {chan} from {current_limit} to {newlimit}")
+            self.core.send_irc({
+                'cmd': 'mode',
+                'channel': chan,
+                'modes': f"+l {newlimit}"
+            })
+            self.limit_last_change[chan] = now
+
+    async def on_MODE(self, event):
+        """Track manual +l changes to respect the cooldown window."""
+        chan = event['channel']
+        if 'l' in event['modes']:
+            self.limit_last_change[chan] = time.time()
+
+    async def _pl_limitset(self, handle: str, arg: str):
+        """Partyline `.limitset <#chan> [<param> <value>]` (gate: +A)."""
+        parts = arg.split()
+        if len(parts) not in (1, 3):
+            return "Usage: .limitset <#chan> [<enabled|limitadd|limittol|limitdelta> <value>]"
+        chan = parts[0]
+        if not _valid_channel(chan):
+            return f"Invalid channel: {chan}"
+        if len(parts) == 1:
+            cfg = await self._load_settings(chan)
+            return (f"[limit] {chan} enabled={int(bool(cfg['enabled']))} "
+                    f"limitadd={cfg['limitadd']} limittol={cfg['limittol']} "
+                    f"limitdelta={cfg['limitdelta']}")
+        if not parts[2].isascii():      # '²'.isdigit() is True but int() fails
+            return "Value must be a number."
+        return await self.set(chan, parts[1], parts[2], handle)
+
+    async def set(self, chan: str, param: str, value: str, nick: str):
+        """Called by partyline: .limitset #chan <param> <value>
+
+        NOTE: Permission enforcement (flag check on nick) must be performed
+        upstream by the partyline/commands layer before this method is called.
+        This method does not validate caller identity.
+        """
+        valid = {
+            "enabled":    ("Enabled",      lambda v: v in ("0", "1"), int),
+            "limitadd":   ("Limit add",    str.isdigit,               int),
+            "limittol":   ("Tolerance",    str.isdigit,               int),
+            "limitdelta": ("Delta (secs)", str.isdigit,               int),
+        }
+        param = param.lower()
+        if param not in valid:
+            return f"Usage: .limitset <chan> <{'|'.join(valid)}> <value>"
+        label, validate, cast = valid[param]
+        if not validate(value):
+            return f"{label} must be a valid value."
+        cast_value = cast(value)
+        await self._save_setting(chan, **{param: cast_value})
+        if param == "limitdelta":
+            self.limit_last_change.pop(chan, None)
+        return f"[limit] {chan} {label} set to {cast_value}."
+
+    async def _load_settings(self, chan: str) -> dict:
+        """Load channel settings from DB, falling back to class-level defaults."""
+        defaults = {
+            "enabled":    1,
+            "limitadd":   self.LIMITADD,
+            "limittol":   self.LIMITTOL,
+            "limitdelta": self.LIMITDELTA,
+        }
+        async with get_db(self.core.db_path) as db:
+            try:
+                async with db.execute(
+                    "SELECT * FROM limit_settings WHERE channel = ?", (chan,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return dict(row) if row else defaults
+            except aiosqlite.OperationalError:
+                self.log.warning("limit_settings table missing for %s, using defaults", chan)
+                return defaults
+
+    async def _save_setting(self, channel: str, **kwargs):
+        """Persist one or more settings for a channel.
+
+        Raises ValueError if any key is not in ALLOWED_SETTING_COLS to prevent
+        SQL column-name injection via unvalidated kwargs keys.
+        """
+        invalid_keys = kwargs.keys() - ALLOWED_SETTING_COLS
+        if invalid_keys:
+            raise ValueError(f"Invalid setting column(s): {invalid_keys}")
+
+        # Insert the supplied columns too: on a new channel the INSERT succeeds
+        # and ON CONFLICT never runs, so values must not live only in UPDATE.
+        col_names = "".join(f", {k}" for k in kwargs)
+        placeholders = "".join(", ?" for _ in kwargs)
+        cols = ", ".join(f"{k}=excluded.{k}" for k in kwargs)
+        async with get_db(self.core.db_path) as db:
+            await db.execute(
+                f"INSERT INTO limit_settings(channel{col_names}) "
+                f"VALUES(?{placeholders}) "
+                f"ON CONFLICT(channel) DO UPDATE SET {cols}, "
+                f"updated_at=strftime('%s','now')",
+                (channel, *kwargs.values())
+            )
+            await db.commit()

@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wbs"
+version = "6.0.0"
+description = "Fast Python-based IRC bot with multiprocessing and botnet support (WBS)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "irc>=20.0.0",
+  "aiosqlite>=0.19.0",
+  "prompt_toolkit>=3.0",
+  "bcrypt>=4.0.0",
+  "aiohttp>=3.14.4",  # SAST-014: CVE-2026-69244 fixed in 3.14.3; F-07 (mythos): 8 further CVEs e.g. CVE-2026-111065 fixed in 3.14.4
+  "aiodns>=3.0.0",
+  "feedparser>=6.0.12",
+  "psutil>=5.9.0",
+  "beautifulsoup4>=4.12.0",
+  "whoisit>=2.8",
+  "ipinfo>=4.0.0",
+  "pyasn>=1.6.0",
+  "packaging>=23.0",
+  "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+wbs = "src.main:main"     # SAST-018: packaged supervisor; ./wbs launcher delegates here
+
+[tool.uv]
+# Security floors for transitive dependencies (not imported by WBS itself).
+# Recorded in uv.lock's [manifest]; `uv lock` cannot resolve below them, and
+# requirements.lock is exported from uv.lock (see README "Dependencies").
+constraint-dependencies = [
+  "anyio>=4.14.2",  # SAST-015: CVE-2026-63374, CVE-2026-64847 (via whoisit -> httpx)
+  "soupsieve>=4.0.0",  # SAST-016: CVE-2026-85999, CVE-2026-86000; F-09 (mythos): CVE-2026-126190, CVE-2026-126191, CVE-2026-126193 (via beautifulsoup4)
+  "certifi>=2026.10.18",  # F-08 (mythos): PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2 (transitive)
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=term-missing"
+
+[tool.ruff]
+# Minimal lint: real bugs and import hygiene only. No formatter, no UP/SIM/RUF/BLE.
+target-version = "py313"
+line-length = 160   # longest existing line in src/ and tests/ is under this
+extend-exclude = [".tmp", ".worktrees"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]
+# Style-only / low-signal findings that would need mass edits; deliberately off for now
+# (see SYS-10: no mass reformatting). The real-bug rules (F401, F811, B023, E722) stay on.
+ignore = [
+  "E701",  # multiple statements on one line (colon)
+  "E731",  # lambda assignment
+  "E741",  # ambiguous variable name
+  "E401",  # multiple imports on one line
+  "I001",  # import sorting
+  "F541",  # f-string without placeholders
+  "F841",  # unused local variable
+  "B007",  # unused loop control variable
+  "B904",  # raise ... from inside except
+  "B905",  # zip() without strict=
+  "B017",  # assertRaises(Exception)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixtures imported from another test module and used as arguments look
+# like redefinitions to pyflakes (F811); the argument is the fixture, not a bug.
+"tests/**" = ["F811"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

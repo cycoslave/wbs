@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# wbs (launcher; supervisor in src/main.py)
+"""
+WBS Launcher
+version: 5.9.7
+by: cycoslave
+link: https://github.com/cycoslave/wbs
+"""
+# --- project venv dispatch (stdlib only; must run before third-party imports)
+import os
+import sys
+
+_VENV_REEXEC_ENV = "_WBS_VENV_REEXEC"
+
+
+def _ensure_project_venv() -> None:
+    """Re-exec this launcher under <project>/.venv/bin/python if needed.
+
+    WBS always runs from the project-local venv. If the current interpreter is
+    not that venv, exec into it (once; a marker env var prevents exec loops).
+    If the venv is missing or its interpreter is broken, exit 1 with the
+    bootstrap commands.
+    """
+    script = os.path.realpath(__file__)
+    root = os.path.dirname(script)
+    venv = os.path.join(root, ".venv")
+    venv_python = os.path.join(venv, "bin", "python")
+
+    if os.path.realpath(sys.prefix) == os.path.realpath(venv):
+        os.environ.pop(_VENV_REEXEC_ENV, None)
+        return
+
+    if not (os.path.isfile(venv_python) and os.access(venv_python, os.X_OK)):
+        sys.stderr.write(
+            f"ERROR: project venv missing or broken: {venv_python}\n"
+            "       Bootstrap it from the project root:\n"
+            f"         cd {root}\n"
+            "         python3.13 -m venv .venv\n"
+            "         .venv/bin/pip install --require-hashes -r requirements.lock\n"
+            "         .venv/bin/pip install --no-deps .\n"
+        )
+        sys.exit(1)
+
+    if os.environ.get(_VENV_REEXEC_ENV) == venv:
+        sys.stderr.write(
+            f"ERROR: re-exec into {venv_python} did not activate the venv "
+            f"(sys.prefix={sys.prefix}). Rebuild .venv (see README).\n"
+        )
+        sys.exit(1)
+
+    os.environ[_VENV_REEXEC_ENV] = venv
+    try:
+        os.execv(venv_python, [venv_python, script, *sys.argv[1:]])
+    except OSError as exc:
+        sys.stderr.write(f"ERROR: cannot exec {venv_python}: {exc}\n")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    _ensure_project_venv()
+# --- end project venv dispatch
+
+# The supervisor lives in the packaged module src/main.py, which is also the
+# installed `wbs` console script (pyproject: wbs = "src.main:main"). Run as
+# ./wbs, the script's directory heads sys.path, so this checkout's src/ is used.
+from src.main import main
+
+if __name__ == '__main__':
+    main()
