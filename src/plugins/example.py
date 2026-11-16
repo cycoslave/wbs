@@ -27,16 +27,15 @@ class Plugin(Plugin):
             self.core_timer_name,
             self.core_timer_callback,
             interval=60,  # seconds
-            random=False  # optional jitter
+            randomize=False  # optional +/-30 s jitter
         )
         
         # Register IRC timer (runs in irc.py process)
         self.irc_timer_name = 'example_irc_timer'
         self.core.send_irc({
-            'cmd': 'REGISTER_TIMER',
+            'cmd': 'REGISTER_IRC_TIMER',
             'name': self.irc_timer_name,
             'interval': 30,
-            'random': True
         })
         
         self.log.info(f"Plugin {self.name} {self.version} loaded")
@@ -48,7 +47,7 @@ class Plugin(Plugin):
         
         if self.irc_timer_name:
             self.core.send_irc({
-                'cmd': 'UNREGISTER_TIMER',
+                'cmd': 'UNREGISTER_IRC_TIMER',
                 'name': self.irc_timer_name
             })
             

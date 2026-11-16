@@ -25,7 +25,7 @@ Night actions (via NOTICE to bot):
 import asyncio
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 from . import Game, GameSession
@@ -35,6 +35,7 @@ REGISTRATION_SECS = 60
 REGISTRATION_WARN = 30
 DAY_SECS          = 120   # voting window
 NIGHT_SECS        = 60    # night-action window
+PAUSE_SECS        = 3     # pause after a lynch / before the end-game stop
 CMD_COOLDOWN_SECS = 30
 MIN_PLAYERS       = 4
 WEREWOLF  = "werewolf"
@@ -66,6 +67,15 @@ def _assign_roles(players: List[str]) -> Dict[str, str]:
     random.shuffle(pool)
     return dict(zip(players, pool))
 
+
+def _find_nick(players: Dict[str, "WPlayer"], name: str) -> str:
+    """The player's nick as stored (IRC nicks are case-insensitive);
+    `name` unchanged when nobody matches."""
+    if name in players:
+        return name
+    low = name.lower()
+    return next((n for n in players if n.lower() == low), name)
+
 @dataclass
 class WPlayer:
     nick:      str
@@ -90,6 +100,13 @@ class WerewolfGame(Game):
     ]
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: the game survives a restart; the interrupted phase restarts.
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "registering": "_registration_phase",
+        "night":       "_run_night",
+        "day":         "_run_day",
+    }
 
     async def load(self):
         await super().load()
@@ -103,18 +120,20 @@ class WerewolfGame(Game):
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
     async def start_session(self, session: GameSession, restore: bool = False):
+        # Defaults first, also on restore (the saved round state is put on
+        # top by GameManager.start_game and resumed via RESUME_PHASES).
+        session.data["players"]      = {}   # nick -> WPlayer
+        session.data["phase"]        = "registering"
+        session.data["day"]          = 0
+        session.data["votes"]        = {}   # voter -> target
+        session.data["night_kill"]   = None
+        session.data["night_save"]   = None
+        session.data["night_see"]    = None
+        session.data["wolves"]       = []
+        session.data["actions_done"] = set()
+        session.data["vote_event"]   = asyncio.Event()
+        await super().start_session(session, restore=restore)
         if not restore:
-            session.data["players"]      = {}   # nick -> WPlayer
-            session.data["phase"]        = "registering"
-            session.data["day"]          = 0
-            session.data["votes"]        = {}   # voter -> target
-            session.data["night_kill"]   = None
-            session.data["night_save"]   = None
-            session.data["night_see"]    = None
-            session.data["wolves"]       = []
-            session.data["actions_done"] = set()
-            session.data["vote_event"]   = asyncio.Event()
-            await super().start_session(session)
             await self._open_registration(session)
 
     async def stop_session(self, key: str):
@@ -131,7 +150,7 @@ class WerewolfGame(Game):
             f"Game begins in {REGISTRATION_SECS}s or when \x02!wstart\x02 is used. "
             f"(min {MIN_PLAYERS} players)"
         )
-        session.task = asyncio.create_task(self._registration_phase(session))
+        self.spawn_round(session, self._registration_phase(session))
 
     async def _registration_phase(self, session: GameSession):
         try:
@@ -181,6 +200,46 @@ class WerewolfGame(Game):
         await self._run_night(session)
 
     async def _run_night(self, session: GameSession):
+        """Game loop from a night (also the restart entry for 'night')."""
+        await self._game_loop(session, "night")
+
+    async def _run_day(self, session: GameSession):
+        """Game loop from a day (also the restart entry for 'day')."""
+        await self._game_loop(session, "day")
+
+    async def _game_loop(self, session: GameSession, phase: str):
+        """Night -> day -> night ... until a side wins (GAM-11).  Runs as the
+        session task; votes and night actions arrive through the handlers,
+        which only record them and wake this loop."""
+        while True:
+            if phase == "night":
+                await self._night(session)
+                if await self._resolve_night(session):
+                    return
+                phase = "day"
+            else:
+                await self._day(session)
+                if await self._resolve_day(session):
+                    return
+                session.data["day"] += 1
+                await asyncio.sleep(PAUSE_SECS)
+                phase = "night"
+
+    def _wake(self, session: GameSession):
+        """A vote / night action was recorded: let the phase wait re-check."""
+        ev = session.data.get("vote_event")
+        if ev is not None:
+            ev.set()
+
+    async def _wait_until(self, session: GameSession, done):
+        """Wait (no polling) until done(session) is true; the handlers call
+        _wake after every recorded vote / action."""
+        while not done(session):
+            ev = asyncio.Event()
+            session.data["vote_event"] = ev
+            await ev.wait()
+
+    async def _night(self, session: GameSession):
         chan    = session.target
         players = session.data["players"]
         day    = session.data["day"]
@@ -215,20 +274,10 @@ class WerewolfGame(Game):
                 await self.notice(nick, f"[Werewolf] Choose who to protect: !wsave <nick>  |  Alive: {targets}")
 
         try:
-            await asyncio.wait_for(self._wait_night_actions(session), timeout=NIGHT_SECS)
+            await asyncio.wait_for(
+                self._wait_until(session, self._all_night_actions_done), timeout=NIGHT_SECS)
         except asyncio.TimeoutError:
             pass
-        except asyncio.CancelledError:
-            return
-
-        await self._resolve_night(session)
-
-    async def _wait_night_actions(self, session: GameSession):
-        """Wait until all living special roles have submitted or timeout."""
-        while True:
-            await asyncio.sleep(2)
-            if self._all_night_actions_done(session):
-                return
 
     def _all_night_actions_done(self, session: GameSession) -> bool:
         players = session.data["players"]
@@ -245,7 +294,8 @@ class WerewolfGame(Game):
                 need.add("save")
         return need.issubset(session.data["actions_done"])
 
-    async def _resolve_night(self, session: GameSession):
+    async def _resolve_night(self, session: GameSession) -> bool:
+        """Apply the night's actions; True when the game is over."""
         chan      = session.target
         players   = session.data["players"]
         kill_tgt  = session.data["night_kill"]
@@ -286,18 +336,17 @@ class WerewolfGame(Game):
 
         winner = self._check_winner(session)
         if winner:
-            return await self._end_game(session, winner)
+            await self._end_game(session, winner)
+            return True
+        return False
 
-        await self._run_day(session)
-
-    async def _run_day(self, session: GameSession):
+    async def _day(self, session: GameSession):
         chan    = session.target
         players = session.data["players"]
         day    = session.data["day"]
 
         session.data["votes"]      = {}
         session.data["phase"]      = "day"
-        session.data["vote_event"] = asyncio.Event()
 
         alive = [n for n, p in players.items() if p.alive]
         await self.say(chan,
@@ -308,22 +357,11 @@ class WerewolfGame(Game):
 
         try:
             await asyncio.wait_for(
-                self._wait_majority_vote(session),
+                self._wait_until(session, self._majority_reached),
                 timeout=DAY_SECS
             )
         except asyncio.TimeoutError:
-            await self.say(chan, "[Werewolf] Time's up! No majority reached — no lynch today.")
-        except asyncio.CancelledError:
-            return
-
-        await self._resolve_day(session)
-
-    async def _wait_majority_vote(self, session: GameSession):
-        while True:
-            await asyncio.sleep(1)
-            if self._majority_reached(session):
-                session.data["vote_event"].set()
-                return
+            await self.say(chan, "[Werewolf] Time's up! No majority reached.")
 
     def _majority_reached(self, session: GameSession) -> bool:
         players = session.data["players"]
@@ -341,7 +379,8 @@ class WerewolfGame(Game):
             tally[t] = tally.get(t, 0) + 1
         return tally
 
-    async def _resolve_day(self, session: GameSession):
+    async def _resolve_day(self, session: GameSession) -> bool:
+        """Lynch the most-voted player; True when the game is over."""
         chan    = session.target
         players = session.data["players"]
         tally   = self._vote_tally(session)
@@ -366,11 +405,9 @@ class WerewolfGame(Game):
 
         winner = self._check_winner(session)
         if winner:
-            return await self._end_game(session, winner)
-
-        session.data["day"] += 1
-        await asyncio.sleep(3)
-        await self._run_night(session)
+            await self._end_game(session, winner)
+            return True
+        return False
 
     def _check_winner(self, session: GameSession) -> Optional[str]:
         players         = session.data["players"]
@@ -410,7 +447,7 @@ class WerewolfGame(Game):
             )
             await self._save_stats(nick, won=is_winner)
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(PAUSE_SECS)
         await self.stop_session(session.key)
 
     async def on_PUBMSG(self, session: GameSession, nick: str, text: str, event=None):
@@ -435,9 +472,9 @@ class WerewolfGame(Game):
                 return
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only a chan-op can force-start.")
-            if session.task and not session.task.done():
-                session.task.cancel()
-            await self._begin_game(session)
+            # GAM-11: the game runs as the session task; this handler (and
+            # with it event dispatch: votes, night actions) returns at once.
+            self.spawn_round(session, self._begin_game(session))
 
         elif cmd == "!werewolf" and len(parts) > 1 and parts[1].lower() == "stop":
             if not self.core.nick_isop(nick, chan):
@@ -445,16 +482,18 @@ class WerewolfGame(Game):
             await self.stop_session(session.key)
 
         elif cmd == "!wvote" and phase == "day":
+            nick = _find_nick(players, nick)
             if nick not in players or not players[nick].alive:
                 return await self.notice(nick, "You're not an alive player.")
             if len(parts) < 2:
                 return await self.notice(nick, "Usage: !wvote <nick>")
-            target = parts[1]
+            target = _find_nick(players, parts[1])
             if target not in players or not players[target].alive:
                 return await self.notice(nick, f"{target} is not an alive player.")
             if target == nick:
                 return await self.notice(nick, "You can't vote for yourself.")
             session.data["votes"][nick] = target
+            self._wake(session)
             tally     = self._vote_tally(session)
             tally_str = "  ".join(f"{t}:{v}" for t, v in sorted(tally.items(), key=lambda x: -x[1]))
             await self.say(chan, f"[Werewolf] {nick} votes for {target}.  [{tally_str}]")
@@ -462,6 +501,7 @@ class WerewolfGame(Game):
         elif cmd == "!wunvote" and phase == "day":
             if nick in session.data["votes"]:
                 del session.data["votes"][nick]
+                self._wake(session)
                 await self.say(chan, f"[Werewolf] {nick} removed their vote.")
 
         elif cmd == "!wstats":
@@ -479,34 +519,48 @@ class WerewolfGame(Game):
             if not self._on_cooldown(chan, "whelp"):
                 await self._show_help(chan)
 
-    async def on_NOTICE(self, session: GameSession, nick: str, text: str, event=None):
-        """Handle night-action notices sent directly to the bot."""
+    async def on_NOTICE(self, session: GameSession, nick: str, text: str, event=None) -> bool:
+        """Night actions sent privately to the bot: by NOTICE, or by
+        PRIVMSG as a fallback (GAM-6).  True when the command was one of
+        ours and was answered (GameManager then suppresses the core's
+        "Unknown command" reply to the PRIVMSG)."""
         parts   = text.strip().split()
         if not parts:
-            return
+            return False
         cmd     = parts[0].lower()
-        players = session.data["players"]
+        if cmd not in ("!wkill", "!wsee", "!wsave"):
+            return False
+        players = session.data.get("players") or {}
         phase   = session.data.get("phase", "")
+        nick    = _find_nick(players, nick)
 
+        if nick not in players:
+            return False            # not in this session's game
         if phase != "night":
-            return
-        if nick not in players or not players[nick].alive:
-            return
+            await self.notice(nick, "[Werewolf] Night actions only work at night.")
+            return True
+        if not players[nick].alive:
+            await self.notice(nick, "[Werewolf] The dead do not act.")
+            return True
 
         p = players[nick]
+        target = _find_nick(players, parts[1]) if len(parts) > 1 else None
 
         if cmd == "!wkill" and p.role == WEREWOLF:
             if "kill" in session.data["actions_done"]:
-                return await self.notice(nick, "Kill already decided for tonight.")
-            if len(parts) < 2:
-                return await self.notice(nick, "Usage: !wkill <nick>")
-            target           = parts[1]
+                await self.notice(nick, "Kill already decided for tonight.")
+                return True
+            if target is None:
+                await self.notice(nick, "Usage: !wkill <nick>")
+                return True
             alive_non_wolves = [n for n, pl in players.items()
                                 if pl.alive and n not in session.data["wolves"]]
             if target not in alive_non_wolves:
-                return await self.notice(nick, f"{target} is not a valid target.")
+                await self.notice(nick, f"{target} is not a valid target.")
+                return True
             session.data["night_kill"] = target
             session.data["actions_done"].add("kill")
+            self._wake(session)
             # Notify the whole pack
             for w in session.data["wolves"]:
                 if players[w].alive:
@@ -514,27 +568,37 @@ class WerewolfGame(Game):
 
         elif cmd == "!wsee" and p.role == SEER:
             if "see" in session.data["actions_done"]:
-                return await self.notice(nick, "You've already used your power tonight.")
-            if len(parts) < 2:
-                return await self.notice(nick, "Usage: !wsee <nick>")
-            target = parts[1]
+                await self.notice(nick, "You've already used your power tonight.")
+                return True
+            if target is None:
+                await self.notice(nick, "Usage: !wsee <nick>")
+                return True
             if target not in players or not players[target].alive or target == nick:
-                return await self.notice(nick, f"{target} is not a valid target.")
+                await self.notice(nick, f"{target} is not a valid target.")
+                return True
             session.data["night_see"] = target
             session.data["actions_done"].add("see")
+            self._wake(session)
             await self.notice(nick, f"[Werewolf] Investigating {target}…")
 
         elif cmd == "!wsave" and p.role == DOCTOR:
             if "save" in session.data["actions_done"]:
-                return await self.notice(nick, "You've already used your power tonight.")
-            if len(parts) < 2:
-                return await self.notice(nick, "Usage: !wsave <nick>")
-            target = parts[1]
+                await self.notice(nick, "You've already used your power tonight.")
+                return True
+            if target is None:
+                await self.notice(nick, "Usage: !wsave <nick>")
+                return True
             if target not in players or not players[target].alive:
-                return await self.notice(nick, f"{target} is not a valid target.")
+                await self.notice(nick, f"{target} is not a valid target.")
+                return True
             session.data["night_save"] = target
             session.data["actions_done"].add("save")
+            self._wake(session)
             await self.notice(nick, f"[Werewolf] You protect {target} tonight.")
+
+        else:
+            await self.notice(nick, f"[Werewolf] Your role cannot use {cmd}.")
+        return True
 
     async def _show_help(self, chan: str):
         self._set_cooldown(chan, "whelp")

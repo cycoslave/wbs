@@ -22,7 +22,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from . import Game, GameSession
 from ..db import get_db
@@ -74,6 +74,12 @@ class BlackjackGame(Game):
     name    = "blackjack"
     version = "0.2.0"
     scopes  = {"channel"}
+    SETTINGS = {
+        "starting_cash": (int, 1, 10**9),
+        "min_bet":       (int, 1, 10**9),
+        "default_bet":   (int, 1, 10**9),
+        "turn_secs":     (int, 5, 3600),
+    }
 
     TABLE_SQL = [
         """
@@ -96,6 +102,13 @@ class BlackjackGame(Game):
     ]
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: a round survives a restart (players/bets/hands are saved).
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "registering": "_registration_phase",
+        "betting":     "_deal_after_betting",
+        "playing":     "_play_all_turns",
+    }
 
     async def load(self):
         await super().load()
@@ -108,12 +121,8 @@ class BlackjackGame(Game):
         self.log.info(f"Game {self.name} {self.version} loaded")
 
     async def unload(self):
-        async with get_db(self.core.db_path) as db:
-            await db.execute("DROP TABLE IF EXISTS blackjack_settings")
-            await db.commit()
-        async with get_db(self.core.db_path) as db:
-            await db.execute("DROP TABLE IF EXISTS blackjack_cash")
-            await db.commit()
+        # GAM-4: tables preserved — chip balances survive unload/reload
+        # (only `.gpurge blackjack` drops them).
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
@@ -167,7 +176,12 @@ class BlackjackGame(Game):
             f"You have {BET_SECS}s to \x02!bjbet <amount>\x02 "
             f"(default: ${cfg['default_bet']}, min: ${cfg['min_bet']})."
         )
+        await self._deal_after_betting(session)
 
+    async def _deal_after_betting(self, session: GameSession):
+        chan    = session.target
+        players = session.data["players"]
+        cfg    = session.data["cfg"]
         try:
             await asyncio.sleep(BET_SECS)
         except asyncio.CancelledError:
@@ -334,9 +348,8 @@ class BlackjackGame(Game):
             # Allow starter/op to force-begin immediately
             if not self.core.nick_isop(nick, chan) and nick not in players:
                 return await self.notice(nick, "Only a chan-op can skip the registration countdown.")
-            if session.task and not session.task.done():
-                session.task.cancel()
-            await self._begin_round(session)
+            # GAM-11: the round runs as the session task, not in this handler.
+            self.spawn_round(session, self._begin_round(session))
             return
 
         elif cmd == "!bjjoin":
@@ -415,25 +428,31 @@ class BlackjackGame(Game):
                 await self._show_help(chan)
             return
 
+        elif cmd == "!bjset":
+            # GAM-10: _handle_set existed but nothing called it.
+            if not self.core.nick_isop(nick, chan):
+                return await self.notice(nick, "Only a chan-op can change blackjack settings.")
+            return await self._handle_set(session, nick, parts[1:])
+
     async def _handle_set(self, session: GameSession, nick: str, args: list):
         chan = session.target
         cfg  = session.data["cfg"]
         valid = {
-            "starting_cash": ("Starting cash", int),
-            "min_bet":       ("Minimum bet",   int),
-            "default_bet":   ("Default bet",   int),
-            "turn_secs":     ("Turn timeout",  int),
+            "starting_cash": "Starting cash",
+            "min_bet":       "Minimum bet",
+            "default_bet":   "Default bet",
+            "turn_secs":     "Turn timeout",
         }
         if len(args) < 2 or args[0].lower() not in valid:
             return await self.notice(nick,
                 f"Usage: !bjset <{'|'.join(valid)}> <value>"
             )
-        key         = args[0].lower()
-        label, cast = valid[key]
+        key   = args[0].lower()
+        label = valid[key]
         try:
-            value = cast(args[1])
-        except ValueError:
-            return await self.notice(nick, f"{label} must be a number.")
+            value = self.parse_start_args({key: args[1]})[key]
+        except ValueError as e:
+            return await self.notice(nick, f"Value rejected: {e}.")
 
         cfg[key] = value
         async with get_db(self.core.db_path) as db:
@@ -529,7 +548,7 @@ class BlackjackGame(Game):
             f"Starting in {REGISTRATION_SECS}s "
             f"(chan-ops: type \x02!bjstart\x02 again to begin immediately)."
         )
-        session.task = asyncio.create_task(self._registration_phase(session))
+        self.spawn_round(session, self._registration_phase(session))
 
     def _on_cooldown(self, chan: str, cmd: str) -> bool:
         now = time.monotonic()

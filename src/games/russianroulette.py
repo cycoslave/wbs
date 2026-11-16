@@ -5,7 +5,7 @@ version: 0.1.0
 by: cyco
 Description: Russian Roulette for WBS.
              Players join a round, the bot loads a 6-chamber revolver with 1 bullet,
-             then players take turns using !pull. One player dies; all survivors get 1 point.
+             then players take turns using !rrpull. One player dies; all survivors get 1 point.
              Scores are persisted per channel for leaderboard tracking.
 
 Flow:
@@ -22,8 +22,7 @@ Flow:
 import asyncio
 import random
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from . import Game, GameSession
 from ..db import get_db
@@ -34,15 +33,13 @@ TURN_SECS = 30
 MIN_PLAYERS = 2
 CMD_COOLDOWN_SECS = 120
 
-@dataclass
-class RRPlayer:
-    nick: str
-    alive: bool = True
-
 class RussianRouletteGame(Game):
     name = "russianroulette"
     version = "0.1.0"
     scopes = {"channel"}
+    SETTINGS = {
+        "turn_secs": (int, 5, 3600),
+    }
 
     TABLE_SQL = [
         """
@@ -67,6 +64,12 @@ class RussianRouletteGame(Game):
     ]
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: a round survives a restart (players and chambers are saved).
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "registering": "_registration_phase",
+        "playing":     "_play_round",
+    }
 
     async def load(self):
         await super().load()
@@ -120,7 +123,7 @@ class RussianRouletteGame(Game):
 
     async def _begin_round(self, session: GameSession):
         chan = session.target
-        players: Dict[str, RRPlayer] = session.data["players"]
+        players: Dict[str, dict] = session.data["players"]
 
         if len(players) < MIN_PLAYERS:
             await self.say(chan, "[Russian Roulette] Not enough players. Round cancelled.")
@@ -152,11 +155,11 @@ class RussianRouletteGame(Game):
     async def _play_round(self, session: GameSession):
         chan = session.target
         cfg = session.data["cfg"]
-        players: Dict[str, RRPlayer] = session.data["players"]
+        players: Dict[str, dict] = session.data["players"]
         order: List[str] = session.data["order"]
 
         while True:
-            alive_order = [nick for nick in order if players[nick].alive]
+            alive_order = [nick for nick in order if players[nick]["alive"]]
             if len(alive_order) <= 1:
                 break
 
@@ -164,7 +167,7 @@ class RussianRouletteGame(Game):
                 session.data["turn_index"] = 0
 
             nick = order[session.data["turn_index"]]
-            if not players[nick].alive:
+            if not players[nick]["alive"]:
                 session.data["turn_index"] += 1
                 continue
 
@@ -174,7 +177,7 @@ class RussianRouletteGame(Game):
             await self.say(
                 chan,
                 f"[Russian Roulette] \x02{nick}\x02's turn. "
-                f"Type \x02!pull\x02 within {cfg['turn_secs']}s."
+                f"Type \x02!rrpull\x02 within {cfg['turn_secs']}s."
             )
 
             try:
@@ -195,13 +198,13 @@ class RussianRouletteGame(Game):
 
     async def _do_pull(self, session: GameSession, nick: str):
         chan = session.target
-        players: Dict[str, RRPlayer] = session.data["players"]
+        players: Dict[str, dict] = session.data["players"]
 
         bullet = session.data["bullet_chamber"]
         chamber = session.data["current_chamber"]
 
         if chamber == bullet:
-            players[nick].alive = False
+            players[nick]["alive"] = False
             await self.say(
                 chan,
                 f"  \x034BANG!\x03 \x02{nick}\x02 dies."
@@ -221,14 +224,14 @@ class RussianRouletteGame(Game):
 
     async def _finish_round(self, session: GameSession):
         chan = session.target
-        players: Dict[str, RRPlayer] = session.data["players"]
-        survivors = [p.nick for p in players.values() if p.alive]
-        dead = [p.nick for p in players.values() if not p.alive]
+        players: Dict[str, dict] = session.data["players"]
+        survivors = [p["nick"] for p in players.values() if p["alive"]]
+        dead = [p["nick"] for p in players.values() if not p["alive"]]
 
         await self.say(chan, "[Russian Roulette] ── Results ──")
 
         for nick, p in players.items():
-            await self._record_round(chan, nick, survived=p.alive)
+            await self._record_round(chan, nick, survived=p["alive"])
 
         if dead:
             await self.say(chan, f"  Dead: {', '.join(dead)}")
@@ -263,15 +266,15 @@ class RussianRouletteGame(Game):
         cmd = parts[0].lower()
         chan = session.target
         phase = session.data.get("phase", "idle")
-        players: Dict[str, RRPlayer] = session.data["players"]
+        players: Dict[str, dict] = session.data["players"]
 
         if cmd == "!rrstart" and phase in ("idle", "finished"):
-            session.data["players"] = {}
+            players.clear()
             session.data["order"] = []
             session.data["phase"] = "registering"
 
             if nick not in players:
-                players[nick] = RRPlayer(nick=nick)
+                players[nick] = {"nick": nick, "alive": True}
                 await self.say(
                     chan,
                     f"[Russian Roulette] {nick} opened the round and joined."
@@ -282,7 +285,7 @@ class RussianRouletteGame(Game):
                 f"[Russian Roulette] Registration open for {REGISTRATION_SECS}s. "
                 "Type \x02!rrjoin\x02 to play."
             )
-            session.task = asyncio.create_task(self._registration_phase(session))
+            self.spawn_round(session, self._registration_phase(session))
             return
 
         elif cmd == "!rrstart" and phase == "registering":
@@ -291,9 +294,8 @@ class RussianRouletteGame(Game):
                     nick,
                     "Only a joined player or chan-op can start immediately."
                 )
-            if session.task and not session.task.done():
-                session.task.cancel()
-            await self._begin_round(session)
+            # GAM-11: the round runs as the session task, not in this handler.
+            self.spawn_round(session, self._begin_round(session))
             return
 
         elif cmd == "!rrjoin":
@@ -301,7 +303,7 @@ class RussianRouletteGame(Game):
                 return await self.notice(nick, "No registration is open right now.")
             if nick in players:
                 return await self.notice(nick, "You're already in this round.")
-            players[nick] = RRPlayer(nick=nick)
+            players[nick] = {"nick": nick, "alive": True}
             await self.say(chan, f"[Russian Roulette] {nick} joins the round.")
             return
 

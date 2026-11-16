@@ -92,6 +92,8 @@ class LotteryGame(Game):
     name    = "lottery"
     version = "0.3.0"
     scopes  = {"channel"}
+    # No .gstart settings: the draw hour / jackpot are saved back to
+    # lottery_settings after every draw, so a per-session override would stick.
 
     TABLE_SQL = [
         """

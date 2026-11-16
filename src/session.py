@@ -41,6 +41,8 @@ class Session:
         self.reader = transports.get('reader')
         self.writer = transports.get('writer')
         self.dcc = transports.get('dcc_session')
+        self.peer_ip: Optional[str] = transports.get('peer_ip')
+        self.task: Optional[asyncio.Task] = None   # the single run() task (set by owner)
         self.prompt_session = None
         
         # Initialize console if needed
@@ -253,9 +255,11 @@ class Session:
                         await self.send(text)
                     else:
                         log.warning(f"Session {self.session_id}: response message missing 'text' key: {msg!r}")
-                except queue.Empty:
+                except (queue.Empty, asyncio.QueueEmpty):
+                    # mp.Queue raises queue.Empty, asyncio.Queue (telnet) QueueEmpty
                     await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error(f"Response handler error: {e}")
+                await asyncio.sleep(0.1)   # never spin the event loop

@@ -11,6 +11,7 @@ from typing import Dict
 
 from . import Plugin
 from ..db import get_db
+from ..helper import _valid_channel
 
 ALLOWED_SETTING_COLS = frozenset({"enabled", "limitadd", "limittol", "limitdelta"})
 MAX_CHANNEL_LIMIT = 999999
@@ -44,6 +45,10 @@ class limitPlugin(Plugin):
         async with get_db(self.core.db_path) as db:
             await db.execute(self.TABLE_SQL[0])
             await db.commit()
+        self.register_command(      # PLG-6
+            "limitset", self._pl_limitset, "A",
+            "limitset <#chan> [<enabled|limitadd|limittol|limitdelta> <value>] - "
+            "show or change the channel-limit settings")
         self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
             'name': 'limit',
@@ -54,8 +59,9 @@ class limitPlugin(Plugin):
     async def unload(self):
         """Unload plugin and unregister timers only.
 
-        Settings are intentionally preserved across reloads.
-        Schema removal must be handled via an explicit migration, not here.
+        Settings (limit_settings) are preserved across unload/load and
+        reloads: the base unload() keeps every plugin table.  Only
+        `.plugin purge limit` deletes them.
         """
         self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
@@ -104,6 +110,23 @@ class limitPlugin(Plugin):
         chan = event['channel']
         if 'l' in event['modes']:
             self.limit_last_change[chan] = time.time()
+
+    async def _pl_limitset(self, handle: str, arg: str):
+        """Partyline `.limitset <#chan> [<param> <value>]` (gate: +A)."""
+        parts = arg.split()
+        if len(parts) not in (1, 3):
+            return "Usage: .limitset <#chan> [<enabled|limitadd|limittol|limitdelta> <value>]"
+        chan = parts[0]
+        if not _valid_channel(chan):
+            return f"Invalid channel: {chan}"
+        if len(parts) == 1:
+            cfg = await self._load_settings(chan)
+            return (f"[limit] {chan} enabled={int(bool(cfg['enabled']))} "
+                    f"limitadd={cfg['limitadd']} limittol={cfg['limittol']} "
+                    f"limitdelta={cfg['limitdelta']}")
+        if not parts[2].isascii():      # '²'.isdigit() is True but int() fails
+            return "Value must be a number."
+        return await self.set(chan, parts[1], parts[2], handle)
 
     async def set(self, chan: str, param: str, value: str, nick: str):
         """Called by partyline: .limitset #chan <param> <value>
@@ -159,10 +182,15 @@ class limitPlugin(Plugin):
         if invalid_keys:
             raise ValueError(f"Invalid setting column(s): {invalid_keys}")
 
-        cols = ", ".join(f"{k}=?" for k in kwargs)
+        # Insert the supplied columns too: on a new channel the INSERT succeeds
+        # and ON CONFLICT never runs, so values must not live only in UPDATE.
+        col_names = "".join(f", {k}" for k in kwargs)
+        placeholders = "".join(", ?" for _ in kwargs)
+        cols = ", ".join(f"{k}=excluded.{k}" for k in kwargs)
         async with get_db(self.core.db_path) as db:
             await db.execute(
-                f"INSERT INTO limit_settings(channel) VALUES(?) "
+                f"INSERT INTO limit_settings(channel{col_names}) "
+                f"VALUES(?{placeholders}) "
                 f"ON CONFLICT(channel) DO UPDATE SET {cols}, "
                 f"updated_at=strftime('%s','now')",
                 (channel, *kwargs.values())

@@ -6,12 +6,53 @@ import logging
 import json
 import time
 from irc import modes
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dataclasses import dataclass, field, asdict
 
 from .db import get_db
+from .idrules import valid_channel, CHANNEL_RULE_TEXT
 
 log = logging.getLogger("wbs.channel")
+
+# Channel user prefixes (IRC-1).  Defaults cover @ + % ~ &; the server's
+# 005 PREFIX token overrides them.  Nicks can never start with these chars,
+# so stripping all of them from a NAMES entry is safe.
+DEFAULT_PREFIX_CHARS = {'~': 'q', '&': 'a', '@': 'o', '%': 'h', '+': 'v'}
+# Prefix modes that count as channel operator (can op/deop/kick).
+OP_LEVEL_MODES = 'qao'
+# All member prefix modes tracked per nick: ~ & @ % +.
+USER_PREFIX_MODES = 'qaohv'
+
+
+def parse_mode_changes(modes: str, args, prefix_modes: str = 'qaohv',
+                       chanmodes: Optional[dict] = None) -> list:
+    """
+    Split a channel MODE string into [(sign, mode, arg_or_None), ...].
+
+    Argument rules follow 005 ISUPPORT: prefix modes (PREFIX) and type A
+    (lists) and B (key) always take an argument, type C (limit) only when
+    set, type D never.  `chanmodes` is {'A': 'beI', 'B': 'k', 'C': 'l', ...}.
+    """
+    chanmodes = chanmodes or {'A': 'beI', 'B': 'k', 'C': 'l', 'D': 'imnpst'}
+    always = set(prefix_modes) | set(chanmodes.get('A', '')) | set(chanmodes.get('B', ''))
+    on_set = set(chanmodes.get('C', ''))
+    args = list(args or [])
+    out = []
+    sign = '+'
+    idx = 0
+    for ch in modes or '':
+        if ch in '+-':
+            sign = ch
+            continue
+        arg = None
+        if ch in always or (ch in on_set and sign == '+'):
+            if idx < len(args):
+                arg = args[idx]
+                idx += 1
+        out.append((sign, ch, arg))
+    return out
+
+
 _SYNC_ALLOWED_COLUMNS = frozenset({
     'comment',
     'is_inactive', 'is_bitch', 'is_autoop', 'is_autovoice',
@@ -36,6 +77,8 @@ class Channel:
     voiced: List[str] = field(default_factory=list)
     bot_op: bool = False
     bot_halfop: bool = False
+    # joined: the bot is in the channel now; synced: NAMES/WHO completed.
+    joined: bool = False
     synced: bool = False
     # Bool modes (no param)
     modes_n: bool = False
@@ -52,6 +95,11 @@ class Channel:
     live_exempts: List[str] = field(default_factory=list)
     topic: Optional[str] = ''
     created: Optional[int] = 0
+    # Per-nick prefix modes (IRC-1): nick -> e.g. 'o', 'qo', 'v'.  The
+    # ops/halfops/voiced lists above are derived from it.
+    prefixes: Dict[str, str] = field(default_factory=dict)
+    # nick -> user@host, from WHO replies and JOIN lines.
+    hosts: Dict[str, str] = field(default_factory=dict)
 
     # Private — initialized in __post_init__
     _chan_mgr: Optional[object] = field(default=None, repr=False, compare=False)
@@ -62,10 +110,12 @@ class Channel:
         self.name = self.name.lower()
 
     # Live IRC state — membership
-    def add_user(self, nick: str):
+    def add_user(self, nick: str, host: str = ''):
         nick = nick.lower()
         if nick not in self.users:
             self.users.append(nick)
+        if host:
+            self.hosts[nick] = host
 
     def remove_user(self, nick: str):
         nick = nick.lower()
@@ -73,6 +123,8 @@ class Channel:
         self.unset_op(nick)
         self.unset_halfop(nick)
         self.voiced  = [n for n in self.voiced  if n != nick]
+        self.prefixes.pop(nick, None)
+        self.hosts.pop(nick, None)
 
     def rename_user(self, old: str, new: str):
         old, new = old.lower(), new.lower()
@@ -80,6 +132,10 @@ class Channel:
         self.ops     = [new if n == old else n for n in self.ops]
         self.halfops = [new if n == old else n for n in self.halfops]
         self.voiced  = [new if n == old else n for n in self.voiced]
+        if old in self.prefixes:
+            self.prefixes[new] = self.prefixes.pop(old)
+        if old in self.hosts:
+            self.hosts[new] = self.hosts.pop(old)
 
     def clear_state(self):
         """Reset all live IRC state (e.g. on bot PART or disconnect)."""
@@ -87,60 +143,95 @@ class Channel:
         self.ops.clear()
         self.halfops.clear()
         self.voiced.clear()
+        self.prefixes.clear()
+        self.hosts.clear()
         self.live_bans.clear()
         self.live_invites.clear()
         self.live_exempts.clear()
         self.bot_op = False
         self.bot_halfop = False
         self.synced = False
+        self.joined = False
+        for m in 'ntpsim':
+            setattr(self, f'modes_{m}', False)
         self.limit = 0
         self.key = ''
         self.topic = ''
+
+    # Live IRC state — prefix modes (IRC-1)
+    def set_user_modes(self, nick: str, user_modes: str, botname: str = ''):
+        """Replace a member's prefix modes (from NAMES/WHO), e.g. 'o', 'qo', ''."""
+        nick = nick.lower()
+        self.add_user(nick)
+        self.prefixes[nick] = ''
+        for m in user_modes:
+            self.add_user_mode(nick, m, botname)
+        if not self.prefixes.get(nick):
+            self.prefixes.pop(nick, None)
+        # Lists derived from the (possibly empty) mode set.
+        self._refresh_user(nick, botname)
+
+    def add_user_mode(self, nick: str, mode: str, botname: str = ''):
+        nick = nick.lower()
+        cur = self.prefixes.get(nick, '')
+        if mode not in cur:
+            self.prefixes[nick] = cur + mode
+        self._refresh_user(nick, botname)
+
+    def del_user_mode(self, nick: str, mode: str, botname: str = ''):
+        nick = nick.lower()
+        cur = self.prefixes.get(nick, '').replace(mode, '')
+        if cur:
+            self.prefixes[nick] = cur
+        else:
+            self.prefixes.pop(nick, None)
+        self._refresh_user(nick, botname)
+
+    def _refresh_user(self, nick: str, botname: str = ''):
+        """Rebuild ops/halfops/voiced membership for one nick from prefixes.
+        ~ (q) and & (a) are op-level, as on every IRCd that has them."""
+        modes = self.prefixes.get(nick, '')
+        is_op = any(m in OP_LEVEL_MODES for m in modes)
+
+        def put(lst, present):
+            if present and nick not in lst:
+                lst.append(nick)
+            elif not present and nick in lst:
+                lst.remove(nick)
+        put(self.ops, is_op)
+        put(self.halfops, 'h' in modes)
+        put(self.voiced, 'v' in modes)
+        if botname and nick == botname.lower():
+            self.bot_op = is_op
+            self.bot_halfop = 'h' in modes
 
     # Live IRC state — op/voice
     def is_op(self, nick: str) -> bool:
         return nick.lower() in self.ops
 
     def set_op(self, nick: str, botname: str = ''):
-        nick = nick.lower()
-        if nick not in self.ops:
-            self.ops.append(nick)
-        if botname and nick == botname.lower():
-            self.bot_op = True
+        self.add_user_mode(nick, 'o', botname)
 
     def unset_op(self, nick: str, botname: str = ''):
-        nick = nick.lower()
-        self.ops = [n for n in self.ops if n != nick]
-        if botname and nick == botname.lower():
-            self.bot_op = False
+        self.del_user_mode(nick, 'o', botname)
 
     def is_voiced(self, nick: str) -> bool:
         return nick.lower() in self.voiced
 
     def set_voice(self, nick: str):
-        nick = nick.lower()
-        if nick not in self.voiced:
-            self.voiced.append(nick)
+        self.add_user_mode(nick, 'v')
 
     def unset_voice(self, nick: str):
-        nick = nick.lower()
-        self.voiced = [n for n in self.voiced if n != nick]
+        self.del_user_mode(nick, 'v')
 
     def is_halfop(self, nick: str) -> bool:
         return nick.lower() in self.halfops
 
     def set_halfop(self, nick: str, botname: str = ''):
-        nick = nick.lower()
-        if nick not in self.halfops:
-            self.halfops.append(nick)
-        if botname and nick == botname.lower():
-            self.bot_halfop = True
+        self.add_user_mode(nick, 'h', botname)
 
     def unset_halfop(self, nick: str, botname: str = ''):
-        nick = nick.lower()
-        self.halfops = [n for n in self.halfops if n != nick]
-        if botname and nick == botname.lower():
-            self.bot_halfop = False        
+        self.del_user_mode(nick, 'h', botname)
 
     # Live IRC state — modes
     def _parse_and_set_modes(self, modes_str: str):
@@ -345,10 +436,16 @@ class ChannelManager:
         """
         Add a channel. If subnet_id is None the channel is global (joins on all subnets).
         Handles resurrection of soft-deleted channels.
+
+        The name must be a valid IRC channel name and is unique ignoring
+        case (IRC-5); both raise ValueError with a message for the caller.
         """
+        if not valid_channel(channel):
+            raise ValueError(f"{CHANNEL_RULE_TEXT} Got: {channel[:60]!r}")
         async with get_db(self.db_path) as db:
             async with db.execute(
-                "SELECT name, deleted_at FROM channels WHERE name = ?", (channel,)
+                "SELECT name, deleted_at FROM channels WHERE name = ? COLLATE NOCASE",
+                (channel,)
             ) as cur:
                 row = await cur.fetchone()
 
@@ -356,8 +453,10 @@ class ChannelManager:
 
             if row:
                 if row[1] is None:
-                    raise ValueError(f"Channel {channel} already exists")
-                # Resurrect soft-deleted channel
+                    same = "" if row[0] == channel else f" (as {row[0]})"
+                    raise ValueError(f"Channel {channel} already exists{same}")
+                # Resurrect soft-deleted channel (keeps its stored spelling)
+                channel = row[0]
                 await db.execute(
                     "UPDATE channels SET deleted_at = NULL, updated_at = ?, updated_by = ? WHERE name = ?",
                     (now, created_by, channel)
@@ -613,6 +712,10 @@ class ChannelManager:
         async with get_db(self.db_path) as db:
             for ch in channels:
                 name = ch['name']
+                if not valid_channel(name):
+                    log.warning("merge_from_peer: skipping invalid channel name %r from %s",
+                                name, from_bot)
+                    continue
                 remote_updated = ch.get('updated_at') or 0
                 remote_deleted = ch.get('deleted_at')
 
@@ -827,14 +930,21 @@ class ChannelManager:
     
     async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
         """
-        Delete a channel record received via botnet UPDATE CHANNEL DEL.
-        payload must contain at least {'name': <str>}.
+        Soft-delete a channel received via botnet UPDATE CHANNEL DEL (after
+        ReplicationPolicy approval).  A delete older than the local record's
+        last update loses; nothing is hard-deleted.
         """
-        name = payload.get("name", "").strip().lower()
+        name = (payload.get("name") or "").strip()
         if not name:
             log.warning("delete_from_peer: missing name in payload from %s", from_bot)
             return
+        remote_ts = payload.get("deleted_at") or payload.get("updated_at")
+        ts = remote_ts or int(time.time())
         async with get_db(self.db_path) as db:
-            await db.execute("DELETE FROM channels WHERE name = ?", (name,))
-            await db.execute("DELETE FROM channel_subnets WHERE channel_name = ?", (name,))
-        log.info("ChannelManager.delete_from_peer: deleted channel '%s' from %s", name, from_bot)    
+            cur = await db.execute(
+                "UPDATE channels SET deleted_at = ?, deleted_by = ?, updated_at = ?, updated_by = ? "
+                "WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL "
+                "AND (? IS NULL OR updated_at IS NULL OR updated_at <= ?)",
+                (ts, from_bot, ts, from_bot, name, remote_ts, remote_ts))
+        log.info("ChannelManager.delete_from_peer: %s channel '%s' from %s",
+                 "deleted" if cur.rowcount else "kept", name, from_bot)

@@ -97,6 +97,13 @@ class SlotsGame(Game):
     name    = "slots"
     version = "0.1.0"
     scopes  = {"channel"}
+    SETTINGS = {
+        "starting_cash": (int, 1, 10**9),
+        "min_bet":       (int, 1, 10**9),
+        "max_bet":       (int, 1, 10**9),
+        "default_bet":   (int, 1, 10**9),
+    }
+    SETTING_PAIRS = (("min_bet", "max_bet"),)
 
     TABLE_SQL = [
         """

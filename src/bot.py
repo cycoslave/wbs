@@ -3,12 +3,12 @@
 Handles bot management for WBS IRC bot.
 """
 import json
-import bcrypt
 import time
 import logging
 from typing import Optional, Literal
 from dataclasses import dataclass, asdict, field
 
+from . import crypto_exec
 from .db import get_db 
 
 log = logging.getLogger("wbs.bot")
@@ -85,10 +85,10 @@ class BotManager:
 
     async def set_password(self, handle: str, password: str) -> bool:
         """Hash and store a bot's password. Returns True if the bot was found and updated."""
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode() if password else ''
+        hashed = await crypto_exec.hash_password(password) if password else ''
         async with get_db(self.db_path) as db:
             cursor = await db.execute(
-                "UPDATE bots SET password = ? WHERE handle = ?",
+                "UPDATE bots SET password = ? WHERE LOWER(handle) = LOWER(?)",
                 (hashed, handle)
             )
             await db.commit()
@@ -147,14 +147,14 @@ class BotManager:
             if channel is None:
                 async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
-                    "WHERE handle = ? AND channel IS NULL",
+                    "WHERE LOWER(handle) = LOWER(?) AND channel IS NULL",
                     (handle,),
                 ) as cur:
                     row = await cur.fetchone()
             else:
                 async with db.execute(
                     f"SELECT {col_select} FROM bot_access "
-                    "WHERE handle = ? AND channel = ?",
+                    "WHERE LOWER(handle) = LOWER(?) AND channel = ?",
                     (handle, channel),
                 ) as cur:
                     row = await cur.fetchone()
@@ -174,7 +174,7 @@ class BotManager:
         """Add bot. Returns True if created. Raises ValueError if handle already exists."""
         async with get_db(self.db_path) as db:
             async with db.execute(
-                "SELECT 1 FROM bots WHERE handle = ?", (handle.lower(),)
+                "SELECT 1 FROM bots WHERE LOWER(handle) = LOWER(?)", (handle,)
             ) as cursor:
                 if await cursor.fetchone():
                     raise ValueError(f"Bot '{handle}' already exists")
@@ -190,9 +190,9 @@ class BotManager:
     async def delbot(self, target_handle: str) -> bool:
         """Delete a bot by handle. Returns True if deleted, False if not found."""
         async with get_db(self.db_path) as db:
-            # Check existence first
+            # Check existence first (case-insensitive, like exist(); NET-6)
             async with db.execute(
-                "SELECT 1 FROM bots WHERE handle = ? AND deleted_at IS NULL",
+                "SELECT 1 FROM bots WHERE LOWER(handle) = LOWER(?) AND deleted_at IS NULL",
                 (target_handle,)
             ) as cursor:
                 if not await cursor.fetchone():
@@ -200,7 +200,7 @@ class BotManager:
 
             # Delete and capture rowcount before commit
             async with db.execute(
-                "DELETE FROM bots WHERE handle = ?",
+                "DELETE FROM bots WHERE LOWER(handle) = LOWER(?)",
                 (target_handle,)
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -212,8 +212,8 @@ class BotManager:
         """Return True if a bot with this handle exists and is not deleted."""
         async with get_db(self.db_path) as db:
             async with db.execute(
-                "SELECT 1 FROM bots WHERE handle = ? AND deleted_at IS NULL",
-                (handle.lower(),)
+                "SELECT 1 FROM bots WHERE LOWER(handle) = LOWER(?) AND deleted_at IS NULL",
+                (handle,)
             ) as cur:
                 row = await cur.fetchone()
         return row is not None
@@ -225,7 +225,7 @@ class BotManager:
                         role, share_level, autolink, autolink_retry_interval,
                         subnet_id, comment, created_at, created_by,
                         updated_at, updated_by, deleted_at, deleted_by
-                FROM bots WHERE handle = ?""",
+                FROM bots WHERE LOWER(handle) = LOWER(?)""",
                 (handle,)
             ) as cursor:
                 row = await cursor.fetchone()
@@ -257,7 +257,7 @@ class BotManager:
         try:
             async with get_db(self.db_path) as db:
                 await db.execute(
-                    "UPDATE bots SET password = ? WHERE handle = ?",
+                    "UPDATE bots SET password = ? WHERE LOWER(handle) = LOWER(?)",
                     (password, name)
                 )
                 await db.commit()
@@ -298,7 +298,7 @@ class BotManager:
                     updated_by              = ?
                 """,
                 (
-                    bot.handle, bot.password,
+                    bot.handle.lower(), bot.password,
                     json.dumps(bot.hostmasks),
                     bot.address, bot.port,
                     bot.role, bot.share_level,
@@ -315,10 +315,45 @@ class BotManager:
         """Return all subnet_ids bound to this bot. Empty list = global."""
         async with get_db(self.db_path) as db:
             rows = await db.execute_fetchall(
-                "SELECT subnet_id FROM bot_subnets WHERE bot_handle = ? ORDER BY subnet_id",
+                "SELECT subnet_id FROM bot_subnets WHERE LOWER(bot_handle) = LOWER(?) ORDER BY subnet_id",
                 (handle,)
             )
         return [row["subnet_id"] for row in rows]
+
+    async def get_subnet_scope(self, handle: str) -> frozenset[int] | None:
+        """
+        Authoritative subnet scope of a bot, from local stored data only (SAST-002).
+
+        Scope = bots.subnet_id plus every live bot_subnets binding.  Never taken
+        from a peer's handshake or payload (bots.subnet_id and bot_subnets are
+        not written by peer replication).
+
+        Returns None when no bot row exists (the handle is not a bot), and an
+        empty frozenset for a soft-deleted bot or one with no stored subnet:
+        callers must treat an empty scope as *unknown* and deny.
+        """
+        key = (handle or "").lower()
+        if not key:
+            return None
+        async with get_db(self.db_path) as db:
+            async with db.execute(
+                "SELECT subnet_id, deleted_at FROM bots WHERE LOWER(handle) = ?",
+                (key,),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            if row["deleted_at"] is not None:
+                return frozenset()
+            rows = await db.execute_fetchall(
+                "SELECT subnet_id FROM bot_subnets "
+                "WHERE LOWER(bot_handle) = ? AND deleted_at IS NULL",
+                (key,),
+            )
+        ids = {int(r["subnet_id"]) for r in rows if r["subnet_id"] is not None}
+        if row["subnet_id"] is not None:
+            ids.add(int(row["subnet_id"]))
+        return frozenset(ids)
 
     async def is_global(self, handle: str) -> bool:
         """A bot with no subnet bindings is active on all subnets."""
@@ -331,7 +366,7 @@ class BotManager:
             async with db.execute(
                 """INSERT OR IGNORE INTO bot_subnets (bot_handle, subnet_id, created_by)
                 VALUES (?, ?, ?)""",
-                (handle, subnet_id, created_by)
+                (handle.lower(), subnet_id, created_by)
             ) as cursor:
                 rowcount = cursor.rowcount
         return rowcount > 0
@@ -340,7 +375,7 @@ class BotManager:
         """Remove a specific subnet binding from a bot."""
         async with get_db(self.db_path) as db:
             async with db.execute(
-                "DELETE FROM bot_subnets WHERE bot_handle = ? AND subnet_id = ?",
+                "DELETE FROM bot_subnets WHERE LOWER(bot_handle) = LOWER(?) AND subnet_id = ?",
                 (handle, subnet_id)
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -350,7 +385,7 @@ class BotManager:
         """Remove all subnet bindings — bot becomes active on all subnets."""
         async with get_db(self.db_path) as db:
             async with db.execute(
-                "DELETE FROM bot_subnets WHERE bot_handle = ?",
+                "DELETE FROM bot_subnets WHERE LOWER(bot_handle) = LOWER(?)",
                 (handle,)
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -396,6 +431,11 @@ class BotManager:
                 rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    # Bot fields a peer may replicate (SAST-003); everything else is local-only.
+    _PEER_BOT_FIELDS = ("hostmasks", "address", "port", "role", "comment")
+    _PEER_BOT_ACCESS_FLAGS = ("has_partyline", "is_op", "is_deop", "is_hop", "is_dehop",
+                              "is_voice", "is_devoice", "is_friend")
+
     async def merge_from_peer(self, bots: list[dict], from_bot: str) -> None:
         """
         Merge bot records received from a botnet peer.
@@ -412,7 +452,7 @@ class BotManager:
                     continue
 
                 cur = await db.execute(
-                    "SELECT password, updated_at FROM bots WHERE handle = ?", (handle,)
+                    "SELECT password, updated_at FROM bots WHERE LOWER(handle) = ?", (handle,)
                 )
                 existing = await cur.fetchone()
                 remote_updated = bot.get('updated_at') or 0
@@ -420,35 +460,34 @@ class BotManager:
                 if existing:
                     if remote_updated <= (existing[1] or 0):
                         continue  # Local is newer or equal
-                    # Keep local password — never accept it from a peer
+                    # Local-only (never from a peer, SAST-001/002/003): password,
+                    # share_level, subnet_id, autolink*.  Only carried fields change.
+                    fields = {k: bot[k] for k in self._PEER_BOT_FIELDS if k in bot}
+                    if 'hostmasks' in fields and not isinstance(fields['hostmasks'], str):
+                        fields['hostmasks'] = json.dumps(fields['hostmasks'])
+                    fields.update(updated_at=remote_updated, updated_by=from_bot)
+                    set_clause = ", ".join(f"{k} = ?" for k in fields)  # fixed allowlist
                     await db.execute(
-                        """
-                        UPDATE bots SET
-                            hostmasks = ?, address = ?, port = ?,
-                            role = ?, share_level = ?, comment = ?,
-                            updated_at = ?, updated_by = ?
-                        WHERE handle = ? AND (updated_at IS NULL OR updated_at < ?)
-                        """,
-                        (
-                            bot.get('hostmasks', '[]'), bot.get('address', 'localhost'),
-                            bot.get('port', 3333), bot.get('role', 'none'),
-                            bot.get('share_level', 'subnet'), bot.get('comment', ''),
-                            remote_updated, from_bot,
-                            handle, remote_updated
-                        )
+                        f"UPDATE bots SET {set_clause} "
+                        "WHERE LOWER(handle) = ? AND (updated_at IS NULL OR updated_at < ?)",
+                        (*fields.values(), handle, remote_updated),
                     )
                 else:
+                    # New bots arrive inert: no key, no subnet scope, share=none.
+                    masks = bot.get('hostmasks', '[]')
+                    if not isinstance(masks, str):
+                        masks = json.dumps(masks)
                     await db.execute(
                         """
                         INSERT INTO bots
                             (handle, hostmasks, address, port, role, share_level,
                             comment, created_at, updated_at, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, 'none', ?, ?, ?, ?)
                         """,
                         (
-                            handle, bot.get('hostmasks', '[]'),
+                            handle, masks,
                             bot.get('address', 'localhost'), bot.get('port', 3333),
-                            bot.get('role', 'none'), bot.get('share_level', 'subnet'),
+                            bot.get('role', 'none'),
                             bot.get('comment', ''), bot.get('created_at', 0),
                             remote_updated, from_bot
                         )
@@ -482,42 +521,25 @@ class BotManager:
                 )
                 existing = await cur.fetchone()
 
+                flags = {k: int(bool(acc[k])) for k in self._PEER_BOT_ACCESS_FLAGS if k in acc}
                 if existing:
                     if remote_updated <= (existing[0] or 0):
                         continue
+                    fields = dict(flags, updated_at=remote_updated, updated_by=from_bot)
+                    set_clause = ", ".join(f"{k} = ?" for k in fields)  # fixed allowlist
                     await db.execute(
-                        """
-                        UPDATE bot_access SET
-                            has_partyline = ?, is_op = ?, is_deop = ?,
-                            is_voice = ?, is_devoice = ?, is_friend = ?,
-                            updated_at = ?, updated_by = ?
-                        WHERE handle = ?
-                        AND (channel = ? OR (channel IS NULL AND ? IS NULL))
-                        """,
-                        (
-                            acc.get('has_partyline', 0), acc.get('is_op', 0),
-                            acc.get('is_deop', 0), acc.get('is_voice', 0),
-                            acc.get('is_devoice', 0), acc.get('is_friend', 0),
-                            remote_updated, from_bot,
-                            handle, channel, channel
-                        )
+                        f"UPDATE bot_access SET {set_clause} WHERE handle = ? "
+                        "AND (channel = ? OR (channel IS NULL AND ? IS NULL))",
+                        (*fields.values(), handle, channel, channel),
                     )
                 else:
+                    cols = ["handle", "channel", *flags, "created_at", "updated_at", "created_by"]
+                    vals = [handle, channel, *flags.values(),
+                            acc.get('created_at', 0), remote_updated, from_bot]
                     await db.execute(
-                        """
-                        INSERT INTO bot_access
-                            (handle, channel, has_partyline, is_op, is_deop,
-                            is_voice, is_devoice, is_friend,
-                            created_at, updated_at, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            handle, channel,
-                            acc.get('has_partyline', 0), acc.get('is_op', 0),
-                            acc.get('is_deop', 0), acc.get('is_voice', 0),
-                            acc.get('is_devoice', 0), acc.get('is_friend', 0),
-                            acc.get('created_at', 0), remote_updated, from_bot
-                        )
+                        f"INSERT INTO bot_access ({', '.join(cols)}) "
+                        f"VALUES ({', '.join('?' * len(cols))})",
+                        vals,
                     )
 
             await db.commit()
@@ -526,13 +548,14 @@ class BotManager:
     async def serialize_for_peer(self, exclude_handle: str) -> list[dict]:
         """
         Return bots for botnet share — exclude self and soft-deleted bots.
-        Passwords are shared so all bots in a subnet stay in sync.
-        merge_from_peer() is responsible for never overwriting a bot's
-        own password with a peer-supplied value.
+        The password column holds botlink pre-shared keys (AUTH2, SAST-001)
+        and is never sent to peers: a peer that learned another pair's key
+        could impersonate either bot.  merge_from_peer() never stores a
+        peer-supplied password either.
         """
         async with get_db(self.db_path) as db:
             async with db.execute(
-                """SELECT handle, password, hostmasks, address, port, role,
+                """SELECT handle, hostmasks, address, port, role,
                         share_level, autolink, autolink_retry_interval,
                         subnet_id, comment, created_at, updated_at
                 FROM bots
@@ -552,14 +575,27 @@ class BotManager:
     
     async def delete_from_peer(self, payload: dict, from_bot: str) -> None:
         """
-        Delete a bot record received via botnet UPDATE BOT DEL.
-        payload must contain at least {'handle': <str>}.
+        Soft-delete a bot received via botnet UPDATE BOT DEL (after
+        ReplicationPolicy approval).  A delete older than the local record's
+        last update loses; bots with a locally provisioned link key are never
+        deleted by a peer; nothing is hard-deleted.
         """
-        handle = payload.get("handle", "").strip().lower()
+        handle = (payload.get("handle") or "").strip().lower()
         if not handle:
             log.warning("delete_from_peer: missing handle in payload from %s", from_bot)
             return
+        remote_ts = payload.get("deleted_at") or payload.get("updated_at")
+        ts = remote_ts or int(time.time())
         async with get_db(self.db_path) as db:
-            await db.execute("DELETE FROM bots WHERE handle = ?", (handle,))
-            await db.execute("DELETE FROM bot_access WHERE handle = ?", (handle,))
-        log.info("BotManager.delete_from_peer: deleted bot '%s' from %s", handle, from_bot)    
+            cur = await db.execute(
+                "UPDATE bots SET deleted_at = ?, deleted_by = ?, updated_at = ?, updated_by = ? "
+                "WHERE LOWER(handle) = ? AND deleted_at IS NULL "
+                "AND (password IS NULL OR password = '') "
+                "AND (? IS NULL OR updated_at IS NULL OR updated_at <= ?)",
+                (ts, from_bot, ts, from_bot, handle, remote_ts, remote_ts))
+            if cur.rowcount:
+                await db.execute(
+                    "UPDATE bot_access SET deleted_at = ?, deleted_by = ? "
+                    "WHERE LOWER(handle) = ? AND deleted_at IS NULL", (ts, from_bot, handle))
+        log.info("BotManager.delete_from_peer: %s bot '%s' from %s",
+                 "deleted" if cur.rowcount else "kept", handle, from_bot)

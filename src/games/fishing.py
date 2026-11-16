@@ -11,17 +11,16 @@ Flow:
   Partyline: .gstart fishing channel #chan  → makes game available (idle)
   In-channel:
     !fishcast           - Cast your line. One line per player at a time.
-    !fishreel           - Reel in when you get a bite! Be quick.
+    !fishreel (!reel)   - Reel in when you get a bite! Be quick.
     !fishstats [nick]   - Personal stats or another player's.
     !fishtop            - Top 5 anglers by score.
     !fishhelp           - Show commands.
-    !fishing stop       - Chan-op ends the game.
+    !fishstop           - Chan-op ends the game.
 """
 import asyncio
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
 
 from . import Game, GameSession
 from ..db import get_db
@@ -76,6 +75,14 @@ class FishingGame(Game):
     version = "0.1.0"
     scopes  = {"channel"}
     allow_multiple_sessions = False
+    SETTINGS = {
+        "bite_delay_min":  (int, 1, 86400),
+        "bite_delay_max":  (int, 1, 86400),
+        "bite_window_min": (int, 1, 3600),
+        "bite_window_max": (int, 1, 3600),
+    }
+    SETTING_PAIRS = (("bite_delay_min", "bite_delay_max"),
+                     ("bite_window_min", "bite_window_max"))
 
     TABLE_SQL = [
         """
@@ -180,7 +187,7 @@ class FishingGame(Game):
                 line.fish_kg   = fish_kg
 
             await self.say(session.target,
-                f"\x02{nick}\x02 \x02\x0307!! BITE !!\x03\x02 — Quick, type \x02!reel\x02!"
+                f"\x02{nick}\x02 \x02\x0307!! BITE !!\x03\x02 — Quick, type \x02!fishreel\x02!"
             )
 
             # Bite window — wait, then check if they reeled
@@ -210,7 +217,7 @@ class FishingGame(Game):
             if nkey in session.data["lines"]:
                 line = session.data["lines"][nkey]
                 if line.has_bite:
-                    await self.notice(nick, "You have a bite! Type \x02!reel\x02 now!")
+                    await self.notice(nick, "You have a bite! Type \x02!fishreel\x02 now!")
                 else:
                     await self.notice(nick, "Your line is already in the water. Be patient...")
                 return
@@ -288,7 +295,7 @@ class FishingGame(Game):
         if cmd == "!fishcast":
             await self._do_cast(session, nick)
 
-        elif cmd == "!fishreel":
+        elif cmd in ("!fishreel", "!reel"):
             await self._do_reel(session, nick)
 
         elif cmd == "!fishstats":
@@ -357,11 +364,11 @@ class FishingGame(Game):
         self._set_cooldown(chan, "fishhelp")
         lines = [
             "[Fishing] commands:",
-            "  !cast              - Drop your line in the water.",
-            "  !reel              - Reel in when you get a bite!",
+            "  !fishcast          - Drop your line in the water.",
+            "  !fishreel          - Reel in when you get a bite! (!reel works too)",
             "  !fishstats [nick]  - Show your (or another player's) stats.",
             "  !fishtop           - Top 5 anglers by score.",
-            "  !fishing stop      - Chan-op ends the session.",
+            "  !fishstop          - Chan-op ends the session.",
         ]
         for line in lines:
             await self.say(chan, line)

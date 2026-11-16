@@ -15,5 +15,6 @@ src/games/__pycache__/*
 *.key
 *.crt
 .venv/
+.venv*/
 .backup/
 .tmp/

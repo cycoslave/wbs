@@ -129,6 +129,13 @@ class PokerGame(Game):
     name = "poker"
     version = "0.2.0"
     scopes = {"channel"}
+    SETTINGS = {
+        "starting_cash": (int, 1, 10**9),
+        "small_blind":   (int, 1, 10**9),
+        "big_blind":     (int, 1, 10**9),
+        "turn_secs":     (int, 5, 3600),
+    }
+    SETTING_PAIRS = (("small_blind", "big_blind"),)
 
     TABLE_SQL = [
         """
@@ -151,6 +158,12 @@ class PokerGame(Game):
     ]
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: registration and a hand in progress survive a restart.
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "registering": "_registration_phase",
+        "playing":     "_next_action",
+    }
 
     async def load(self):
         await super().load()
@@ -202,7 +215,7 @@ class PokerGame(Game):
             f"Starting in {REGISTRATION_SECS}s "
             f"(chan-ops: type \x02!pkstart\x02 again to begin immediately)."
         )
-        session.task = asyncio.create_task(self._registration_phase(session))
+        self.spawn_round(session, self._registration_phase(session))
 
     async def _registration_phase(self, session: GameSession):
         try:
@@ -287,7 +300,8 @@ class PokerGame(Game):
 
         # Pre-flop action starts left of BB
         start_idx = (bb_idx + 1) % len(order)
-        await self._betting_street(session, start_idx)
+        self._betting_street(session, start_idx)
+        await self._next_action(session)
 
     def _post_blind(self, session: GameSession, nick: str, amount: int):
         players = session.data["players"]
@@ -300,79 +314,96 @@ class PokerGame(Game):
         if p.cash == 0:
             p.all_in = True
 
-    async def _betting_street(self, session: GameSession, start_idx: int):
-        """Run one complete betting street starting at start_idx."""
-        players = session.data["players"]
-
-        # Reset street bets and acted flags for new street
-        for p in players.values():
-            p.street_bet = 0
-            p.acted = False
-
+    def _betting_street(self, session: GameSession, start_idx: int):
+        """Start a betting street at start_idx.  Street bets and acted flags
+        are reset by _begin_hand / _advance_street (pre-flop keeps the
+        blinds as street bets, so the big blind has already matched)."""
         session.data["current_idx"] = start_idx
-        await self._next_action(session)
 
-    async def _next_action(self, session: GameSession):
-        """Find next player who needs to act and prompt them."""
+    def _find_actor(self, session: GameSession) -> Optional[str]:
+        """The next player who must act on this street, or None when the
+        street is complete."""
         order = session.data["order"]
         players = session.data["players"]
-        chan = session.target
-        cfg = session.data["cfg"]
-
-        # Walk through order to find who needs to act
-        checked = 0
+        current_bet = session.data["current_bet"]
+        can_act = [n for n in order if not players[n].folded and not players[n].all_in]
+        if not can_act:
+            return None
+        if len(can_act) == 1:
+            # Everyone else folded or is all in: nobody left to bet against.
+            if current_bet - players[can_act[0]].street_bet <= 0:
+                return None
         idx = session.data["current_idx"]
-        while checked < len(order):
-            nick = order[idx % len(order)]
+        for step in range(len(order)):
+            pos = (idx + step) % len(order)
+            p = players[order[pos]]
+            if p.folded or p.all_in:
+                continue
+            if not p.acted or current_bet - p.street_bet > 0:
+                session.data["current_idx"] = pos
+                return order[pos]
+        return None
+
+    async def _next_action(self, session: GameSession):
+        """The hand loop (GAM-11), run as the session task.  It prompts the
+        player to act and waits for their command or the turn timeout, then
+        moves on to the next player / street / showdown.  The pk-command handlers
+        only change the state and wake this loop (_end_turn), so event
+        dispatch never waits for a hand."""
+        chan = session.target
+        while session.data.get("phase") == "playing":
+            order = session.data["order"]
+            players = session.data["players"]
+            nick = self._find_actor(session)
+            if nick is None:
+                if await self._advance_street(session):
+                    return          # showdown: the hand is over
+                continue
+
             p = players[nick]
-            if not p.folded and not p.all_in:
-                to_call = session.data["current_bet"] - p.street_bet
-                if not p.acted or to_call > 0:
-                    break
-            idx += 1
-            checked += 1
-        else:
-            # All players done — advance to next street
-            await self._advance_street(session)
-            return
+            to_call = session.data["current_bet"] - p.street_bet
+            pot = session.data["pot"]
+            community_str = hand_str(session.data["community"]) if session.data["community"] else "(none yet)"
 
-        nick = order[idx % len(order)]
-        session.data["current_idx"] = idx % len(order)
-        p = players[nick]
-        to_call = session.data["current_bet"] - p.street_bet
-        pot = session.data["pot"]
-        community_str = hand_str(session.data["community"]) if session.data["community"] else "(none yet)"
+            action_opts = []
+            if to_call <= 0:
+                action_opts.append("\x02!pkcheck\x02")
+            else:
+                action_opts.append(f"\x02!pkcall\x02 (${min(to_call, p.cash)})")
+            action_opts.append("\x02!pkbet <amount>\x02")
+            action_opts.append("\x02!pkallin\x02")
+            action_opts.append("\x02!pkfold\x02")
 
-        action_opts = []
-        if to_call == 0:
-            action_opts.append("\x02!pkcheck\x02")
-        else:
-            action_opts.append(f"\x02!pkcall\x02 (${to_call})")
-        action_opts.append("\x02!pkbet <amount>\x02")
-        action_opts.append("\x02!pkallin\x02")
-        action_opts.append("\x02!pkfold\x02")
+            # Arm the turn before announcing it, so a fast reply counts.
+            done_flag = asyncio.Event()
+            session.data["turn_done"] = done_flag
+            session.data["action_player"] = nick
+            await self.say(chan,
+                f"[Poker] {nick}'s turn | Pot: ${pot} | Board: {community_str} | "
+                f"To call: ${max(to_call, 0)} | Cash: ${p.cash} | "
+                + "  ".join(action_opts)
+            )
+            # GAM-13: hole cards go out once per hand (and on !pkcards),
+            # not with every prompt.
 
-        await self.say(chan,
-            f"[Poker] {nick}'s turn | Pot: ${pot} | Board: {community_str} | "
-            f"To call: ${to_call} | Cash: ${p.cash} | "
-            + "  ".join(action_opts)
-        )
-        await self.notice(nick, f"[Poker] Your hole cards: {hand_str(p.hole)}")
-
-        session.data["action_player"] = nick
-        done_flag = asyncio.Event()
-        session.data["turn_done"] = done_flag
-
-        try:
-            await asyncio.wait_for(done_flag.wait(), timeout=cfg["turn_secs"])
-        except asyncio.TimeoutError:
-            p.folded = True
-            p.acted = True
-            await self.say(chan, f"  {nick} timed out — auto-fold.")
+            try:
+                await asyncio.wait_for(done_flag.wait(), timeout=session.data["cfg"]["turn_secs"])
+            except asyncio.TimeoutError:
+                if session.data.get("action_player") == nick:
+                    p.folded = True
+                    p.acted = True
+                    await self.say(chan, f"  {nick} timed out — auto-fold.")
+            session.data["action_player"] = None
             if await self._check_one_left(session):
                 return
             session.data["current_idx"] = (session.data["current_idx"] + 1) % len(order)
-            await self._next_action(session)
+
+    def _end_turn(self, session: GameSession):
+        """The player to act has acted: wake the hand loop."""
+        session.data["action_player"] = None
+        flag = session.data.get("turn_done")
+        if flag is not None:
+            flag.set()
 
     async def _check_one_left(self, session: GameSession) -> bool:
         """If only one active player remains, award pot and end hand."""
@@ -390,7 +421,8 @@ class PokerGame(Game):
             return True
         return False
 
-    async def _advance_street(self, session: GameSession):
+    async def _advance_street(self, session: GameSession) -> bool:
+        """Deal the next street (True after the river: showdown done)."""
         street = session.data["street"]
         deck = session.data["deck"]
         community = session.data["community"]
@@ -420,7 +452,7 @@ class PokerGame(Game):
             await self.say(chan, f"[Poker] *** RIVER *** {hand_str(community)}")
         elif street == "river":
             await self._showdown(session)
-            return
+            return True
 
         # Start betting from first active player left of dealer
         order = session.data["order"]
@@ -432,7 +464,8 @@ class PokerGame(Game):
             if not players[nick].folded and not players[nick].all_in:
                 start_idx = (start_idx + i) % len(order)
                 break
-        await self._betting_street(session, start_idx)
+        self._betting_street(session, start_idx)
+        return False
 
     async def _showdown(self, session: GameSession):
         chan = session.target
@@ -528,9 +561,8 @@ class PokerGame(Game):
         elif cmd == "!pkstart" and phase == "registering":
             if not self.core.nick_isop(nick, chan):
                 return await self.notice(nick, "Only a chan-op can skip the registration countdown.")
-            if session.task and not session.task.done():
-                session.task.cancel()
-            await self._begin_hand(session)
+            # GAM-11: the hand runs as the session task, not in this handler.
+            self.spawn_round(session, self._begin_hand(session))
             return
 
         elif cmd == "!pkjoin":
@@ -544,17 +576,23 @@ class PokerGame(Game):
             players[nick] = PokerPlayer(nick=nick, cash=cash)
             await self.say(chan, f"[Poker] {nick} joined with ${cash}.")
 
+        elif cmd == "!pkcards":
+            # GAM-13: hole cards are noticed once per hand; resent on request.
+            p = players.get(nick)
+            if phase != "playing" or p is None or not p.hole:
+                return await self.notice(nick, "[Poker] You have no cards in this hand.")
+            await self.notice(nick, f"[Poker] Your hole cards: {hand_str(p.hole)}")
+
+        # Player actions (GAM-11): change the state, then wake the hand loop
+        # (_end_turn); the loop moves on to the next player or street.
         elif cmd == "!pkfold" and phase == "playing":
             if session.data.get("action_player") != nick:
                 return
             p = players[nick]
             p.folded = True
             p.acted = True
+            self._end_turn(session)
             await self.say(chan, f"  {nick} folds.")
-            session.data["turn_done"].set()
-            if await self._check_one_left(session):
-                return
-            session.data["current_idx"] = (session.data["current_idx"] + 1) % len(session.data["order"])
 
         elif cmd == "!pkcheck" and phase == "playing":
             if session.data.get("action_player") != nick:
@@ -564,9 +602,8 @@ class PokerGame(Game):
             if to_call > 0:
                 return await self.notice(nick, f"You must call ${to_call}, raise, or fold.")
             p.acted = True
+            self._end_turn(session)
             await self.say(chan, f"  {nick} checks.")
-            session.data["turn_done"].set()
-            session.data["current_idx"] = (session.data["current_idx"] + 1) % len(session.data["order"])
 
         elif cmd == "!pkcall" and phase == "playing":
             if session.data.get("action_player") != nick:
@@ -582,11 +619,11 @@ class PokerGame(Game):
             p.acted = True
             if p.cash == 0:
                 p.all_in = True
+            self._end_turn(session)
+            if p.all_in:
                 await self.say(chan, f"  {nick} calls ${to_call} and is \x02ALL IN\x02! Pot: ${session.data['pot']}")
             else:
                 await self.say(chan, f"  {nick} calls ${to_call}. Pot: ${session.data['pot']}")
-            session.data["turn_done"].set()
-            session.data["current_idx"] = (session.data["current_idx"] + 1) % len(session.data["order"])
 
         elif cmd == "!pkbet" and phase == "playing":
             if session.data.get("action_player") != nick:
@@ -609,14 +646,15 @@ class PokerGame(Game):
             p.bet_total += total_needed
             session.data["pot"] += total_needed
             session.data["current_bet"] = p.street_bet
+            if p.cash == 0:
+                p.all_in = True
             # Raise re-opens action for all others
             for other_nick, other_p in players.items():
                 if other_nick != nick and not other_p.folded and not other_p.all_in:
                     other_p.acted = False
             p.acted = True
+            self._end_turn(session)
             await self.say(chan, f"  {nick} raises to ${p.street_bet}. Pot: ${session.data['pot']}")
-            session.data["turn_done"].set()
-            session.data["current_idx"] = (session.data["current_idx"] + 1) % len(session.data["order"])
 
         elif cmd == "!pkallin" and phase == "playing":
             if session.data.get("action_player") != nick:
@@ -634,9 +672,8 @@ class PokerGame(Game):
                 for other_nick, other_p in players.items():
                     if other_nick != nick and not other_p.folded and not other_p.all_in:
                         other_p.acted = False
+            self._end_turn(session)
             await self.say(chan, f"  {nick} goes \x02ALL IN\x02 with ${amount}! Pot: ${session.data['pot']}")
-            session.data["turn_done"].set()
-            session.data["current_idx"] = (session.data["current_idx"] + 1) % len(session.data["order"])
 
         elif cmd == "!poker" and len(parts) > 1 and parts[1].lower() == "stop":
             if not self.core.nick_isop(nick, chan):
@@ -727,6 +764,7 @@ class PokerGame(Game):
             "  !pkcheck            - Check (when no bet to call).",
             "  !pkfold             - Fold your hand.",
             "  !pkallin            - Go all-in.",
+            "  !pkcards            - Resend your hole cards (by notice).",
             "  !poker stop         - Chan-op ends the game.",
             "  !pkcash [nick]      - Check chip balance.",
             "  !pktop              - Top 5 chip leaders.",

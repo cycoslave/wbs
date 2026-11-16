@@ -90,6 +90,11 @@ class seenPlugin(Plugin):
     name    = "seen"
     version = "0.3.0"
 
+    @classmethod
+    def owned_tables(cls):
+        """Tables `.plugin purge seen` drops (schema is in _SCHEMA, not TABLE_SQL)."""
+        return ["seen", "seen_notify"]
+
     tell_seens:       bool  = True
     fuzzy_search:     bool  = True
     botnet_seens:     bool  = True
@@ -100,9 +105,18 @@ class seenPlugin(Plugin):
         # rate buckets keyed by requesting nick
         self._rate_buckets: Dict[str, List[float]] = defaultdict(list)
         self._botnet_pending: Dict[str, asyncio.Future] = {}
+        self._notify_lock = asyncio.Lock()
 
     async def load(self) -> None:
         await super().load()
+        # PLG-6: partyline commands (flag gate = partyline.COMMAND_MIN_FLAGS).
+        self.register_command(
+            "seen", self._pl_seen, "p", "seen <nick> - when a nick was last seen")
+        self.register_command(
+            "seenstats", self._pl_seenstats, "p", "seenstats - number of nicks tracked")
+        self.register_command(
+            "purgeseens", self._pl_purgeseens, "A",
+            "purgeseens <YYYY-MM-DD> - delete seen records older than that date")
         async with get_db(self.core.db_path) as db:
             await self._migrate(db)
             for stmt in _SCHEMA.strip().split(";"):
@@ -113,7 +127,7 @@ class seenPlugin(Plugin):
         self.log.info(f"Plugin {self.name} {self.version} loaded")
 
     async def unload(self) -> None:
-        for fut in self._botnet_pending.values():
+        for fut in list(self._botnet_pending.values()):
             fut.cancel()
         await super().unload()
         self.log.info(f"Plugin {self.name} unloaded")
@@ -176,20 +190,28 @@ class seenPlugin(Plugin):
         text  = event["text"].strip()
         lower = text.lower()
 
-        if lower.startswith("seen "):
-            result = await self._query_seen(text[5:].strip())
-            reply  = result or f"I don't remember seeing {text[5:].strip()}."
+        # PLG-9: `seen ...` is answered here; mark the event handled so the
+        # core's /msg command layer does not add "Unknown command: .seen".
+        if lower == "seen" or lower.startswith("seen "):
+            event["handled"] = True
+            target = text[5:].strip()
+            if not target:
+                await self.send_notice(nick, "Usage: /msg <bot> seen <nick>")
+                return
+            result = await self._query_seen(target)
+            reply  = result or f"I don't remember seeing {target}."
             await self.send_notice(nick, reply)
             return
 
-        if lower.strip() == "seenstats":
+        if lower == "seenstats":
+            event["handled"] = True
             await self.send_notice(nick, await self._stats_text())
             return
 
         await self._update(nick, uhost, "", "sent a private message")
 
     async def on_JOIN(self, event: dict) -> None:
-        if event["nick"] == getattr(self.core, "botnick", ""):
+        if event["nick"].lower() == (getattr(self.core, "botname", "") or "").lower():
             return
         channel = event["channel"]
         await self._update(
@@ -201,7 +223,7 @@ class seenPlugin(Plugin):
 
     async def on_PART(self, event: dict) -> None:
         channel = event["channel"]
-        msg     = event.get("message", "").strip()
+        msg     = (event.get("reason") or "").strip()     # PLG-7
         action  = f"parted {channel} ({msg})" if msg else f"parted {channel}"
         await self._update(event["nick"], event.get("uhost", ""), channel, action)
 
@@ -214,7 +236,7 @@ class seenPlugin(Plugin):
         """
         nick    = event["nick"]
         uhost   = event.get("uhost", "")
-        msg     = event.get("message", "").strip()
+        msg     = (event.get("reason") or "").strip()     # PLG-7
         action  = f"quit ({msg})" if msg else "quit"
 
         channels = self._channels_for_nick(nick)
@@ -291,6 +313,17 @@ class seenPlugin(Plugin):
                 "record":    event["record"],
                 "bot":       event.get("bot", "?"),
             })
+
+    async def _pl_seen(self, handle: str, arg: str) -> str:
+        return await self.cmd_seen(handle, arg)
+
+    async def _pl_seenstats(self, handle: str, arg: str) -> str:
+        return await self.cmd_seenstats(handle, arg)
+
+    async def _pl_purgeseens(self, handle: str, arg: str) -> str:
+        # The +A gate (COMMAND_MIN_FLAGS) already ran; cmd_purgeseens' own
+        # +m check is for direct callers.
+        return await self.cmd_purgeseens(handle, arg, flags="m")
 
     async def cmd_seen(self, caller: str, args: str) -> str:
         if not args.strip():
@@ -505,6 +538,15 @@ class seenPlugin(Plugin):
 
     async def _queue_notification(self, asker: str, target: str, channel: str) -> None:
         async with get_db(self.core.db_path) as db:
+            # PLG-9: one pending notification per (asker, target); asking
+            # again must not make the target see one line per ask.
+            async with db.execute(
+                "SELECT 1 FROM seen_notify WHERE asker = ? COLLATE NOCASE "
+                "AND target = ? COLLATE NOCASE LIMIT 1",
+                (asker, target.lower()),
+            ) as cur:
+                if await cur.fetchone():
+                    return
             await db.execute(
                 """
                 INSERT INTO seen_notify (asker, target, channel, asked_at)
@@ -515,21 +557,28 @@ class seenPlugin(Plugin):
             await db.commit()
 
     async def _deliver_notifications(self, nick: str, channel: str) -> None:
-        async with get_db(self.core.db_path) as db:
-            async with db.execute(
-                "SELECT * FROM seen_notify WHERE target = ? COLLATE NOCASE",
-                (nick.lower(),),
-            ) as cur:
-                rows = await cur.fetchall()
-            if not rows:
-                return
-            await db.execute(
-                "DELETE FROM seen_notify WHERE target = ? COLLATE NOCASE",
-                (nick.lower(),),
-            )
-            await db.commit()
+        # The lock keeps two overlapping events (a JOIN and a PUBMSG) from
+        # both reading the rows before either deletes them.
+        async with self._notify_lock:
+            async with get_db(self.core.db_path) as db:
+                async with db.execute(
+                    "SELECT * FROM seen_notify WHERE target = ? COLLATE NOCASE "
+                    "ORDER BY id",
+                    (nick.lower(),),
+                ) as cur:
+                    rows = await cur.fetchall()
+                if not rows:
+                    return
+                await db.execute(
+                    "DELETE FROM seen_notify WHERE target = ? COLLATE NOCASE",
+                    (nick.lower(),),
+                )
+                await db.commit()
+        # Rows stored twice by older versions still give one line per asker.
+        unique: Dict[str, dict] = {}
         for row in rows:
-            r   = dict(row)
+            unique.setdefault(row["asker"].lower(), dict(row))
+        for r in unique.values():
             ago = self._ago(r["asked_at"])
             dest = channel or r["channel"]
             if dest:
@@ -578,7 +627,7 @@ class seenPlugin(Plugin):
         not expose it (graceful fallback).
         """
         try:
-            chan_map = self.core.channel_manager.channels  # dict[str, Channel]
+            chan_map = self.core.channels  # dict[str, Channel], users lower-case
             nick_l   = nick.lower()
             return [
                 name for name, obj in chan_map.items()
@@ -590,7 +639,7 @@ class seenPlugin(Plugin):
     def _nick_on_channel(self, nick: str, channel: str) -> bool:
         """Return True if nick is currently in the given channel."""
         try:
-            chan_obj = self.core.channel_manager.channels.get(channel)
+            chan_obj = self.core.channels.get(channel.lower())
             if chan_obj is None:
                 return False
             return nick.lower() in {u.lower() for u in chan_obj.users}

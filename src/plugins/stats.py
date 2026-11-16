@@ -11,7 +11,9 @@ Description:
     voice, devoice, kicks, bans, unbans, topic changes, channel mode
     changes, and unique victim counts.
 
-    Stats are stored per-nick globally and per-nick-per-channel.
+    Stats are stored per-nick globally and per-nick-per-channel, and are kept
+    when the plugin is unloaded or reloaded (`.plugin purge stats` deletes
+    them).
 
     Public commands (requires pubcom integration):
         !stats [nick]       — show stats for nick in current channel
@@ -141,9 +143,17 @@ class statsPlugin(Plugin):
             for sql in self.TABLE_SQL:
                 await db.execute(sql)
             await db.commit()
+        self.register_command(      # PLG-6
+            "stats", self._pl_stats, "p",
+            "stats [#channel] [nick] - show a nick's stats (all channels if no #channel)")
+        self.register_command(
+            "topstats", self._pl_topstats, "p",
+            "topstats [#channel] [n] - top n nicks by messages (n = 1..10, default 5)")
         self.log.info("Plugin %s %s loaded", self.name, self.version)
 
     async def unload(self) -> None:
+        """Collected stats (stats_nick, stats_nick_channel, stats_victims)
+        persist across unload/load; only `.plugin purge stats` drops them."""
         self.log.info("Plugin %s unloading", self.name)
         await super().unload()
 
@@ -152,6 +162,40 @@ class statsPlugin(Plugin):
         for old_table in ("stats_global", "stats_channel", "stats_history"):
             await db.execute(f"DROP TABLE IF EXISTS {old_table}")
         self.log.debug("stats: migration check complete")
+
+    async def _pl_stats(self, handle: str, arg: str) -> str:
+        """Partyline `.stats [#channel] [nick]` (gate: +p)."""
+        parts = arg.split()
+        channel = parts.pop(0) if parts and parts[0][:1] in "#&" else None
+        if len(parts) > 1:
+            return "Usage: .stats [#channel] [nick]"
+        target = parts[0] if parts else handle
+        row = await self.get_nick_stats(target, channel)
+        where = channel or "all channels"
+        if not row:
+            return f"No stats found for {target} in {where}."
+        import datetime
+        last = datetime.datetime.fromtimestamp(row["last_seen"]).strftime("%Y-%m-%d %H:%M")
+        return (f"{target} [{where}] - msgs: {row['messages']} | actions: {row['actions']} | "
+                f"chars: {row['characters']} | bytes: {row['bytes_total']} | "
+                f"urls: {row['url_count']} | emoji: {row['emoji_count']} | "
+                f"kicks: {row['kicks_given']} | last: {last}")
+
+    async def _pl_topstats(self, handle: str, arg: str) -> str:
+        """Partyline `.topstats [#channel] [n]` (gate: +p)."""
+        parts = arg.split()
+        channel = parts.pop(0) if parts and parts[0][:1] in "#&" else None
+        n = 5
+        if parts:
+            if len(parts) > 1 or not (parts[0].isascii() and parts[0].isdigit()):
+                return "Usage: .topstats [#channel] [n]"
+            n = max(1, min(int(parts[0]), 10))
+        rows = await self.get_top_nicks(channel=channel, limit=n)
+        where = channel or "all channels"
+        if not rows:
+            return f"No stats recorded for {where} yet."
+        return f"Top {n} in {where}: " + " | ".join(
+            f"{i + 1}. {r['nick']} ({r['messages']} msgs)" for i, r in enumerate(rows))
 
     async def _reply(self, channel: str, text: str) -> None:
         """Send a PRIVMSG to *channel* via the IRC layer."""
@@ -214,6 +258,9 @@ class statsPlugin(Plugin):
                         pass
                 await self._cmd_topstats(channel, n)
 
+        await self._count_text(nick, channel, text, is_action)
+
+    async def _count_text(self, nick: str, channel: str, text: str, is_action: bool) -> None:
         emojis = _count_emojis(text)
         urls   = _count_urls(text)
         chars  = len(text)
@@ -235,14 +282,12 @@ class statsPlugin(Plugin):
             await self._upsert_nick_channel(nick, channel, delta)
 
     async def on_ACTION(self, event: dict) -> None:
-        """
-        Handles ACTION if core dispatches it as a distinct event type.
-        Guard flag prevents double-counting if core also delivers it as
-        a CTCP PUBMSG (on_PUBMSG handles that case).
-        """
-        if event.get("_via_pubmsg"):
-            return
-        await self.on_PUBMSG({**event, "_via_pubmsg": True})
+        """/me in a channel (PLG-8): the IRC layer emits ACTION with the
+        action text (no CTCP wrapping); counted as an action, not a message."""
+        text = event.get("text", "") or ""
+        if text.startswith("\x01ACTION"):
+            text = text[len("\x01ACTION"):].strip(" \x01")
+        await self._count_text(event.get("nick", ""), event.get("channel", ""), text, True)
 
     async def on_JOIN(self, event: dict) -> None:
         nick    = event.get("nick", "")
@@ -436,13 +481,21 @@ class statsPlugin(Plugin):
                     rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    def _excluded(self, nick: str) -> bool:
+        """PLG-8: the bot itself and servers (a server name has a '.', a
+        nick never does) are not users and get no stats rows."""
+        if not nick or "." in nick:
+            return True
+        bot = getattr(self.core, "botname", "") or ""
+        return bool(bot) and nick.lower() == bot.lower()
+
     async def _upsert_nick(self, nick: str, delta: dict) -> None:
         """
         Insert or increment per-nick global stats.
         *delta* maps column_name → int (counter increment) or str/int
         for literal columns (last_seen, last_message).
         """
-        if not nick:
+        if self._excluded(nick):
             return
 
         counters = {k: v for k, v in delta.items() if k not in _LITERAL_COLS and isinstance(v, int)}
@@ -471,7 +524,7 @@ class statsPlugin(Plugin):
 
     async def _upsert_nick_channel(self, nick: str, channel: str, delta: dict) -> None:
         """Insert or increment per-nick per-channel stats."""
-        if not nick or not channel:
+        if self._excluded(nick) or not channel:
             return
 
         counters = {k: v for k, v in delta.items() if k not in _LITERAL_COLS and isinstance(v, int)}
@@ -511,6 +564,8 @@ class statsPlugin(Plugin):
         The 'victims' counter increments only once per distinct target
         per scope (dedup via stats_victims table).
         """
+        if self._excluded(actor):
+            return
         now = int(time.time())
         global_delta["last_seen"] = now
         chan_delta["last_seen"]   = now

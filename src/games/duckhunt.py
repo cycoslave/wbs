@@ -22,7 +22,6 @@ Anti-cheat:
 import asyncio
 import random
 import time
-from typing import Optional
 
 from . import Game, GameSession
 from ..db import get_db
@@ -41,6 +40,14 @@ class DuckhuntGame(Game):
     version = "0.2.0"
     scopes  = {"channel"}
     allow_multiple_sessions = False
+    # GAM-5: valid `.gstart` key=value args and `!duckset` parameters.
+    SETTINGS = {
+        "min_delay":    (int,   1,   7 * 86400),
+        "max_delay":    (int,   1,   7 * 86400),
+        "duck_timeout": (int,   1,   86400),
+        "reload_time":  (float, 0.0, 600.0),
+    }
+    SETTING_PAIRS = (("min_delay", "max_delay"),)
 
     TABLE_SQL = [
         """
@@ -84,6 +91,10 @@ class DuckhuntGame(Game):
         await super().unload()
         self.log.info(f"Game {self.name} {self.version} unloaded")
 
+    def settings_of(self, session: GameSession) -> dict:
+        # duckhunt keeps its settings flat in session.data (min_delay, ...).
+        return session.data
+
     async def start_session(self, session: GameSession, restore: bool = False):
         chan = session.target
         cfg  = await self._load_settings(chan)
@@ -101,7 +112,10 @@ class DuckhuntGame(Game):
         # Probe mode: None | {"nick": str, "remaining": int, "hits": int}
         session.data["probe"]              = None
         session.data["probe_task"]         = None
+        # Set by !duckset: wakes the hunt loop so new delays apply at once.
+        session.data["settings_changed"]   = asyncio.Event()
 
+        # GAM-5: super() lays the `.gstart` args over the stored settings.
         await super().start_session(session)
         if not restore:
             await self.send_privmsg(
@@ -123,11 +137,7 @@ class DuckhuntGame(Game):
         """Randomly spawns ducks. Probe ducks are handled by a separate task."""
         try:
             while True:
-                delay = random.randint(
-                    int(session.data["min_delay"]),
-                    int(session.data["max_delay"]),
-                )
-                await asyncio.sleep(delay)
+                await self._wait_for_next_duck(session)
 
                 if session.key not in self.sessions or session.state != "running":
                     return
@@ -166,6 +176,45 @@ class DuckhuntGame(Game):
 
         except asyncio.CancelledError:
             raise
+
+    @staticmethod
+    def _draw_delay(session: GameSession) -> int:
+        lo = int(session.data["min_delay"])
+        hi = int(session.data["max_delay"])
+        if hi < lo:
+            lo, hi = hi, lo
+        return random.randint(lo, hi)
+
+    async def _wait_for_next_duck(self, session: GameSession):
+        """Sleep until the next duck is due.  A !duckset of min_delay /
+        max_delay re-draws the delay from the new values at once, counting
+        the time already waited (GAM-5)."""
+        changed = session.data["settings_changed"]
+        started = time.monotonic()
+        delay   = self._draw_delay(session)
+        while True:
+            remaining = delay - (time.monotonic() - started)
+            if remaining <= 0:
+                return
+            changed.clear()
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+            delay = self._draw_delay(session)
+
+    @staticmethod
+    def _fmt_secs(secs: float) -> str:
+        """45 -> '45s', 90 -> '1m30s', 180 -> '3m', 7200 -> '2h' (GAM-5)."""
+        secs = int(round(secs))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            m, s = divmod(secs, 60)
+            return f"{m}m{s}s" if s else f"{m}m"
+        h, rest = divmod(secs, 3600)
+        m = rest // 60
+        return f"{h}h{m}m" if m else f"{h}h"
 
     async def _spawn_duck(self, session: GameSession, probe: bool = False):
         """Put a duck up in the channel."""
@@ -335,7 +384,7 @@ class DuckhuntGame(Game):
             probe   = session.data.get("probe")
             status  = "\x02duck UP!\x02" if duck_up else "no duck"
             quiet   = " (ducks quiet — 2+ missed)" if misses >= 2 else f" ({misses} miss streak)"
-            rng     = f"{min_d // 60}m–{max_d // 3600}h"
+            rng     = f"{self._fmt_secs(min_d)}–{self._fmt_secs(max_d)}"
             probe_str = f"  \x02[probe active: {probe['nick']}]\x02" if probe else ""
             await self.send_privmsg(
                 chan,
@@ -345,18 +394,25 @@ class DuckhuntGame(Game):
         elif cmd == "!duckset":
             if not self.core.nick_isop(nick, chan):
                 return await self.send_notice(nick, "Only chan-ops can change DuckHunt settings.")
-            valid = {"min_delay", "max_delay", "duck_timeout", "reload_time"}
-            if not args or args[0].lower() not in valid or len(args) < 2:
+            valid = sorted(self.SETTINGS)
+            if not args or args[0].lower() not in self.SETTINGS or len(args) < 2:
                 return await self.send_privmsg(
                     chan,
-                    f"Usage: !duckset <{'|'.join(sorted(valid))}> <value>"
+                    f"Usage: !duckset <{'|'.join(valid)}> <value>"
                 )
             param = args[0].lower()
             try:
-                value = float(args[1]) if param == "reload_time" else int(args[1])
-            except ValueError:
-                return await self.send_notice(nick, "Value must be a number.")
+                value = self.parse_start_args({param: args[1]})[param]
+            except ValueError as e:
+                return await self.send_notice(nick, f"Value rejected: {e}.")
+            err = self.check_settings({**session.data, param: value})
+            if err:
+                return await self.send_notice(nick, f"Value rejected: {err}.")
+            # Applies to the running session at once (GAM-5) and is stored
+            # for later sessions; a start arg for it no longer applies.
             session.data[param] = value
+            session.data.get("start_args", {}).pop(param, None)
+            session.data["settings_changed"].set()
             await self._save_setting(chan, **{param: value})
             await self.send_privmsg(chan, f"DuckHunt {param} set to {value}.")
 

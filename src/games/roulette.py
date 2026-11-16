@@ -30,7 +30,7 @@ Bet types:
 import asyncio
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from . import Game, GameSession
@@ -147,6 +147,7 @@ def _parse_bet(parts: List[str], cfg: dict) -> Tuple[Optional[Bet], Optional[str
 
     Grammar:
         !roulettebet <number 0-36> <amount>
+        !roulettebet straight <number 0-36> <amount>
         !roulettebet red|black|odd|even|high|low <amount>
         !roulettebet dozen1|dozen2|dozen3 <amount>
         !roulettebet col1|col2|col3 <amount>
@@ -179,6 +180,18 @@ def _parse_bet(parts: List[str], cfg: dict) -> Tuple[Optional[Bet], Optional[str
         return None, "Straight bet: number must be 0-36."
     except ValueError:
         pass
+
+    if kind_token == "straight":
+        # GAM-12: the named form of the bare-number bet.
+        try:
+            if len(params_tokens) != 1:
+                raise ValueError
+            num = int(params_tokens[0])
+            if not 0 <= num <= 36:
+                raise ValueError
+        except ValueError:
+            return None, "Straight: !roulettebet straight <0-36> <amount>  e.g. !roulettebet straight 17 50"
+        return Bet(nick="", kind="straight", amount=amount, params=num), None
 
     simple = {"red", "black", "odd", "even", "high", "low",
               "dozen1", "dozen2", "dozen3", "col1", "col2", "col3"}
@@ -226,6 +239,13 @@ class RouletteGame(Game):
     name    = "roulette"
     version = "0.1.0"
     scopes  = {"channel"}
+    SETTINGS = {
+        "starting_cash": (int, 1, 10**9),
+        "min_bet":       (int, 1, 10**9),
+        "max_bet":       (int, 1, 10**9),
+        "default_bet":   (int, 1, 10**9),
+    }
+    SETTING_PAIRS = (("min_bet", "max_bet"),)
 
     TABLE_SQL = [
         """
@@ -248,6 +268,12 @@ class RouletteGame(Game):
     ]
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: an open betting round survives a restart.
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "betting":  "_betting_phase",
+        "spinning": "_spin",
+    }
 
     async def load(self):
         await super().load()
@@ -372,7 +398,7 @@ class RouletteGame(Game):
         await self.say(chan,
             "[Roulette] Round over. "
             "\x02!roulette\x02 to spin again  |  "
-            "\x02!roulette stop\x02 to close the table."
+            "\x02!roulettestop\x02 to close the table."
         )
 
     async def on_PUBMSG(self, session: GameSession, nick: str, text: str, event=None):
@@ -488,7 +514,7 @@ class RouletteGame(Game):
         await self.say(chan, "    !roulettetop                - Top 5 chip leaders.")
         await self.say(chan, "    !roulettestop               - (op) Close the table.")
         await self.say(chan, "\x02Bet types:\x02")
-        await self.say(chan, "    !roulettebet 17 100          Straight  35:1")
+        await self.say(chan, "    !roulettebet 17 100          Straight  35:1  (also: straight 17 100)")
         await self.say(chan, "    !roulettebet red 50          Red/Black  1:1")
         await self.say(chan, "    !roulettebet odd 50          Odd/Even   1:1")
         await self.say(chan, "    !roulettebet high 50         High(19-36)/Low(1-18)  1:1")

@@ -6,7 +6,7 @@ by: cyco
 Description: Get op from linked bots & Give ops to linked bots.
 """
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 from . import Plugin
 from ..botnet import BotCommand
@@ -26,21 +26,36 @@ class netopPlugin(Plugin):
         self.sugop: Dict[Tuple[str, str], float] = {}
 
     def _authed_bot_nicks(self) -> Dict[str, str]:
-        """Return {nick_lower: handle} for every authenticated, connected peer."""
-        peers = getattr(self.core.botnet, 'peers', {})
-        return {
-            (link.nick or link.name).lower(): handle
-            for handle, link in peers.items()
-            if (link.nick or link.name) and link.authed and link.connected
-        }
+        """
+        Return {nick_lower: handle} for every authenticated, connected peer of
+        the local subnet. Bots of other subnets may share the IRC server but
+        never get or give ops (SAST-002).
+        """
+        botnet = self.core.botnet
+        if hasattr(botnet, 'same_subnet_bot_nicks'):
+            return botnet.same_subnet_bot_nicks()
+        return {}
 
     def _peer_is_trusted(self, from_peer: str) -> bool:
-        """Return True if from_peer is an authenticated, connected botnet peer."""
+        """Return True if from_peer is an authenticated, connected same-subnet peer."""
         if not from_peer:
             return False
-        peers = getattr(self.core.botnet, 'peers', {})
-        link = peers.get(from_peer.lower())
-        return bool(link and link.authed and link.connected)
+        botnet = self.core.botnet
+        return bool(hasattr(botnet, 'same_subnet_peer') and botnet.same_subnet_peer(from_peer))
+
+    async def msg_to_bots(self, command: str):
+        """Send an op request/suggestion to same-subnet peers only (SAST-002)."""
+        await self.core.botnet.broadcast_subnet(command)
+
+    async def msg_to_bot(self, botname: str, command: str):
+        """Send to one peer, only if it is a same-subnet peer (SAST-002)."""
+        botnet = self.core.botnet
+        handle = self._authed_bot_nicks().get((botname or '').lower(), botname)
+        link = botnet.same_subnet_peer(handle) if hasattr(botnet, 'same_subnet_peer') else None
+        if link is None:
+            self.log.warning(f"Not sending '{command.split()[0]}' to non-same-subnet bot '{botname}'")
+            return
+        await botnet._safe_send(link.writer, f"CMD {command}\n")
 
     def _prune_cooldowns(self, now: float) -> None:
         """Evict expired entries; hard-cap dict size to prevent unbounded growth."""
@@ -65,6 +80,10 @@ class netopPlugin(Plugin):
         })
         self.core.botnet.register('netop', 'reqop', self.on_reqop)
         self.core.botnet.register('netop', 'sugop', self.on_sugop)
+        self.register_command(      # PLG-6
+            "netop", self._pl_netop, "A",
+            "netop [reqop <#chan>] - show linked same-subnet bots and op state, "
+            "or ask them for ops on <#chan>")
         self.log.info(f"Plugin {self.name} {self.version} loaded")
 
     async def unload(self):
@@ -76,6 +95,30 @@ class netopPlugin(Plugin):
         self.core.botnet.unregister_plugin(self.name)
         await super().unload()
         self.log.info(f"Plugin {self.name} {self.version} unloaded")
+
+    async def _pl_netop(self, handle: str, arg: str):
+        """Partyline `.netop` / `.netop reqop <#chan>` (gate: +A)."""
+        parts = arg.split()
+        if not parts:
+            peers = sorted(self._authed_bot_nicks())
+            lines = [f"[netop] linked same-subnet bots: {', '.join(peers) or '(none)'}"]
+            for chan, bots in sorted(self._op_state(peers).items()):
+                lines.append(f"[netop] {chan}: opped bots: {', '.join(bots) or '(none)'}")
+            return lines
+        if parts[0].lower() != "reqop" or len(parts) != 2:
+            return "Usage: .netop [reqop <#chan>]"
+        chan = parts[1].lower()
+        if not _valid_channel(chan):
+            return f"Invalid channel: {parts[1]}"
+        await self.msg_to_bots(f"reqop {self.core.botname} {chan}")
+        return f"[netop] asked linked bots for ops on {chan}."
+
+    def _op_state(self, peers) -> Dict[str, list]:
+        """{channel: [peer nicks that are opped there]} for channels we are on."""
+        out: Dict[str, list] = {}
+        for chan in list(getattr(self.core, "channels", {}) or {}):
+            out[chan] = [n for n in peers if self.core.nick_isop(n, chan)]
+        return out
 
     async def on_IRC_TIMER_NETOP(self, event):
         """Periodic op enforcement and housekeeping."""

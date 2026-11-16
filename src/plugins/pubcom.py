@@ -17,6 +17,8 @@ import ipaddress
 import whoisit
 import aiohttp
 import aiohttp.client_exceptions
+import contextlib
+import hashlib
 import urllib.parse
 from datetime import datetime
 from typing import Dict, Any, List
@@ -24,95 +26,597 @@ from bs4 import BeautifulSoup
 
 from . import Plugin
 from .. import __version__
-from ..helper import clean_message
+from ..helper import clean_message, is_same_subnet_bot
+from ..idrules import validate_mode_string, NICK_MODES
+from ..net import AUTO_BAN_REASON
+from ..safehttp import (
+    FetchBlocked,
+    FetchError,
+    SafeFetchPolicy,
+    SafeHttpClient,
+    resolve_public,
+)
+from ..subnet import local_subnet_id
+
+# ---------------------------------------------------------------------------
+# Public-command authorization (SAST-006).
+#
+# Authentication (identify -> canonical handle bound to the caller's full
+# nick!user@host), authorization (role checked per command, in this bot's
+# subnet and the command's channel) and execution (typed, validated IRC
+# payloads) are separate steps.  Nothing privileged runs on "is identified"
+# alone.
+#
+# Channel enablement: commands are only answered in channels listed in
+# config["pubcom"]["channels"] (case-insensitive) that are also active
+# channels of this bot's subnet.  No list -> pubcom is disabled everywhere.
+# ---------------------------------------------------------------------------
+ROLE_CHANOP = "chanop"   # global +o/+A/+n, or channel +o on the command's channel
+ROLE_ADMIN = "admin"     # +A (global or this subnet), as partyline .restart
+PORTSCAN_COOLDOWN_SECONDS = 60
+
+# Privileged public command -> required role.  Anything not listed here and
+# not in the public map is an unknown command and is ignored.
+PRIVILEGED_COMMANDS: dict[str, str] = {
+    '!op': ROLE_CHANOP,
+    '!deop': ROLE_CHANOP,
+    '!voice': ROLE_CHANOP,
+    '!devoice': ROLE_CHANOP,
+    '!kick': ROLE_CHANOP,
+    '!ban': ROLE_CHANOP,
+    '!mode': ROLE_CHANOP,
+    '!portscan': ROLE_CHANOP,
+    '!rehash': ROLE_ADMIN,
+    '!restart': ROLE_ADMIN,
+}
+
+# Public commands that need one argument; without it the bot prints usage
+# instead of looking up an empty name (PLG-9).
+_ARG_REQUIRED: dict[str, str] = {
+    **{f'!{t}': '<domain>' for t in
+       ('a', 'aaaa', 'ptr', 'mx', 'ns', 'dmarc', 'spf', 'dkim', 'soa', 'srv', 'caa', 'txt')},
+    '!ptr6': '<ipv6>',
+}
+
+_CTRL = r'\x00-\x20\x7f'
+CHANNEL_RE = re.compile(r'^[#&][^\x00-\x20\x07,:\x7f]{1,49}$')
+NICK_RE = re.compile(r'^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]{0,31}$')
+MASK_RE = re.compile(rf'^[^{_CTRL},!@:][^{_CTRL},!@]{{0,63}}![^{_CTRL},!@]{{1,64}}@[^{_CTRL},!@]{{1,128}}$')
+MODE_FLAGS_RE = re.compile(r'^[+-][A-Za-z+-]{1,15}$')
+MODE_PARAM_RE = re.compile(rf'^[^{_CTRL},:][^{_CTRL},]{{0,127}}$')
+MAX_MODE_PARAMS = 4
+KICK_REASON_MAX = 200
+_RFC1459_FOLD = str.maketrans('[]\\~', '{}|^')
+
+
+def valid_channel(name: str) -> bool:
+    return bool(name) and CHANNEL_RE.match(name) is not None
+
+
+def valid_nick(nick: str) -> bool:
+    return bool(nick) and NICK_RE.match(nick) is not None
+
+
+def valid_mask(mask: str) -> bool:
+    return bool(mask) and MASK_RE.match(mask) is not None
+
+
+def parse_mode_args(arg: str) -> str | None:
+    """Validate '!mode' input; return the normalized modes string or None.
+
+    Shape: <[+-]flags> [param ...] with at most MAX_MODE_PARAMS params,
+    no control characters, commas or ':'-prefixed (trailing) params.
+    """
+    if not arg or re.search(r'[\x00-\x08\x0a-\x1f\x7f]', arg):
+        return None
+    tokens = arg.split()
+    if not tokens or not MODE_FLAGS_RE.match(tokens[0]):
+        return None
+    if not any(c.isalpha() for c in tokens[0]):
+        return None
+    params = tokens[1:]
+    if len(params) > MAX_MODE_PARAMS:
+        return None
+    if not all(MODE_PARAM_RE.match(p) for p in params):
+        return None
+    return " ".join(tokens)
+
+
+def clean_reason(reason: str) -> str:
+    reason = re.sub(r'[\x00-\x1f\x7f]', ' ', reason or '').strip()
+    return reason[:KICK_REASON_MAX]
+
+# ---------------------------------------------------------------------------
+# Outbound HTTP policy (SAST-008). Every request made by this plugin goes
+# through one SafeHttpClient: redirects re-validated per hop, DNS pinned to
+# the dialled address, internal destinations denied, bodies bounded.
+# ---------------------------------------------------------------------------
+# IRC-13: !whois uses whoisit (RDAP), which needs IANA bootstrap data first.
+RDAP_BOOTSTRAP_TIMEOUT = 15.0   # seconds for the bootstrap download
+RDAP_RETRY_SECONDS = 60.0       # wait after a failed bootstrap before retrying
+
+PUBCOM_FETCH_POLICY = SafeFetchPolicy(
+    schemes=frozenset({'http', 'https'}),
+    ports=frozenset({80, 443, 8080, 8443}),
+    max_redirects=3,
+    max_bytes=4_194_304,        # hard ceiling for any single response
+    total_timeout=30.0,         # hard ceiling; per-call budgets are lower
+    connect_timeout=5.0,
+    max_concurrency=4,
+    max_waiters=8,
+    user_agent=f"WBS/{__version__}",
+)
+PAGE_MAX_BYTES = 524_288        # !website / !youtube / !tech (truncated)
+FEED_MAX_BYTES = 2_097_152      # RSS/Atom feeds (truncated)
+API_MAX_BYTES = 4_194_304       # JSON APIs (strict: oversize is an error)
+
+# Exact hostnames only: no substring/suffix matching.
+CVE_HOSTS = frozenset({'cve.circl.lu'})
+EPSS_HOSTS = frozenset({'api.first.org'})
+COINGECKO_HOSTS = frozenset({'api.coingecko.com'})
+TREND_HOSTS = frozenset({'intel.intruder.io'})
+NEWS_FEEDS = (
+    "https://news.ycombinator.com/rss",
+    "https://techcrunch.com/feed/",
+    "http://www.theregister.com/headlines.atom",
+    "https://lifehacker.com/rss",  # Fixed: was /feed/rss
+    "https://www.bleepingcomputer.com/feed/",
+)
+NEWS_HOSTS = frozenset(urllib.parse.urlsplit(u).hostname for u in NEWS_FEEDS)
+YOUTUBE_HOSTS = frozenset({
+    'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com',
+    'youtu.be', 'consent.youtube.com',
+})
+# Hosts a user may *submit* to !youtube (redirects may still reach
+# consent.youtube.com, which is in YOUTUBE_HOSTS).
+YOUTUBE_INPUT_HOSTS = YOUTUBE_HOSTS - {'consent.youtube.com'}
+
+
+class PubcomFetchError(aiohttp.ClientError):
+    """Safe-fetch failure surfaced through the existing ClientError paths."""
+
+    def __init__(self, message: str, *, blocked: bool = False):
+        super().__init__(message)
+        self.blocked = blocked
+
+
+class _FetchedResponse:
+    """Minimal aiohttp-response lookalike over a bounded FetchResult."""
+
+    def __init__(self, result):
+        self._result = result
+        self.status = result.status
+        self.headers = result.headers
+        self.url = result.url
+
+    async def text(self) -> str:
+        return self._result.text()
+
+    async def json(self):
+        return self._result.json()
+
 
 class pubcomPlugin(Plugin):
     name    = "pubcom"
     version = "0.1.0"
 
-    def __init__(self, core):
+    def __init__(self, core, http: SafeHttpClient | None = None):
         super().__init__(core)
         self.auth_sessions = {}
         self.auth_timeout = 43200
-        self.http_session = None
+        self._epoch = 0     # bumped per IRC connection; sessions are bound to it
+        self.http = http
+        self._rdap_lock = asyncio.Lock()
+        self._rdap_failed_at = None     # monotonic time of the last failed bootstrap
+        self._rdap_error = ""
+        self._rdap_task = None
+        self._portscan_last_run: dict[str, float] = {}
     
     async def load(self):
         """Initialize plugin and register timers"""
         await super().load()
-        self.http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
-            headers={'User-Agent': f"WBS/{__version__}"}
-        )
+        if self.http is None:
+            self.http = SafeHttpClient(PUBCOM_FETCH_POLICY)
         self.dns_resolver = aiodns.DNSResolver()
+        # IRC-13: !whois needs whoisit's RDAP bootstrap data.  Fetched in the
+        # background so a slow or offline IANA never delays startup; a failure
+        # is retried on the next !whois (see _ensure_rdap).
+        self._rdap_task = asyncio.create_task(self._ensure_rdap())
         self.log.info(f"Plugin {self.name} {self.version} loaded")
     
     async def unload(self):
         """Unload plugin and unregister timers"""
         self.auth_sessions.clear()
-        if self.http_session:
-            await self.http_session.close()
+        self._portscan_last_run.clear()
+        if self._rdap_task is not None:
+            self._rdap_task.cancel()
+            self._rdap_task = None
+        if self.http is not None:
+            await self.http.close()
+            self.http = None
         await super().unload()
         self.log.info("Pubcom plugin unloaded")
 
-    # Helper methods
-    def check_auth(self, nick: str) -> bool:
-        """Check if user is authenticated"""
-        nick_lower = nick.lower()
-        if nick_lower in self.auth_sessions:
-            elapsed = time.time() - self.auth_sessions[nick_lower]
-            if elapsed < self.auth_timeout:
-                return True
+    async def _ensure_rdap(self) -> str:
+        """Make sure whoisit has its RDAP bootstrap data (IRC-13).
+
+        Returns "" when ready, else a short reason for the channel.  The
+        download has RDAP_BOOTSTRAP_TIMEOUT seconds; after a failure the next
+        attempt waits RDAP_RETRY_SECONDS so a public command cannot hammer
+        IANA while the bot is offline.
+        """
+        if whoisit.is_bootstrapped():
+            return ""
+        async with self._rdap_lock:
+            if whoisit.is_bootstrapped():
+                return ""
+            now = time.monotonic()
+            if self._rdap_failed_at is not None and now - self._rdap_failed_at < RDAP_RETRY_SECONDS:
+                return self._rdap_error
+            try:
+                await asyncio.wait_for(whoisit.bootstrap_async(), RDAP_BOOTSTRAP_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                self._rdap_error = (f"the RDAP bootstrap service did not answer within "
+                                    f"{RDAP_BOOTSTRAP_TIMEOUT:g}s")
+            except Exception as e:
+                self._rdap_error = f"cannot load RDAP bootstrap data ({type(e).__name__}: {e})"
             else:
-                del self.auth_sessions[nick_lower]
+                self._rdap_failed_at = None
+                self._rdap_error = ""
+                self.log.info("pubcom: RDAP bootstrap data loaded")
+                return ""
+            self._rdap_failed_at = time.monotonic()
+            self.log.warning("pubcom: %s", self._rdap_error)
+            return self._rdap_error
+
+    @contextlib.asynccontextmanager
+    async def _http_get(self, url: str, *, hosts=None, timeout: float = 10,
+                        max_bytes: int = API_MAX_BYTES, truncate: bool = False,
+                        method: str = "GET"):
+        """Policy-bound fetch; raises PubcomFetchError (an aiohttp.ClientError).
+
+        ``hosts`` is an exact-hostname allowlist applied to every hop; None
+        means any public destination.
+        """
+        if self.http is None:
+            raise PubcomFetchError("HTTP client not initialised")
+        try:
+            result = await self.http.fetch(
+                url, method=method, allowed_hosts=hosts, timeout=timeout,
+                max_bytes=max_bytes, truncate=truncate,
+            )
+        except FetchError as e:
+            raise PubcomFetchError(str(e), blocked=isinstance(e, FetchBlocked)) from None
+        yield _FetchedResponse(result)
+
+    # ------------------------------------------------------------------
+    # Authentication / session binding (SAST-006, SAST-007).
+    #
+    # A nickname is never proof of identity.  `identify` binds a session to:
+    #   * the canonical handle (stored spelling),
+    #   * the caller's full nick!user@host (connection identity),
+    #   * the services account from the IRCv3 account tag, when the server
+    #     supplies one (None otherwise; must stay identical for the session),
+    #   * a fingerprint of the stored credential at identify time,
+    #   * the IRC connection epoch of this bot.
+    #
+    # Every privileged command re-verifies all of the above and re-reads the
+    # user record, so a password change, delete or lock revokes the
+    # session on the next command (a handle that no longer resolves is
+    # treated as revoked).  Lifecycle events end sessions:
+    #   * QUIT of the nick, or of the bot itself;
+    #   * NICK: the session is NOT carried over to the new nick (intentional:
+    #     a nick change cannot be tied to the same verified identity without
+    #     account tracking, so the user re-identifies).  A nick changing *to*
+    #     a session's nick also clears that stale entry;
+    #   * PART/KICK that leaves the nick on no channel the bot can see (the
+    #     bot would no longer observe its QUIT/NICK);
+    #   * bot DISCONNECT and a new connection (READY);
+    #   * expiry (auth_timeout) and any failed re-identify.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def irc_casefold(text: str) -> str:
+        """RFC 1459 casemapping: A-Z/[]\\~ fold to a-z/{}|^."""
+        return (text or '').lower().translate(_RFC1459_FOLD)
+
+    def _key(self, nick: str) -> str:
+        return self.irc_casefold(nick)
+
+    def _norm_hostmask(self, hostmask: str) -> str:
+        nick, sep, rest = (hostmask or '').partition('!')
+        return f"{self.irc_casefold(nick)}{sep}{rest.lower()}"
+
+    @staticmethod
+    def _norm_account(account) -> str | None:
+        """IRCv3 account tag value, or None when absent / logged out ('*')."""
+        if not isinstance(account, str):
+            return None
+        account = account.strip()
+        if not account or account == '*':
+            return None
+        return pubcomPlugin.irc_casefold(account)
+
+    @staticmethod
+    def _cred_fingerprint(stored_hash) -> str | None:
+        if not stored_hash:
+            return None
+        return hashlib.sha256(str(stored_hash).encode()).hexdigest()
+
+    async def _guard_blocked(self, guard, host: str) -> bool:
+        """N-01: True while the guard holds an automatic auth_failure block for
+        `host` (the address `record_failure` was keyed on).  Fails closed, like
+        the DCC blocklist check."""
+        try:
+            entry = await guard.denied_by(ip=host, host=host)
+        except Exception as exc:
+            self.log.error("pubcom: blocklist check failed for %s: %s", host, exc)
+            return True
+        return entry is not None and entry.reason == AUTO_BAN_REASON
+
+    def _drop(self, nick: str, why: str) -> bool:
+        if self.auth_sessions.pop(self._key(nick), None) is not None:
+            self.log.info("pubcom session for %s dropped: %s", nick, why)
+            return True
         return False
-    
+
+    def _drop_all(self, why: str) -> None:
+        if self.auth_sessions:
+            self.log.info("pubcom: %d session(s) dropped: %s", len(self.auth_sessions), why)
+        self.auth_sessions.clear()
+
+    def _bind_session(self, nick: str, hostmask: str, handle: str,
+                      account=None, cred: str | None = None) -> None:
+        self.auth_sessions[self._key(nick)] = {
+            'handle': handle,
+            'hostmask': self._norm_hostmask(hostmask),
+            'account': self._norm_account(account),
+            'cred': cred,
+            'epoch': self._epoch,
+            'ts': time.time(),
+        }
+
+    def session_handle(self, nick: str, hostmask: str, account=None) -> str | None:
+        """Canonical handle bound to this exact connection identity, else None.
+
+        Synchronous identity check only (no DB); privileged dispatch uses
+        verify_session(), which also re-verifies the user record.
+        """
+        if not nick or not hostmask:
+            return None
+        key = self._key(nick)
+        sess = self.auth_sessions.get(key)
+        if sess is None:
+            return None
+        if not isinstance(sess, dict) or not {'handle', 'hostmask', 'ts'} <= sess.keys():
+            del self.auth_sessions[key]
+            return None
+        if time.time() - sess['ts'] >= self.auth_timeout:
+            self._drop(nick, "expired")
+            return None
+        if sess.get('epoch', self._epoch) != self._epoch:
+            self._drop(nick, "IRC connection changed")
+            return None
+        if sess['hostmask'] != self._norm_hostmask(hostmask):
+            # Same nick, different connection identity: never inherit.
+            self._drop(nick, "hostmask mismatch")
+            return None
+        if sess.get('account') != self._norm_account(account):
+            # Account changed (logout, other account, or tag appeared/vanished).
+            self._drop(nick, "account mismatch")
+            return None
+        return sess['handle']
+
+    async def verify_session(self, nick: str, hostmask: str, account=None) -> str | None:
+        """session_handle() plus revocation checks against the user record:
+        the user must still exist under the bound handle, be unlocked, and
+        hold the same credential that was verified at identify time."""
+        handle = self.session_handle(nick, hostmask, account)
+        if handle is None:
+            return None
+        sess = self.auth_sessions.get(self._key(nick)) or {}
+        try:
+            user = await self.core.user.get(handle)
+        except Exception as e:
+            self.log.error("pubcom: session re-verify failed for %s: %s", handle, e)
+            return None   # fail closed, keep session for a transient error
+        if user is None or getattr(user, 'is_locked', False):
+            self._drop(nick, "user revoked")
+            return None
+        if self._cred_fingerprint(user.password) != sess.get('cred'):
+            self._drop(nick, "credential changed")
+            return None
+        return handle
+
+    def check_auth(self, nick: str, hostmask: str = '', account=None) -> bool:
+        """True if nick has a live session bound to hostmask (no role check)."""
+        return self.session_handle(nick, hostmask, account) is not None
+
+    def _is_self(self, target: str) -> bool:
+        botname = getattr(self.core, 'botname', None) or ''
+        return bool(botname) and self.irc_casefold(target) == self.irc_casefold(botname)
+
+    def _visible_nicks(self, exclude_channel: str | None = None) -> set[str] | None:
+        """Casefolded nicks on the bot's tracked channels, or None if the
+        core exposes no live channel state (visibility unknown)."""
+        chans = getattr(self.core, 'channels', None)
+        if not isinstance(chans, dict):
+            return None
+        skip = (exclude_channel or '').lower()
+        seen: set[str] = set()
+        for name, chan in chans.items():
+            if str(name).lower() == skip:
+                continue
+            for n in getattr(chan, 'users', None) or ():
+                seen.add(self.irc_casefold(n))
+        return seen
+
+    def _prune_unobservable(self, nicks, exclude_channel: str | None) -> None:
+        visible = self._visible_nicks(exclude_channel)
+        if visible is None:
+            return
+        for nick in list(nicks):
+            if self._key(nick) not in visible:
+                self._drop(nick, "no longer on a shared channel")
+
+    async def on_NICK(self, event):
+        old = event.get('old_nick') or ''
+        new = event.get('new_nick') or ''
+        if old:
+            self._drop(old, "nick change (re-identify required)")
+        if new:
+            self._drop(new, "nick taken by another client")
+
+    async def on_QUIT(self, event):
+        nick = event.get('nick') or ''
+        if nick and self._is_self(nick):
+            self._drop_all("bot quit")
+        elif nick:
+            self._drop(nick, "quit")
+
+    async def on_PART(self, event):
+        nick = event.get('nick') or ''
+        channel = event.get('channel') or ''
+        if self._is_self(nick):
+            self._prune_unobservable(list(self.auth_sessions), channel)
+        elif nick and self._key(nick) in self.auth_sessions:
+            self._prune_unobservable([nick], channel)
+
+    async def on_KICK(self, event):
+        nick = event.get('kicked') or ''
+        channel = event.get('channel') or ''
+        if self._is_self(nick):
+            self._prune_unobservable(list(self.auth_sessions), channel)
+        elif nick and self._key(nick) in self.auth_sessions:
+            self._prune_unobservable([nick], channel)
+
+    async def on_DISCONNECT(self, event):
+        self._epoch += 1
+        self._drop_all("IRC disconnect")
+
+    async def on_READY(self, event):
+        self._epoch += 1
+        self._drop_all("new IRC connection")
+
+    # ------------------------------------------------------------------
+    # Authorization
+    # ------------------------------------------------------------------
+    def _subnet(self) -> int:
+        return local_subnet_id(getattr(self.core, 'config', None))
+
+    async def authorize(self, handle: str, role: str, channel: str) -> bool:
+        """Does `handle` hold `role` for `channel` on this bot's subnet?
+
+        Same policy as partyline: +o for channel-op actions (global grant, or
+        a channel grant on exactly this channel; +A/+n imply op rights,
+        IRC-14), +A for admin actions.  All
+        checks go through UserManager.matchattr (active user, subnet scope).
+        """
+        if not handle:
+            return False
+        user = self.core.user
+        sid = self._subnet()
+        if role == ROLE_ADMIN:
+            return await user.matchattr(handle, '+A', subnet_id=sid)
+        if role == ROLE_CHANOP:
+            # +A/+n imply channel op rights (operator decision, IRC-14).
+            for spec in ('+o', '+A', '+n'):
+                if await user.matchattr(handle, spec, subnet_id=sid):
+                    return True
+            for chan in dict.fromkeys((channel, channel.lower())):
+                if await user.matchattr(handle, '*|o', chan, subnet_id=sid):
+                    return True
+            return False
+        return False  # unknown role: deny
+
+    def _enabled_channels(self) -> set[str]:
+        cfg = (getattr(self.core, 'config', None) or {}).get('pubcom') or {}
+        chans = cfg.get('channels') if isinstance(cfg, dict) else None
+        if not isinstance(chans, (list, tuple)):
+            return set()
+        return {c.lower() for c in chans if isinstance(c, str) and valid_channel(c)}
+
     async def is_pubcom_enabled(self, channel: str) -> bool:
-        """Check if pubcom is enabled for channel"""
-        chan_settings = await self.core.chan.get_channel(channel)
-        return chan_settings and chan_settings.get('pubcom', False)
-    
+        """Pubcom answers only in channels listed in config pubcom.channels
+        that are also active channels of this bot's subnet."""
+        if not valid_channel(channel or ''):
+            return False
+        if channel.lower() not in self._enabled_channels():
+            return False
+        try:
+            active = await self.core.chan.getchans(subnet_id=self._subnet())
+        except Exception as e:
+            self.log.error("pubcom: channel lookup failed for %s: %s", channel, e)
+            return False
+        return channel.lower() in {c.lower() for c in active or []}
+
     # Authentication handlers
     async def on_PRIVMSG(self, event):
-        """Handle private messages for authentication"""
-        nick = event['nick']
-        text = event['text'].strip()
-        
-        if not text.startswith('identify'):
+        """Handle `/msg <bot> identify [handle] <password>`."""
+        nick = event.get('nick') or ''
+        hostmask = event.get('host') or ''
+        parts = (event.get('text') or '').strip().split()
+
+        if not parts or parts[0].lower() != 'identify':
             return
-        
-        parts = text.split()
-        if len(parts) < 2:
-            await self.send_notice(nick, f"Usage: /msg {self.core.botnick} identify [handle] <password>")
+        # PLG-9: this plugin owns `identify`; the core must not also answer
+        # "Unknown command" / "Access denied" to it.
+        event['handled'] = True
+        if not valid_nick(nick) or '!' not in hostmask:
             return
-        
-        # Parse identify command
+
         if len(parts) == 2:
-            handle = event['host']  # Use their nick as handle
-            password = parts[1]
+            handle, password = nick, parts[1]
+        elif len(parts) == 3:
+            handle, password = parts[1], parts[2]
         else:
-            handle = parts[1]
-            password = parts[2]
-        
-        # Verify credentials
-        if await self.core.user.verify_password(handle, password):
-            self.auth_sessions[nick.lower()] = time.time()
+            await self.send_notice(
+                nick, f"Usage: /msg {self.core.botname} identify [handle] <password>")
+            return
+
+        # Any identify attempt drops the nick's current session first.
+        self._drop(nick, "re-identify")
+
+        canonical = await self.core.user.resolve_handle(handle)
+        # F-04: failed identifies are counted per (host, target handle) in the
+        # same AccessGuard the partyline/botlink listener uses.  A locked pair
+        # is refused with the ordinary failure reply (no lock-state oracle) and
+        # the password is not even checked.
+        guard = getattr(self.core, 'guard', None)
+        gkey = hostmask.rsplit('@', 1)[-1].lower() or 'unknown'
+        gname = canonical or handle
+        if guard is not None and (guard.handle_locked(gkey, gname)
+                                  or await self._guard_blocked(guard, gkey)):
+            self.log.warning("pubcom: identify for %r refused from %s (locked out)",
+                             gname, hostmask)
+            await self.send_notice(nick, "Invalid credentials!")
+            return
+
+        if canonical and await self.core.user.verify_password(canonical, password):
+            record = await self.core.user.get(canonical)
+            cred = self._cred_fingerprint(getattr(record, 'password', None))
+            if record is None or cred is None:
+                await self.send_notice(nick, "Invalid credentials!")
+                return
+            if guard is not None:
+                guard.record_success(gkey, gname)
+            self._bind_session(nick, hostmask, canonical,
+                               account=event.get('account'), cred=cred)
+            self.log.info("pubcom: %s identified as %s", hostmask, canonical)
             await self.send_notice(nick, "Logged in successfully!")
         else:
+            self.log.info("pubcom: failed identify from %s", hostmask)
+            if guard is not None:
+                try:
+                    await guard.record_failure(gkey, gname, peer=True)
+                except Exception as exc:
+                    self.log.error("pubcom: record_failure failed: %s", exc)
             await self.send_notice(nick, "Invalid credentials!")
-    
+
     # Public message handlers
-    async def on_PUBMSG(self, event):
-        """Handle public channel messages"""
-        text = event['text'].strip()
-        channel = event['channel']
-        nick = event['nick']
-        uhost = event.get('uhost', '')
-        
-        #if not await self.is_pubcom_enabled(channel):
-        #    return
-        
-        # Route commands
-        cmd_map = {
+    def _public_commands(self) -> dict:
+        return {
             '!info': self.cmd_info,
             '!identify': self.cmd_identify_help,
             '!version': self.cmd_version,
@@ -123,7 +627,6 @@ class pubcomPlugin(Plugin):
             '!lastcve': self.cmd_lastcve,
             '!epss': self.cmd_epss,
             '!whois': self.cmd_whois,
-            '!portscan': self.cmd_portscan,
             '!youtube': self.cmd_youtube,
             '!a': self.cmd_a,
             '!aaaa': self.cmd_aaaa,
@@ -145,43 +648,99 @@ class pubcomPlugin(Plugin):
             '!asn': self.cmd_asn,
             '!trend': self.cmd_trend,
             '!crypto': self.cmd_crypto,
-            '!op': self.cmd_op,
-            '!deop': self.cmd_deop,
-            '!voice': self.cmd_voice,
-            '!devoice': self.cmd_devoice,
-            '!kick': self.cmd_kick,
-            '!ban': self.cmd_ban,
-            '!mode': self.cmd_mode,
-            '!rehash': self.cmd_rehash,
-            '!restart': self.cmd_restart,
-            '!jump': self.cmd_jump,
         }
-        
+
+    def _privileged_commands(self) -> dict:
+        return {
+            '!op': self.priv_op,
+            '!deop': self.priv_deop,
+            '!voice': self.priv_voice,
+            '!devoice': self.priv_devoice,
+            '!kick': self.priv_kick,
+            '!ban': self.priv_ban,
+            '!mode': self.priv_mode,
+            '!portscan': self.cmd_portscan,
+            '!rehash': self.priv_rehash,
+            '!restart': self.priv_restart,
+        }
+
+    async def on_PUBMSG(self, event):
+        """Handle public channel messages: enablement -> authn -> authz -> run."""
+        text = (event.get('text') or '').strip()
+        channel = event.get('channel') or ''
+        nick = event.get('nick') or ''
+        hostmask = event.get('host') or ''
+
         parts = text.split(maxsplit=1)
+        if not parts:
+            return
         cmd = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
-        handler = cmd_map.get(cmd)
-        if handler:
-            await handler(nick, uhost, channel, arg)
-        #for cmd, handler in cmd_map.items():
-        #    if text.startswith(cmd):
-        #        arg = text[len(cmd):].strip()
-        #        await handler(nick, uhost, channel, arg)
-        #        break
+
+        public = self._public_commands()
+        privileged = self._privileged_commands()
+        if cmd not in public and cmd not in privileged:
+            return  # unknown commands are ignored
+
+        if not await self.is_pubcom_enabled(channel):
+            return
+
+        if cmd in public:
+            usage = _ARG_REQUIRED.get(cmd)
+            if usage and not arg:       # PLG-9: usage instead of a lookup of ''
+                await self.send_privmsg(channel, f"Usage: {cmd} {usage}")
+                return
+            await public[cmd](nick, hostmask, channel, arg)
+            return
+
+        await self._dispatch_privileged(cmd, privileged[cmd], nick, hostmask, channel, arg,
+                                        account=event.get('account'))
+
+    async def _dispatch_privileged(self, cmd, handler, nick, hostmask, channel, arg,
+                                   account=None):
+        role = PRIVILEGED_COMMANDS.get(cmd)
+        if role is None:
+            return
+        handle = await self.verify_session(nick, hostmask, account)
+        if handle is None:
+            await self.send_notice(nick, "You must identify first")
+            return
+        if not await self.authorize(handle, role, channel):
+            self.log.warning("pubcom: denied %s for %s (%s) in %s (need %s)",
+                             cmd, handle, hostmask, channel, role)
+            await self.send_notice(nick, f"Access denied for {cmd}.")
+            return
+        if cmd == '!portscan':
+            key = channel.lower()
+            now = time.monotonic()
+            last_run = self._portscan_last_run.get(key)
+            if last_run is not None and now - last_run < PORTSCAN_COOLDOWN_SECONDS:
+                remaining = max(1, int(PORTSCAN_COOLDOWN_SECONDS - (now - last_run) + 0.999))
+                await self.send_privmsg(
+                    channel, f"Port scan cooldown active; try again in {remaining}s.")
+                return
+            # Reserve before awaiting the scan so concurrent calls cannot bypass
+            # the per-channel cooldown.
+            self._portscan_last_run[key] = now
+        await handler(handle, nick, channel, arg)
     
     # Command implementations
     async def cmd_info(self, nick, uhost, channel, arg):
         """Display available commands"""
         commands = "!version !uptime !time !op !deop !voice !devoice !kick !ban !mode !crypto " \
-                   "!rehash !restart !jump !news !cve !epss !trend !lastcve !whois !portscan !youtube !dmarc !spf !dkim " \
+                   "!rehash !restart !news !cve !epss !trend !lastcve !whois !portscan !youtube !dmarc !spf !dkim " \
                    "!srv !soa !txt !caa !a !aaaa !ptr !ptr6 !mx !ns"
         c2 = "!website !waf !tech !geoip !asn"
         await self.send_privmsg(channel, f"Valid commands are: {commands}")
         await self.send_privmsg(channel, f"{c2}")
+        await self.send_privmsg(
+            channel,
+            "!portscan requires an identified operator and has a 60-second per-channel cooldown.",
+        )
     
     async def cmd_identify_help(self, nick, uhost, channel, arg):
         """Show identify help"""
-        await self.send_notice(nick, f"To identify: /msg {self.core.botnick} identify [handle] <password>")
+        await self.send_notice(nick, f"To identify: /msg {self.core.botname} identify [handle] <password>")
     
     async def cmd_version(self, nick, uhost, channel, arg):
         """Show bot version"""
@@ -213,7 +772,7 @@ class pubcomPlugin(Plugin):
         
         try:
             url = f'https://cve.circl.lu/api/cve/{cve_id}'
-            async with self.http_session.get(url) as resp:
+            async with self._http_get(url, hosts=CVE_HOSTS) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     
@@ -350,7 +909,7 @@ class pubcomPlugin(Plugin):
         try:
             # Use FIRST.org EPSS API
             url = f'https://api.first.org/data/v1/epss?cve={cve_id}'
-            async with self.http_session.get(url) as resp:
+            async with self._http_get(url, hosts=EPSS_HOSTS) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     
@@ -459,7 +1018,7 @@ class pubcomPlugin(Plugin):
         
         try:
             url = f"https://api.coingecko.com/api/v3/simple/price?ids={crypto_id}&vs_currencies={fiat_id}"
-            async with self.http_session.get(url, timeout=10) as resp:
+            async with self._http_get(url, hosts=COINGECKO_HOSTS, timeout=10) as resp:
                 if resp.status != 200:
                     await self.send_privmsg(channel, "Error fetching crypto data")
                     return
@@ -482,122 +1041,122 @@ class pubcomPlugin(Plugin):
             self.log.error(f"Crypto lookup error: {e}")
             await self.send_privmsg(channel, "Error fetching crypto price")
     
-    # Channel management commands (require auth)
-    async def cmd_op(self, nick, uhost, channel, arg):
-        """Give op to user"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+    # ------------------------------------------------------------------
+    # Privileged channel/admin commands (SAST-006).
+    #
+    # Only reachable through _dispatch_privileged(), which has already
+    # resolved the caller's bound canonical handle and checked the role in
+    # PRIVILEGED_COMMANDS for this bot's subnet and this channel.  Every
+    # argument is validated before anything is queued for IRC.
+    # ------------------------------------------------------------------
+    async def _priv_user_mode(self, handle, nick, channel, arg, mode):
+        target = arg.split()[0] if arg.strip() else nick
+        if not valid_nick(target):
+            await self.send_notice(nick, "Invalid nick.")
             return
-        
-        target = arg.strip() if arg else nick
-        await self.send_mode(channel, '+o', target)
-    
-    async def cmd_deop(self, nick, uhost, channel, arg):
-        """Remove op from user"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+        if mode == '-o' and self._is_self(target):
+            await self.send_notice(nick, "Refusing to deop myself.")
             return
-        
-        target = arg.strip() if arg else nick
-        await self.send_mode(channel, '-o', target)
-    
-    async def cmd_voice(self, nick, uhost, channel, arg):
-        """Give voice to user"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+        if not await self._may_mode_bot(handle, nick, channel, mode, target):
             return
-        
-        target = arg.strip() if arg else nick
-        await self.send_mode(channel, '+v', target)
-    
-    async def cmd_devoice(self, nick, uhost, channel, arg):
-        """Remove voice from user"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
-            return
-        
-        target = arg.strip() if arg else nick
-        await self.send_mode(channel, '-v', target)
-    
-    async def cmd_kick(self, nick, uhost, channel, arg):
-        """Kick user from channel"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
-            return
-        
+        self.log.info("pubcom %s by %s (%s) on %s: %s", mode, handle, nick, channel, target)
+        await self.send_mode(channel, mode, target)
+
+    async def _may_mode_bot(self, handle, nick, channel, mode, target) -> bool:
+        """NET-3: never op/mode a bot of another (or unknown) subnet."""
+        if await is_same_subnet_bot(self.core, target) is not False:
+            return True
+        self.log.warning("Denied pubcom %s by %s (%s) on %s: target %r is a bot outside "
+                         "the local subnet (or of unknown subnet scope)",
+                         mode, handle, nick, channel, target)
+        await self.send_notice(nick, f"Refused: {target} is a bot outside my subnet.")
+        return False
+
+    async def priv_op(self, handle, nick, channel, arg):
+        """!op [nick] — give op (default: caller)"""
+        await self._priv_user_mode(handle, nick, channel, arg, '+o')
+
+    async def priv_deop(self, handle, nick, channel, arg):
+        """!deop [nick] — remove op (default: caller)"""
+        await self._priv_user_mode(handle, nick, channel, arg, '-o')
+
+    async def priv_voice(self, handle, nick, channel, arg):
+        """!voice [nick] — give voice (default: caller)"""
+        await self._priv_user_mode(handle, nick, channel, arg, '+v')
+
+    async def priv_devoice(self, handle, nick, channel, arg):
+        """!devoice [nick] — remove voice (default: caller)"""
+        await self._priv_user_mode(handle, nick, channel, arg, '-v')
+
+    async def priv_kick(self, handle, nick, channel, arg):
+        """!kick <nick> [reason]"""
         parts = arg.split(maxsplit=1)
-        target = parts[0] if parts else nick
-        reason = parts[1] if len(parts) > 1 else nick
-        
-        self.core.send_irc({
-            'cmd': 'KICK',
-            'channel': channel,
-            'nick': target,
-            'reason': reason
-        })
-    
-    async def cmd_ban(self, nick, uhost, channel, arg):
-        """Ban and kick user"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+        if not parts:
+            await self.send_notice(nick, "Usage: !kick <nick> [reason]")
             return
-        
+        target = parts[0]
+        if not valid_nick(target):
+            await self.send_notice(nick, "Invalid nick.")
+            return
+        if self._is_self(target):
+            await self.send_notice(nick, "Refusing to kick myself.")
+            return
+        reason = clean_reason(parts[1] if len(parts) > 1 else '') or f"Requested by {nick}"
+        self.log.info("pubcom kick by %s (%s) on %s: %s", handle, nick, channel, target)
+        await self.send_kick(channel, target, reason)
+
+    async def priv_ban(self, handle, nick, channel, arg):
+        """!ban <nick|nick!user@host> [reason] — ban, and kick when given a nick"""
         parts = arg.split(maxsplit=1)
-        target = parts[0] if parts else nick
-        reason = parts[1] if len(parts) > 1 else nick
-        
-        # Get target hostmask
-        # Set ban mode
-        # Kick user
-        await self.send_mode(channel, '+b', f'*!*@{target}')
-        self.core.send_irc({
-            'cmd': 'KICK',
-            'channel': channel,
-            'nick': target,
-            'reason': reason
-        })
-    
-    async def cmd_mode(self, nick, uhost, channel, arg):
-        """Set channel mode"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+        if not parts:
+            await self.send_notice(nick, "Usage: !ban <nick|mask> [reason]")
             return
-        
-        self.core.send_irc({
-            'cmd': 'MODE',
-            'channel': channel,
-            'modes': arg
-        })
-    
-    async def cmd_rehash(self, nick, uhost, channel, arg):
-        """Rehash bot configuration"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
+        target = parts[0]
+        if valid_mask(target):
+            mask, kick_nick = target, None
+        elif valid_nick(target):
+            mask, kick_nick = f"{target}!*@*", target
+        else:
+            await self.send_notice(nick, "Invalid nick or mask.")
             return
-        
+        if set(mask) <= set('*?!@.'):
+            await self.send_notice(nick, "Refusing to ban everyone.")
+            return
+        if kick_nick and self._is_self(kick_nick):
+            await self.send_notice(nick, "Refusing to ban myself.")
+            return
+        reason = clean_reason(parts[1] if len(parts) > 1 else '') or f"Banned by {nick}"
+        self.log.info("pubcom ban by %s (%s) on %s: %s", handle, nick, channel, mask)
+        await self.send_mode(channel, '+b', mask)
+        if kick_nick:
+            await self.send_kick(channel, kick_nick, reason)
+
+    async def priv_mode(self, handle, nick, channel, arg):
+        """!mode <[+-]modes> [params] — set modes on this channel only"""
+        modes = parse_mode_args(arg)
+        if modes is None:
+            await self.send_notice(nick, "Usage: !mode <+/-modes> [params]")
+            return
+        self.log.info("pubcom mode by %s (%s) on %s: %s", handle, nick, channel, modes)
+        err, changes = validate_mode_string(modes)
+        targets = (modes.split()[1:] if err else
+                   [t for _, letter, t in changes if letter in NICK_MODES and t])
+        for target in targets:
+            if not await self._may_mode_bot(handle, nick, channel, "mode", target):
+                return
+        await self.send_mode(channel, modes)
+
+    async def priv_rehash(self, handle, nick, channel, arg):
+        """!rehash — soft rehash (admin)"""
+        self.log.info("pubcom rehash by %s (%s) in %s", handle, nick, channel)
         await self.send_privmsg(channel, "Rehashing...")
-        self.core.event_q.put({'cmd': 'REHASH'})
-    
-    async def cmd_restart(self, nick, uhost, channel, arg):
-        """Restart bot"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
-            return
-        
+        await self.core.do_rehash()
+
+    async def priv_restart(self, handle, nick, channel, arg):
+        """!restart — full restart (admin)"""
+        self.log.info("pubcom restart by %s (%s) in %s", handle, nick, channel)
         await self.send_privmsg(channel, "Restarting...")
-        self.core.event_q.put({'cmd': 'RESTART'})
-    
-    async def cmd_jump(self, nick, uhost, channel, arg):
-        """Jump to different server"""
-        if not self.check_auth(nick):
-            await self.send_notice(nick, "You must identify first")
-            return
-        
-        await self.send_privmsg(channel, "Jumping server...")
-        self.core.send_irc({
-            'cmd': 'JUMP',
-            'server': arg if arg else None
-        })
+        await self.core.do_restart()
     
     async def cmd_news(self, nick, uhost, channel, arg):
         """News from RSS feeds - matches original Tcl vwcknews"""
@@ -606,19 +1165,14 @@ class pubcomPlugin(Plugin):
         if arg.strip() and arg.strip().isdigit():
             num = max(1, min(10, int(arg.strip())))
         
-        rss_feeds = [
-            "https://news.ycombinator.com/rss",
-            "https://techcrunch.com/feed/",
-            "http://www.theregister.com/headlines.atom",
-            "https://lifehacker.com/rss",  # Fixed: was /feed/rss
-            "https://www.bleepingcomputer.com/feed/",
-        ]
+        rss_feeds = NEWS_FEEDS
         
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
         
         async def fetch_feed(url):
             try:
-                async with self.http_session.get(url, timeout=10) as resp:
+                async with self._http_get(url, hosts=NEWS_HOSTS, timeout=10,
+                                          max_bytes=FEED_MAX_BYTES, truncate=True) as resp:
                     if resp.status == 200:
                         data = await resp.text()
                         feed = feedparser.parse(data)
@@ -645,7 +1199,7 @@ class pubcomPlugin(Plugin):
                     link = entry.get('link', '').strip()
                     if title and link:
                         news_list.append(f"{title} - {link}")
-            except:
+            except Exception:
                 pass
         
         if not news_list:
@@ -853,7 +1407,8 @@ class pubcomPlugin(Plugin):
         url = "https://intel.intruder.io/rss/cvetrends/latest"
         
         try:
-            async with self.http_session.get(url, timeout=10) as resp:
+            async with self._http_get(url, hosts=TREND_HOSTS, timeout=10,
+                                      max_bytes=FEED_MAX_BYTES, truncate=True) as resp:
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}")
                 xml = await resp.text()
@@ -906,7 +1461,7 @@ class pubcomPlugin(Plugin):
         url = f"https://cve.circl.lu/api/last/{int(num)}"
         
         try:
-            async with self.http_session.get(url, timeout=30) as resp:
+            async with self._http_get(url, hosts=CVE_HOSTS, timeout=30) as resp:
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}")
                 data_text = await resp.text()
@@ -955,31 +1510,50 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, "No recent CVEs found.")
     
     # Utility commands (simplified)
+    def _normalize_user_url(self, arg: str) -> str:
+        url = arg.strip().split()[0] if arg.strip() else ""
+        if url and not re.match(r'^https?://', url, re.IGNORECASE):
+            url = 'https://' + url
+        return url
+
+    async def _fetch_user_page(self, channel, url, *, hosts=None, method="GET",
+                               label=None):
+        """Fetch a user-supplied URL under the public-only policy.
+
+        Returns the response lookalike, or None after reporting the error.
+        The policy check runs before any DNS lookup or socket.
+        """
+        label = label or url
+        try:
+            async with self._http_get(url, hosts=hosts, method=method, timeout=10,
+                                      max_bytes=PAGE_MAX_BYTES, truncate=True) as resp:
+                return resp
+        except PubcomFetchError as e:
+            if e.blocked:
+                self.log.warning("SSRF blocked %s in %s: %s", url, channel, e)
+            await self.send_privmsg(channel, clean_message(f"Error fetching {label}: {e}"))
+            return None
+
     async def cmd_website(self, nick, uhost, channel, arg):
         """Website title lookup"""
-        url = arg.strip()
+        url = self._normalize_user_url(arg)
         if not url:
             await self.send_privmsg(channel, "Usage: !website <url>")
             return
         
-        if not re.match(r'^https?://', url):
-            url = 'https://' + url
-        
-        try:
-            async with self.http_session.get(url, timeout=10, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    await self.send_privmsg(channel, f"Error: HTTP {resp.status}")
-                    return
-                html = await resp.text()
-        except Exception as e:
-            await self.send_privmsg(channel, f"Error fetching {url}: {e}")
+        resp = await self._fetch_user_page(channel, url)
+        if resp is None:
             return
+        if resp.status != 200:
+            await self.send_privmsg(channel, f"Error: HTTP {resp.status}")
+            return
+        html = await resp.text()
         
         title = self._extract_title(html)
         if title:
-            await self.send_privmsg(channel, f"Title: {title}")
+            await self.send_privmsg(channel, clean_message(f"Title: {title}"))
         else:
-            await self.send_privmsg(channel, f"No title found for {url}")
+            await self.send_privmsg(channel, clean_message(f"No title found for {url}"))
 
     async def cmd_youtube(self, nick, uhost, channel, arg):
         """YouTube title lookup"""  
@@ -988,26 +1562,34 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, "Usage: !youtube <url>")
             return
         
-        parsed = urllib.parse.urlparse(url)
-        if 'youtube.com' not in parsed.netloc and 'youtu.be' not in parsed.netloc:
+        # Exact host allowlist (no substring match): evil-youtube.com,
+        # youtube.com.evil.net and user@youtube.com-style tricks are refused.
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            host = (parsed.hostname or '').lower().rstrip('.')
+            bad = (parsed.scheme.lower() not in ('http', 'https')
+                   or parsed.username is not None or '@' in parsed.netloc
+                   or host not in YOUTUBE_INPUT_HOSTS)
+        except ValueError:
+            bad = True
+        if bad:
             await self.send_privmsg(channel, "Invalid YouTube URL")
             return
         
-        try:
-            async with self.http_session.get(url, timeout=10, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    await self.send_privmsg(channel, f"Error: HTTP {resp.status}")
-                    return
-                html = await resp.text()
-        except Exception as e:
-            await self.send_privmsg(channel, f"Error fetching YouTube: {e}")
+        resp = await self._fetch_user_page(channel, url, hosts=YOUTUBE_HOSTS,
+                                           label="YouTube")
+        if resp is None:
             return
+        if resp.status != 200:
+            await self.send_privmsg(channel, f"Error: HTTP {resp.status}")
+            return
+        html = await resp.text()
         
         # YouTube meta title fallback
         title = (self._extract_title(html) or
                 self._extract_meta_title(html) or
                 "No title found")
-        await self.send_privmsg(channel, f"Title: {title}")
+        await self.send_privmsg(channel, clean_message(f"Title: {title}"))
 
     async def cmd_portscan(self, nick, uhost, channel, arg):
         """Port scan - your Tcl blocks + safe Python logic"""
@@ -1028,7 +1610,7 @@ class pubcomPlugin(Plugin):
             return
         
         # Your exact private/special IP block
-        private_regex = r'^(127\..*|10\..*|192\.168\..*|172\.(1[6-9]|2[0-9]|3[0-1])\..*|169\.254\..*|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\..*|224\..*|255\.255\.255\.255|0\.0\.0\.0)$'
+        private_regex = r'^(127\..*|10\..*|192\.168\..*|172\.(1[6-9]|2[0-9]|3[0-1])\..*|169\.254\..*|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\..*|224\..*|255\.255\.255\.255|0\.0\.0\.0)$'  # noqa: E501
         if re.match(private_regex, target):
             await self.send_privmsg(channel, f"Scan denied: {target} is a private or special IP.")
             return
@@ -1046,6 +1628,22 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, "No valid ports specified")
             return
         
+        # Resolve once under the shared fetch policy (SAST-008): hostnames
+        # whose answers include any internal address, internal IP literals,
+        # IPv4-mapped/6to4/NAT64 forms and numeric shorthands are refused.
+        # Only the validated address is dialled, so DNS cannot rebind.
+        try:
+            addrs = await resolve_public(
+                ip, self.http.policy if self.http is not None else PUBCOM_FETCH_POLICY,
+                resolver=self.http.inner_resolver if self.http is not None else None)
+        except FetchBlocked:
+            await self.send_privmsg(channel, f"Scan denied: {ip} is a private or special IP.")
+            return
+        except FetchError:
+            await self.send_privmsg(channel, f"Could not resolve {ip}.")
+            return
+        dial_addr = addrs[0]
+        
         # Safe async TCP scan (max 10 concurrent)
         open_ports = []
         semaphore = asyncio.Semaphore(10)
@@ -1054,12 +1652,12 @@ class pubcomPlugin(Plugin):
             async with semaphore:
                 try:
                     _, writer = await asyncio.wait_for(
-                        asyncio.open_connection(ip, p), timeout=2
+                        asyncio.open_connection(dial_addr, p), timeout=2
                     )
                     writer.close()
                     await writer.wait_closed()
                     return p
-                except:
+                except Exception:
                     return None
         
         tasks = [check_port(p) for p in ports]
@@ -1091,17 +1689,13 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, "Usage: !waf <URL>")
             return
         
-        url = arg.strip()
-        if not re.match(r'^https?://', url):
-            url = 'https://' + url
+        url = self._normalize_user_url(arg)
         
-        try:
-            # HEAD only (-nobody equivalent)
-            async with self.http_session.head(url, timeout=10, allow_redirects=True) as resp:
-                headers = str(resp.headers).lower()
-        except Exception as e:
-            await self.send_privmsg(channel, f"Error accessing {url}: {e}")
+        # HEAD only (-nobody equivalent)
+        resp = await self._fetch_user_page(channel, url, method="HEAD")
+        if resp is None:
             return
+        headers = str(resp.headers).lower()
         
         waf_patterns = [
             # Your original (top tier)
@@ -1134,16 +1728,12 @@ class pubcomPlugin(Plugin):
             await self.send_privmsg(channel, "Usage: !tech <URL>")
             return
         
-        url = arg.strip()
-        if not re.match(r'^https?://', url):
-            url = 'https://' + url
+        url = self._normalize_user_url(arg)
         
-        try:
-            async with self.http_session.get(url, timeout=10, allow_redirects=True) as resp:
-                page_content = (await resp.text()).lower()
-        except Exception as e:
-            await self.send_privmsg(channel, f"Failed to fetch content from {url}: {e}")
+        resp = await self._fetch_user_page(channel, url)
+        if resp is None:
             return
+        page_content = (await resp.text()).lower()
         
         tech_patterns = [
             # Your original CMS
@@ -1209,6 +1799,10 @@ class pubcomPlugin(Plugin):
         arg = arg.strip()
         if not arg:
             await self.send_privmsg(channel, "Usage: !whois <domain|IP|ASN>")
+            return
+        err = await self._ensure_rdap()
+        if err:
+            await self.send_privmsg(channel, f"WHOIS unavailable: {err}. Try again later.")
             return
         try:
             if arg.isdigit():

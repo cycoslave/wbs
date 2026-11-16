@@ -29,7 +29,7 @@ class Console:
             log.warning("No TTY available for console")
             return
 
-        print(f"{self.handle}> Type .help for commands, .quit to exit.")
+        print(f"{self.handle}> Type .help for commands, .die to shut down.")
 
         try:
             with patch_stdout():
@@ -45,8 +45,8 @@ class Console:
 
                     except (EOFError, KeyboardInterrupt):
                         log.info("Console exit signal received (EOF/Ctrl+C)")
+                        # Core shuts the bot down when the console task ends.
                         self.running = False
-                        await self.partyline.handle_input(self.session_id, ".quit")
                         break
 
                     except Exception as e:

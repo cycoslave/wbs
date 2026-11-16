@@ -4,7 +4,7 @@
     "user": "wbs",
     "realname": "WBS IRC Bot",
     "servers": [
-      {"host": "irc.example.com", "port": 6667, "password": null, "ssl": true }
+      {"host": "irc.example.com", "port": 6697, "password": null, "ssl": true }
     ],
     "channels": ["#channel", "#channel2"]
   },
@@ -12,8 +12,8 @@
     {
       "handle": "owner",
       "password": {
-        "pass": "please_use_encryption",
-        "encryption": "none"
+        "pass": "$2b$12$examplehashexamplehashexamplehashexamplehashexampleha1",
+        "encryption": "bcrypt"
       },
       "hosts": ["owner!user@host.example.com"],
       "access": [
@@ -36,36 +36,55 @@
       "id": 1,
       "name": "default"
   },
+  "botnet": {
+      "address": "your.host.example",
+      "listen_host": "127.0.0.1",
+      "listen_port": 3333,
+      "relay_from": {}
+  },
   "db": {
     "path": "db/wbs.db"
   },
   "logging": {
     "level": "INFO",
-    "file": "logs/wbs.log"
+    "file": "logs/wbs.log",
+    "max_bytes": 10485760,
+    "backup_count": 5
   },
   "plugins": [],
+  "pubcom": {
+    "channels": []
+  },
   "dcc": {
     "enabled": true,
     "mode": "auto",
     "public_ip": "",
+    "listen_host": "127.0.0.1",
     "port_min": 40000,
     "port_max": 40100,
-    "max_sessions": 10
+    "max_sessions": 10,
+    "max_pending": 5,
+    "rate_limit": 3,
+    "global_rate_limit": 20,
+    "allow_networks": [],
+    "auth_timeout": 60,
+    "auth_attempts": 3
   },
   "update": {
     "host": "https://wbsupdate.wcksoft.com",
+    "signing_keys": [],
     "auto_updates": false
   },
   "settings": {
     "pid_file": "wbs.pid",
-    "botnet": false,
-    "listen_host": "127.0.0.1",
-    "listen_port": 3333,
     "ssl": true,
     "ssl_verify": true,
+    "ssl_ca_file": null,
+    "ssl_fingerprint": null,
     "certfile": "wbs.crt",
     "keyfile":  "wbs.key",
     "auto_update": false,
+    "msg_commands": false,
     "irc_throttle_ms": 100,
     "access_mode": "blacklist",
     "max_failures": 5,

@@ -4,26 +4,26 @@ WBS Game: horseracing.py
 version: 0.1.0
 by: cyco
 Description: Horse Racing for WBS.
-             Bot announces a field of 4–6 horses with odds, players !bet <horse> <amount>,
+             Bot announces a field of 4–6 horses with odds, players !horsebet <horse> <amount>,
              then the race plays out turn-by-turn with flavour commentary.
              Winners are paid out at posted odds. Bankrolls persist per nick.
 
 Flow:
   Partyline: .gstart horseracing channel #chan    → makes game available (idle)
   In-channel:
-    !horse                      - Open betting for next race.
+    !horserace                  - Open betting for next race.
     !horsebet <horse> <amount>  - Place a bet on a horse by number or name.
     !horses                     - Re-list the current field with odds.
     !horsestats [nick]          - Show nick's lifetime earnings and wins.
     !horsetop                   - Top 5 earners.
     !horsehelp                  - Show commands.
-    !horsestop                  - Chan-op ends the game session.
+    !horserace stop             - Chan-op ends the game session.
 """
 
 import asyncio
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from . import Game, GameSession
@@ -108,6 +108,10 @@ class HorseRacingGame(Game):
     name    = "horseracing"
     version = "0.1.0"
     scopes  = {"channel"}
+    SETTINGS = {
+        "starting_cash": (int, 1, 10**9),
+        "min_bet":       (int, 1, 10**9),
+    }
 
     TABLE_SQL = [
         """
@@ -141,6 +145,12 @@ class HorseRacingGame(Game):
 
     _UNSERIALIZABLE = (asyncio.Lock, asyncio.Event, asyncio.Task, asyncio.Semaphore)
     _cmd_cooldowns: Dict[str, Dict[str, float]] = {}
+    # GAM-8: an open race (field + bets) survives a restart.
+    RESTORE_STATE = True
+    RESUME_PHASES = {
+        "betting": "_betting_countdown",
+        "racing":  "_run_race",
+    }
 
     async def load(self):
         await super().load()
@@ -207,7 +217,10 @@ class HorseRacingGame(Game):
             f"You have \x02{BET_SECS}s\x02 to bet! "
             f"Usage: \x02!horsebet <#> <amount>\x02  (min: ${cfg['min_bet']})"
         )
+        await self._betting_countdown(session)
 
+    async def _betting_countdown(self, session: GameSession):
+        chan = session.target
         # Countdown with a single warning
         try:
             await asyncio.sleep(BET_SECS - BET_WARN_SECS)
@@ -356,7 +369,7 @@ class HorseRacingGame(Game):
         await self.say(
             session.target,
             "[Horse Racing] Race complete. "
-            "\x02!horserace\x02 to run another  |  \x02!horsestop\x02 to close the track."
+            "\x02!horserace\x02 to run another  |  \x02!horserace stop\x02 to close the track."
         )
 
     async def on_PUBMSG(self, session: GameSession, nick: str, text: str, event=None):
@@ -593,7 +606,7 @@ class HorseRacingGame(Game):
         await self.say(chan, f"    !horsebet <#> <amount>    - Bet on a horse (min: ${cfg['min_bet']}).")
         await self.say(chan, "    !horsestats [nick]        - Show career stats.")
         await self.say(chan, "    !horsetop                 - Top 5 earners.")
-        await self.say(chan, "    !horsestop                - Close the track (chan-op only).")
+        await self.say(chan, "    !horserace stop           - Close the track (chan-op only).")
 
     async def say(self, target: str, msg: str):
         await self.send_privmsg(target, msg)

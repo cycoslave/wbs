@@ -8,12 +8,14 @@ Description: Channel lock enforcement — sets and holds +i on a channel.
              Re-applies modes if stripped while lock is active.
 """
 
+import re
 import time
 import aiosqlite
 from typing import Dict, Optional
 
 from . import Plugin
 from ..db import get_db
+from ..helper import _valid_channel
 
 ALLOWED_SETTING_COLS = frozenset({"locked", "use_m", "key", "auto_unlock_secs", "locked_by", "locked_at"})
 
@@ -58,6 +60,9 @@ class chanlockPlugin(Plugin):
                 await db.execute(sql)
             await db.commit()
 
+        self.register_command(      # PLG-6
+            "chanlock", self._pl_chanlock, "A",
+            "chanlock <lock|unlock|status|set> <#chan> ... - lock a channel (+i)")
         # Register a periodic timer to handle auto-unlock and re-enforce locks
         self.core.send_irc({
             'cmd': 'REGISTER_IRC_TIMER',
@@ -70,7 +75,11 @@ class chanlockPlugin(Plugin):
         self.log.info(f"Plugin {self.name} {self.version} loaded")
 
     async def unload(self):
-        """Unload plugin and unregister timer. Lock state persists in DB."""
+        """Unload plugin and unregister timer.
+
+        Lock state and audit log (chanlock_settings, chanlock_audit) persist
+        in the DB across unload/load; only `.plugin purge chanlock` drops them.
+        """
         self.core.send_irc({
             'cmd': 'UNREGISTER_IRC_TIMER',
             'name': 'chanlock'
@@ -114,10 +123,24 @@ class chanlockPlugin(Plugin):
         nick = event.get('nick')
         chan = event.get('channel')
 
-        # Only care about the bot's own JOIN
-        if not self.core.irc or nick != self.core.irc.nick:
+        # Only care about the bot's own JOIN. Core has no IRC client object;
+        # it tracks its live nick in core.botname (set on READY, NICK, timers).
+        botname = getattr(self.core, 'botname', None) or ''
+        if not chan or not nick or not botname or nick.lower() != botname.lower():
             return
 
+        await self._restore_on_own_join(chan)
+
+    async def on_NEWCHAN(self, event: dict):
+        """
+        The IRC process reports the bot's OWN join as NEWCHAN (irc.py on_join),
+        not JOIN, so this is the path that actually fires on (re)join.
+        """
+        chan = event.get('channel')
+        if chan:
+            await self._restore_on_own_join(chan)
+
+    async def _restore_on_own_join(self, chan: str):
         cfg = await self._load_settings(chan)
         if cfg['locked']:
             self.log.info(f"[chanlock] Bot joined {chan} — restoring lock")
@@ -157,6 +180,50 @@ class chanlockPlugin(Plugin):
 
         for chan in to_unlock:
             await self._do_unlock(chan, "auto-unlock")
+
+    async def _pl_chanlock(self, handle: str, arg: str) -> str:
+        """Partyline `.chanlock lock|unlock|status|set <#chan> ...` (gate: +A).
+
+        lock <#chan> [m] [key=<word>] [secs=<n>]   set +i (+m, +k, auto-unlock)
+        unlock <#chan>                             remove the lock
+        status <#chan>                             show the lock
+        set <#chan> <use_m|key|auto_unlock_secs> <value>
+        """
+        usage = ("Usage: .chanlock lock <#chan> [m] [key=<word>] [secs=<n>] | "
+                 "unlock <#chan> | status <#chan> | "
+                 "set <#chan> <use_m|key|auto_unlock_secs> <value>")
+        parts = arg.split()
+        if len(parts) < 2:
+            return usage
+        sub, chan, rest = parts[0].lower(), parts[1], parts[2:]
+        if sub not in ("lock", "unlock", "status", "set"):
+            return usage
+        if not _valid_channel(chan):
+            return f"Invalid channel: {chan}"
+        if sub == "status":
+            return await self.status(chan)
+        if sub == "unlock":
+            return await self.unlock(chan, handle)
+        if sub == "set":
+            if len(rest) != 2:
+                return usage
+            if rest[0].lower() == "auto_unlock_secs" and not rest[1].isascii():
+                return "Auto-unlock secs: invalid value."
+            return await self.set(chan, rest[0], rest[1], handle)
+        use_m, key, secs = False, None, 0
+        for token in rest:
+            low = token.lower()
+            if low in ("m", "+m"):
+                use_m = True
+            elif low.startswith("key=") and len(token) > 4:
+                key = token[4:]
+            elif low.startswith("secs=") and token[5:].isascii() and token[5:].isdigit():
+                secs = int(token[5:])
+            else:
+                return usage
+        if key is not None and not re.fullmatch(r"[^\s,:\x00-\x1f\x7f]{1,23}", key):
+            return "Invalid key."
+        return await self.lock(chan, handle, use_m=use_m, key=key, auto_unlock_secs=secs)
 
     async def lock(self, chan: str, nick: str, use_m: bool = False,
                    key: Optional[str] = None, auto_unlock_secs: int = 0) -> str:
@@ -315,10 +382,15 @@ class chanlockPlugin(Plugin):
         if invalid:
             raise ValueError(f"Invalid setting column(s): {invalid}")
 
-        cols = ", ".join(f"{k}=?" for k in kwargs)
+        # Insert the supplied columns too: on a new channel the INSERT succeeds
+        # and ON CONFLICT never runs, so values must not live only in UPDATE.
+        col_names = "".join(f", {k}" for k in kwargs)
+        placeholders = "".join(", ?" for _ in kwargs)
+        cols = ", ".join(f"{k}=excluded.{k}" for k in kwargs)
         async with get_db(self.core.db_path) as db:
             await db.execute(
-                f"INSERT INTO chanlock_settings(channel) VALUES(?) "
+                f"INSERT INTO chanlock_settings(channel{col_names}) "
+                f"VALUES(?{placeholders}) "
                 f"ON CONFLICT(channel) DO UPDATE SET {cols}, "
                 f"updated_at=strftime('%s','now')",
                 (channel, *kwargs.values())

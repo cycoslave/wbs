@@ -3,7 +3,7 @@
 -- =====================================================
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;  -- Better concurrency for multiprocessing
-PRAGMA user_version = 1;    -- Schema version for migrations
+-- Schema version (PRAGMA user_version) is managed by src/db.py migrations.
 
 -- Subnets
 CREATE TABLE IF NOT EXISTS subnets (
@@ -233,6 +233,24 @@ CREATE TABLE IF NOT EXISTS net_auth_failures (
     count    INTEGER NOT NULL DEFAULT 0,
     first_at REAL    NOT NULL,
     last_at  REAL    NOT NULL
+);
+
+-- Botlink auth failures per (address, claimed handle) (NET-13); net_auth_failures
+-- keeps the per-address total.
+CREATE TABLE IF NOT EXISTS net_handle_failures (
+    ip       TEXT    NOT NULL,
+    handle   TEXT    NOT NULL,
+    count    INTEGER NOT NULL DEFAULT 0,
+    first_at REAL    NOT NULL,
+    last_at  REAL    NOT NULL,
+    PRIMARY KEY (ip, handle)
+);
+
+-- `.taskset` overrides for Core registry tasks (NET-9); applied on start.
+CREATE TABLE IF NOT EXISTS task_settings (
+    name     TEXT    NOT NULL PRIMARY KEY,
+    enabled  INTEGER NOT NULL DEFAULT 1,
+    interval REAL
 );
 
 -- =====================================================
